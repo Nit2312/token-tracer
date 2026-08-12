@@ -38,9 +38,33 @@ export function databaseUrl(): string | null {
   return process.env.DATABASE_URL || process.env.NEON_CONNECTION_STRING || null;
 }
 
+let warnedAboutDirectConnection = false;
+
 export function requireDatabaseUrl(): string {
   const url = databaseUrl();
   if (!url) throw new Error('DATABASE_URL or NEON_CONNECTION_STRING is required');
+
+  // On Vercel, each concurrent Fluid Compute instance opens its own pg.Pool —
+  // a direct (non-pooled) Neon endpoint runs out of native Postgres
+  // connections at a fraction of the concurrency a PgBouncer pooler endpoint
+  // can sustain. Warn loudly rather than fail silently under load.
+  if (!warnedAboutDirectConnection && process.env.VERCEL === '1') {
+    try {
+      const host = new URL(url).hostname;
+      if (host.includes('neon.tech') && !host.includes('-pooler')) {
+        warnedAboutDirectConnection = true;
+        console.error(
+          `[db config warning] DATABASE_URL host "${host}" does not look like a Neon pooled ` +
+          `("-pooler") endpoint. Under Vercel Fluid Compute, many concurrent instances each open ` +
+          `their own connection pool — a direct endpoint will exhaust Neon's connection limit ` +
+          `well before a pooled one does. Use the "-pooler" connection string from the Neon dashboard.`
+        );
+      }
+    } catch {
+      // Malformed URL — let the pg client surface the real error downstream.
+    }
+  }
+
   return url;
 }
 

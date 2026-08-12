@@ -17,7 +17,11 @@ export function getPool(): pg.Pool {
     globalForDb.conn = new Pool({
       connectionString: url,
       ssl: { rejectUnauthorized: false },
-      max: 10,
+      // Kept small: Fluid Compute runs many concurrent instances, each with its
+      // own pool, so pool size multiplies by instance count against Neon's
+      // connection limit — rely on the Neon pooler to fan this in, not a large
+      // per-instance pool. See lib/team/env.ts's requireDatabaseUrl() check.
+      max: 5,
       connectionTimeoutMillis: 20000, // Allow 20s for Neon compute endpoint wake up
       idleTimeoutMillis: 30000,
     });
