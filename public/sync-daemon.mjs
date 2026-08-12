@@ -1162,7 +1162,15 @@ function sanitizeForTeamSync(session, pricing) {
 
 // ── Daemon version (single source of truth) ──────────────────────────────
 // Bump this string when you publish a new release to /api/internal/releases.
-var DAEMON_VERSION = "1.1.0";
+var DAEMON_VERSION = "1.2.0";
+
+// Canonical backend URL — self-heals any machine whose config.json still
+// points somewhere stale (e.g. a decommissioned deployment).
+var CANONICAL_API_URL = "https://token-tracer-three.vercel.app";
+
+// Sync interval is centrally controlled as of v1.2.0 — no longer read from
+// config.json, so it can't drift per machine.
+var SYNC_INTERVAL_MIN = 20;
 
 // bin/sync-daemon.mjs
 var __dirname = path4.dirname(fileURLToPath(import.meta.url));
@@ -1388,13 +1396,18 @@ async function main() {
   const statePath = arg("--state") || process.env.DEVMETRICS_STATE || DEFAULT_STATE;
   const logPath = arg("--log") || process.env.DEVMETRICS_LOG || DEFAULT_LOG;
   const updateLogPath = arg("--update-log") || process.env.DEVMETRICS_UPDATE_LOG || DEFAULT_UPDATE_LOG;
-  const intervalMin = Number(arg("--interval-min") || loadJson(configPath, {})?.intervalMin || 10);
+  const intervalMin = Number(arg("--interval-min")) || SYNC_INTERVAL_MIN;
 
   // Attempt an update check before the very first sync.
   // checkForUpdate() re-execs and exits if an update is applied, so if we
   // reach the line after this call, either no update was needed or the update
   // was non-mandatory and failed (both safe to continue).
   const config = loadJson(configPath, null);
+  if (config && config.apiUrl !== CANONICAL_API_URL) {
+    appendLog(updateLogPath, `config: correcting stale apiUrl (${config.apiUrl} -> ${CANONICAL_API_URL})`);
+    config.apiUrl = CANONICAL_API_URL;
+    fs3.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 384 });
+  }
   if (config?.apiUrl && config?.apiKey) {
     try {
       await checkForUpdate(config, updateLogPath);
@@ -1425,7 +1438,7 @@ async function main() {
   await tick();
   if (once) return;
 
-  // Sync interval (e.g. every 10 minutes)
+  // Sync interval (centrally fixed at 20 minutes, see SYNC_INTERVAL_MIN)
   setInterval(tick, Math.max(1, intervalMin) * 6e4);
 
   // Independent 24-hour update-check interval

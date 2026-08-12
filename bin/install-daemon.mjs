@@ -23,7 +23,7 @@ const arg = (name) => {
 const apiUrl = arg('--api-url') || process.env.TEAM_API_URL;
 const apiKey = arg('--api-key') || process.env.TEAM_API_KEY;
 const serviceName = arg('--service-name') || 'com.company.devmetrics';
-const intervalMin = Number(arg('--interval-min') || 10);
+const intervalMin = Number(arg('--interval-min') || 20);
 const nodeBin = arg('--node') || process.execPath;
 
 if (!apiUrl || !apiKey) {

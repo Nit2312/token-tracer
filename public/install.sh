@@ -10,13 +10,13 @@
 # Optional flags:
 #   --key   / -k   API key (required)
 #   --server / -s  Backend URL (default: https://token-tracer-three.vercel.app)
-#   --interval     Sync interval in minutes (default: 10)
+#   --interval     Sync interval in minutes (default: 20)
 
 set -euo pipefail
 
 SERVER_URL="https://token-tracer-three.vercel.app"
 API_KEY=""
-INTERVAL_MIN="10"
+INTERVAL_MIN="20"
 SERVICE_LABEL="com.token-tracer.daemon"
 
 # Parse arguments
