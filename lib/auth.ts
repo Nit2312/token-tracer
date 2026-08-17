@@ -189,18 +189,11 @@ export async function resetFailedLogin(userId: string): Promise<void> {
   );
 }
 
-/** Fetch the active API key for a member (first non-revoked key). */
-export async function getMemberApiKey(memberId: string): Promise<string | null> {
-  const { rows } = await query(
-    `SELECT k.key_hash FROM member_keys k
-     WHERE k.member_id = $1 AND k.revoked_at IS NULL
-     ORDER BY k.created_at ASC LIMIT 1`,
-    [memberId],
-  );
-  // key_hash is stored, not the raw key — we can't recover the raw key from hash.
-  // Return null here; the raw key should be stored/displayed at creation time only.
-  // We will instead expose it via a separate endpoint that regenerates if needed.
-  return rows[0]?.key_hash ? null : null; // placeholder — raw key not recoverable
+/** @deprecated Raw API keys are not stored — they are only shown once at creation time. */
+export async function getMemberApiKey(_memberId: string): Promise<string | null> {
+  // Raw keys are never stored — only their SHA-256 hash is kept in member_keys.
+  // This function intentionally returns null. Use the creation-time response instead.
+  return null;
 }
 
 /**
@@ -209,6 +202,7 @@ export async function getMemberApiKey(memberId: string): Promise<string | null> 
  * - If admin, strictly overrides and returns their associated teamId.
  * - Returns null if unauthorized or missing permissions.
  */
+
 export function getAuthorizedTeamId(req: any, paramTeamId: string | null | undefined): string | null {
   const session = getSessionFromCookie(req.headers.get('cookie'));
   if (session) {
@@ -219,7 +213,8 @@ export function getAuthorizedTeamId(req: any, paramTeamId: string | null | undef
       return session.teamId || paramTeamId || null;
     }
     if (session.role === 'user') {
-      return session.teamId || paramTeamId || null;
+      // BUG-04 fix: users must NEVER access another team's data via a param override
+      return session.teamId || null;
     }
   }
 

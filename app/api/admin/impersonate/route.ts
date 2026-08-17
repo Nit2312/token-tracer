@@ -11,6 +11,7 @@ import {
   encodeSessionToken,
   buildImpersonationCookie,
   getRawImpersonationToken,
+  IMPERSONATION_COOKIE,
   type SessionPayload,
 } from '@/lib/auth';
 import { query } from '@/lib/team/db';
@@ -39,8 +40,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Only superadmin can impersonate users' }, { status: 403 });
     }
 
-    // Prevent nested impersonation
-    if (session.impersonatedBy) {
+    // Prevent nested impersonation — check both the session flag AND the presence of
+    // the backup cookie, since a stale session token might not carry impersonatedBy
+    // but a backup cookie from a prior session could still exist.
+    const cookieHeaderForCheck = req.headers.get('cookie') || '';
+    const hasBackupCookie = cookieHeaderForCheck.split(';').some((p) => p.trim().startsWith(`${IMPERSONATION_COOKIE}=`));
+    if (session.impersonatedBy || hasBackupCookie) {
       return NextResponse.json({ error: 'Cannot impersonate while already impersonating. Return to your superadmin session first.' }, { status: 403 });
     }
 

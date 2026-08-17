@@ -970,6 +970,25 @@ export default async function AdminPage() {
             </div>
           </div>
 
+          {/* BUG-09: Shown by JS when logged in as the static 'superadmin' account */}
+          <div
+            id="admin-profile-static-note"
+            hidden
+            style={{
+              background: 'rgba(251, 191, 36, 0.12)',
+              border: '1px solid rgba(251, 191, 36, 0.35)',
+              borderRadius: '6px',
+              padding: '10px 14px',
+              fontSize: '12.5px',
+              color: 'var(--muted)',
+              marginBottom: '12px',
+            }}
+          >
+            ⚠️ The static <code>superadmin</code> account cannot update its display name or
+            password here. Those are controlled by the <code>SUPERADMIN_PASSWORD</code> environment
+            variable on the server.
+          </div>
+
           <div className="form-group">
             <label htmlFor="admin-profile-display-name">
               <strong>Display Name</strong>

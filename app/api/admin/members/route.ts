@@ -102,30 +102,38 @@ export async function PUT(req: NextRequest) {
 
     // Sync team_members if teamIds provided
     if (teamIds) {
-      // Add newly selected teams
-      for (const tId of teamIds) {
-        if (tId) {
-          await query(
-            `INSERT INTO team_members (team_id, member_id, role)
-             VALUES ($1, $2, 'member')
-             ON CONFLICT (team_id, member_id) DO NOTHING`,
-            [tId, id],
-          );
+      let effectiveTeamIds = teamIds.filter(Boolean);
+
+      // BUG-06 fix: if all teams were deselected, fall back to the Independent team
+      // so the member always has a home team.
+      if (effectiveTeamIds.length === 0) {
+        let independentTeamRes = await query("SELECT id FROM teams WHERE name = 'Independent' LIMIT 1");
+        let independentTeamId = independentTeamRes.rows[0]?.id;
+        if (!independentTeamId) {
+          const newTeam = await query("INSERT INTO teams (name) VALUES ('Independent') RETURNING id");
+          independentTeamId = newTeam.rows[0].id;
         }
+        effectiveTeamIds = [independentTeamId];
       }
 
-      // Remove unselected teams
-      if (teamIds.length > 0) {
+      // Add newly selected teams
+      for (const tId of effectiveTeamIds) {
         await query(
-          `DELETE FROM team_members WHERE member_id = $1 AND NOT (team_id = ANY($2::uuid[]))`,
-          [id, teamIds],
-        );
-      } else {
-        await query(
-          `DELETE FROM team_members WHERE member_id = $1`,
-          [id],
+          `INSERT INTO team_members (team_id, member_id, role)
+           VALUES ($1, $2, 'member')
+           ON CONFLICT (team_id, member_id) DO NOTHING`,
+          [tId, id],
         );
       }
+
+      // Remove teams that are no longer selected
+      await query(
+        `DELETE FROM team_members WHERE member_id = $1 AND NOT (team_id = ANY($2::uuid[]))`,
+        [id, effectiveTeamIds],
+      );
+
+      // Keep members.team_id in sync with the primary (first) team
+      await query(`UPDATE members SET team_id = $2 WHERE id = $1`, [id, effectiveTeamIds[0]]);
     }
 
     return NextResponse.json({ member: rows[0] });

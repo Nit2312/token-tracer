@@ -66,6 +66,21 @@ function setupAdminProfileHandlers() {
       errEl.textContent = '';
     }
 
+    const isStaticAdmin = !currentAdminSession?.userId?.match?.(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    );
+
+    // BUG-09 fix: superadmin uses a static userId ('superadmin'), not a UUID.
+    // Profile changes are unsupported for static sessions — show a clear notice.
+    const profileNote = $('#admin-profile-static-note');
+    if (profileNote) profileNote.hidden = !isStaticAdmin;
+    const profileInputs = dialog.querySelectorAll('input, button[type="submit"]');
+    if (isStaticAdmin) {
+      profileInputs.forEach(el => { el.disabled = true; });
+    } else {
+      profileInputs.forEach(el => { el.disabled = false; });
+    }
+
     dialog.showModal();
   });
 
@@ -286,8 +301,7 @@ function renderUsers() {
       if (u.teams && u.teams.length > 0) {
         return u.teams.some(t => t.id === userFilterTeam);
       }
-      return false; // Assuming single team structure doesn't apply if teams array is missing, but if it does we'd check u.team_name. Let's strictly check teams array or string.
-      // Wait, let's just check the string representation to be safe, or t.id. The dropdown uses t.id.
+      return false;
     });
   }
 
@@ -605,6 +619,9 @@ async function handleFormSubmit(e) {
         if (data.installCommandWin) {
           msg += `<b>🪟 Windows Command:</b><br><pre style="background: rgba(0,0,0,0.2); padding: 8px; border-radius: 4px; overflow-x: auto; font-family: monospace; font-size: 12px; margin: 4px 0 12px 0; user-select: all;">${data.installCommandWin}</pre>`;
         }
+      // BUG-11/17 fix: store just the API key in a data attribute so the copy
+        // button can read it cleanly without HTML content.
+        val.dataset.apiKey = data.apiKey || '';
         val.innerHTML = msg;
         banner.hidden = false;
       }
@@ -1154,7 +1171,8 @@ async function syncAllTeamsAndMembers() {
 // Tabs
 function switchTab(tabId) {
   currentTab = tabId;
-  document.querySelectorAll('.admin-sidebar-nav button').forEach(b => {
+  // BUG-10 fix: select both button and <a> nav items so all get the active state.
+  document.querySelectorAll('.admin-sidebar-nav button, .admin-sidebar-nav a').forEach(b => {
     const active = b.dataset.tab === tabId;
     b.classList.toggle('active', active);
     b.setAttribute('aria-selected', String(active));
@@ -1307,7 +1325,10 @@ function closeMobileNav() {
     $('#new-password-banner').hidden = true;
   });
   $('#new-password-copy')?.addEventListener('click', () => {
-    const txt = $('#new-password-value').textContent || '';
+    // BUG-11 fix: copy only the raw API key stored in the data attribute,
+    // not the entire innerHTML block which includes install commands.
+    const val = $('#new-password-value');
+    const txt = val?.dataset.apiKey || val?.textContent || '';
     navigator.clipboard.writeText(txt).then(() => {
       $('#new-password-copy').textContent = 'Copied!';
       setTimeout(() => { $('#new-password-copy').textContent = 'Copy'; }, 2000);
@@ -1318,6 +1339,11 @@ function closeMobileNav() {
   // Lazy-load analytics data the first time each tab is activated.
   // Re-fetch whenever the range-select changes.
   setupAnalyticsTabs();
+
+  // BUG-16 fix: bind form handlers here in the main IIFE where timing is
+  // controlled and the DOM is guaranteed to be ready, rather than via setTimeout.
+  bindReleasesForm();
+  bindAuditLogFilters();
 })();
 
 
@@ -2264,9 +2290,9 @@ function bindReleasesForm() {
 }
 
 // Bind form setup when script runs or DOM is ready
-if (typeof window !== 'undefined') {
-  setTimeout(bindReleasesForm, 0);
-}
+// NOTE: bindReleasesForm() and bindAuditLogFilters() are now called from the
+// main async IIFE (see above) where timing is guaranteed. The old setTimeout
+// fallbacks have been removed.
 
 // ── Audit Log ────────────────────────────────────────────────────────────────
 const AUDIT_ACTION_LABELS = {

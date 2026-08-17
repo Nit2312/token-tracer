@@ -80,17 +80,33 @@ export function superadminPassword(): string | null {
 
 export function sessionSecret(): string {
   loadEnv();
-  const secret = process.env.SESSION_SECRET || process.env.ADMIN_PASSWORD;
-  if (!secret) {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error(
-        'CRITICAL SECURITY ERROR: SESSION_SECRET or ADMIN_PASSWORD must be configured in production mode. ' +
-        'Refusing to fallback to insecure default secret.'
+  const secret = process.env.SESSION_SECRET;
+  if (secret) return secret;
+
+  // BUG-14 fix: SESSION_SECRET is preferred over ADMIN_PASSWORD.
+  // Using ADMIN_PASSWORD as fallback is kept for backward compatibility, but
+  // operators should set SESSION_SECRET separately so that rotating the admin
+  // password doesn't silently invalidate all active user sessions.
+  const adminPwd = process.env.ADMIN_PASSWORD;
+  if (adminPwd) {
+    if (process.env.NODE_ENV !== 'production') {
+      // Only warn in dev to avoid noisy logs in prod
+      console.warn(
+        '[security] SESSION_SECRET is not set. Falling back to ADMIN_PASSWORD as the session ' +
+        'signing secret. Set SESSION_SECRET to a separate random value so that rotating ' +
+        'ADMIN_PASSWORD does not invalidate all active sessions.'
       );
     }
-    return 'dev-insecure-change-me';
+    return adminPwd;
   }
-  return secret;
+
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'CRITICAL SECURITY ERROR: SESSION_SECRET or ADMIN_PASSWORD must be configured in production mode. ' +
+      'Refusing to fallback to insecure default secret.'
+    );
+  }
+  return 'dev-insecure-change-me';
 }
 
 export function cronSecret(): string | null {

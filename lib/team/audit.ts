@@ -25,7 +25,9 @@ export async function recordAuditEvent(event: AuditEventInput): Promise<void> {
         event.action,
         event.targetType || null,
         event.targetId || null,
-        event.metadata ? JSON.stringify(event.metadata) : null,
+        // BUG-19 fix: pass the object directly so pg casts it to JSONB correctly.
+        // JSON.stringify would double-serialize if the column is jsonb type.
+        event.metadata || null,
       ],
     );
   } catch (err) {

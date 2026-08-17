@@ -30,7 +30,7 @@ export async function memberFromAuthHeader(authHeader: string | undefined | null
               (SELECT tm.team_id 
                FROM team_members tm 
                WHERE tm.member_id = m.id 
-               ORDER BY (tm.team_id != 'a315d907-f5df-4a7c-9178-ed7e8954c243') DESC, tm.created_at ASC 
+               ORDER BY tm.created_at ASC 
                LIMIT 1),
               m.team_id
             ) AS team_id,

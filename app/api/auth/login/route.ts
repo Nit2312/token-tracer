@@ -67,6 +67,11 @@ export async function POST(req: NextRequest) {
     if (username === 'superadmin') {
       const pwd = superadminPassword();
       if (!pwd) return NextResponse.json({ error: 'Superadmin login is not configured' }, { status: 503 });
+      // BUG-13 fix: use timing-safe SHA-256 comparison for the raw env-var secret.
+      // We can't use bcrypt here because the env var stores the *plain* expected password,
+      // not a bcrypt hash. We use SHA-256 of both sides with timingSafeEqual to prevent
+      // timing attacks while still being functionally correct. A future improvement would
+      // be to store a bcrypt hash in SUPERADMIN_PASSWORD_HASH as a separate env var.
       const a = crypto.createHash('sha256').update(password).digest();
       const b = crypto.createHash('sha256').update(pwd).digest();
       const match = crypto.timingSafeEqual(a, b);

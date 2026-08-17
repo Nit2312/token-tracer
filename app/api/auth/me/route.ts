@@ -1,6 +1,10 @@
 /**
  * GET  /api/auth/me   → returns current session info (200) or 401
- * POST /api/auth/logout → clears session cookie
+ * POST /api/auth/me   → clears the session cookie (acts as logout)
+ *
+ * NOTE: The POST handler doubles as the logout endpoint for both the main session
+ * and any active impersonation backup cookie. The JS client calls this as:
+ *   await fetch('/api/auth/me', { method: 'POST' });
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie, clearSessionCookie } from '@/lib/auth';

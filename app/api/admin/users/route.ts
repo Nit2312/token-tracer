@@ -380,7 +380,7 @@ export async function PUT(req: NextRequest) {
         display_name = COALESCE($3, display_name),
         role         = COALESCE($4, role),
         active       = COALESCE($5, active),
-        member_id    = $6,
+        member_id    = COALESCE($6, member_id),
         team_id      = COALESCE($7, team_id),
         api_key      = COALESCE($8, api_key),
         updated_at   = now()
@@ -416,8 +416,30 @@ export async function DELETE(req: NextRequest) {
   const id = req.nextUrl.searchParams.get('id');
   if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
 
+  // BUG-15: Prevent superadmin from deleting their own account
+  const actingSession = getSessionFromCookie(req.headers.get('cookie'));
+  if (actingSession?.userId === id) {
+    return NextResponse.json({ error: 'You cannot delete your own account' }, { status: 400 });
+  }
+
   try {
+    const { rows: userRows } = await query('SELECT member_id FROM users WHERE id = $1', [id]);
+    const memberId = userRows[0]?.member_id || null;
+
     const { rowCount } = await query('DELETE FROM users WHERE id = $1', [id]);
+
+    // If this user was the ONLY user linked to that member, delete the member too.
+    // member_keys and team_members will cascade-delete automatically.
+    if (memberId) {
+      const { rows: otherUsers } = await query(
+        'SELECT id FROM users WHERE member_id = $1 LIMIT 1',
+        [memberId],
+      );
+      if (otherUsers.length === 0) {
+        await query('DELETE FROM members WHERE id = $1', [memberId]);
+      }
+    }
+
     return NextResponse.json({ ok: true, deleted: (rowCount || 0) > 0 });
   } catch (err) {
     return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
