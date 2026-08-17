@@ -85,9 +85,9 @@ export default async function AdminPage() {
             <button type="button" id="tabbtn-usage" className="tab-btn" data-tab="tab-usage" role="tab" aria-selected="false" aria-controls="tab-usage" tabIndex={-1}>
               <span className="nav-icon" aria-hidden="true">📈</span> Usage &amp; Growth
             </button>
-            <Link href="/admin/research" id="tabbtn-research" className="tab-btn">
+            <a href="/admin/research" id="tabbtn-research" className="tab-btn">
               <span className="nav-icon" aria-hidden="true">🔍</span> Research Analytics
-            </Link>
+            </a>
             <button type="button" id="tabbtn-prompts" className="tab-btn" data-tab="tab-prompts" role="tab" aria-selected="false" aria-controls="tab-prompts" tabIndex={-1}>
               <span className="nav-icon" aria-hidden="true">📝</span> Prompt Explorer
             </button>

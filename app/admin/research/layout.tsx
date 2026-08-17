@@ -33,9 +33,9 @@ export default async function ResearchLayout({ children }: { children: React.Rea
     <div className="min-h-screen bg-page text-ink font-body">
       <div className="block border-b border-border bg-surface">
         <div className="mx-auto flex max-w-[1400px] items-center gap-4 px-5 py-3">
-          <Link href="/admin" className="text-xs text-muted hover:text-ink">
-            ← Admin
-          </Link>
+          <a href="/admin" className="text-xs font-semibold text-brand hover:underline">
+            ← Admin Dashboard
+          </a>
           <span className="text-sm font-medium text-ink">Research Analytics</span>
         </div>
         <div className="mx-auto flex max-w-[1400px] gap-1 overflow-x-auto px-5 pb-2">

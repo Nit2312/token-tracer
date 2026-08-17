@@ -333,6 +333,26 @@ export async function PUT(req: NextRequest) {
           );
         }
       }
+
+      // Remove unselected teams
+      if (teamIds.length > 0) {
+        await query(
+          `DELETE FROM team_members WHERE member_id = $1 AND NOT (team_id = ANY($2::uuid[]))`,
+          [finalMemberId, teamIds],
+        );
+      } else {
+        await query(
+          `DELETE FROM team_members WHERE member_id = $1`,
+          [finalMemberId],
+        );
+      }
+
+      // Update primary team_id on the members table
+      const primaryMemberTeamId = teamIds[0] || finalTeamId || null;
+      await query(
+        `UPDATE members SET team_id = $2 WHERE id = $1`,
+        [finalMemberId, primaryMemberTeamId],
+      );
     }
 
     // Self-healing: generate API key if missing and member is linked

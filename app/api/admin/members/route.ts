@@ -89,9 +89,11 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: 'id and displayName are required' }, { status: 400 });
     }
 
+    const primaryTeamId = (teamIds && teamIds.length > 0) ? teamIds[0] : (teamId || null);
+
     const { rows } = await query(
-      `UPDATE members SET display_name = $2, team_id = COALESCE($3, team_id) WHERE id = $1 RETURNING id, display_name, team_id`,
-      [id, displayName, teamId || (teamIds && teamIds[0]) || null]
+      `UPDATE members SET display_name = $2, team_id = $3 WHERE id = $1 RETURNING id, display_name, team_id`,
+      [id, displayName, primaryTeamId]
     );
 
     if (!rows[0]) {
@@ -115,8 +117,13 @@ export async function PUT(req: NextRequest) {
       // Remove unselected teams
       if (teamIds.length > 0) {
         await query(
-          `DELETE FROM team_members WHERE member_id = $1 AND team_id NOT = ANY($2::uuid[])`,
+          `DELETE FROM team_members WHERE member_id = $1 AND NOT (team_id = ANY($2::uuid[]))`,
           [id, teamIds],
+        );
+      } else {
+        await query(
+          `DELETE FROM team_members WHERE member_id = $1`,
+          [id],
         );
       }
     }
