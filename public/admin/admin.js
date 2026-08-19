@@ -2562,6 +2562,47 @@ function renderInfraHealth(data) {
 
 function bindInfraEvents() {
   $('#infra-refresh-btn')?.addEventListener('click', () => loadInfraHealth());
+
+  const pruneBtn = $('#run-rollup-prune-btn');
+  if (pruneBtn) {
+    pruneBtn.addEventListener('click', async () => {
+      const origText = pruneBtn.innerHTML;
+      pruneBtn.disabled = true;
+      pruneBtn.innerHTML = '⏳ Running Rollup &amp; Pruning…';
+
+      try {
+        const res = await fetch('/api/internal/rollup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok || data.ok === false) {
+          throw new Error(data.errors?.join(', ') || data.error || `HTTP ${res.status}`);
+        }
+
+        const p = data.pruning || {};
+        const msg = `✅ Rollup & Prune finished in ${data.elapsed_ms}ms! (Nullified: ${p.nullifiedEventsOlderThan7d || 0} events, Deleted: ${p.deletedSessionsOlderThan30d || 0} old sessions)`;
+        if (typeof showToast === 'function') {
+          showToast(msg, 'success');
+        } else {
+          alert(msg);
+        }
+
+        // Instantly refresh infrastructure metrics
+        await loadInfraHealth();
+      } catch (err) {
+        const errStr = `Rollup failed: ${err.message}`;
+        if (typeof showToast === 'function') {
+          showToast(errStr, 'error');
+        } else {
+          alert(errStr);
+        }
+      } finally {
+        pruneBtn.disabled = false;
+        pruneBtn.innerHTML = origText;
+      }
+    });
+  }
 }
 if (typeof window !== 'undefined') {
   setTimeout(bindInfraEvents, 0);

@@ -522,6 +522,9 @@ export default async function AdminPage() {
                 <span className="admin-tab-sub">Real-time Neon database storage, Vercel invocation limits &amp; compute telemetry</span>
               </div>
               <div className="admin-header-actions">
+                <button type="button" id="run-rollup-prune-btn" className="hbtn primary" title="Pre-compute rollups and execute rolling data pruning immediately">
+                  ⚡ Run Rollup &amp; Prune Now
+                </button>
                 <button type="button" id="infra-refresh-btn" className="hbtn" title="Refresh metrics">
                   🔄 Refresh
                 </button>

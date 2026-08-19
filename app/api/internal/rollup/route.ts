@@ -171,7 +171,7 @@ async function runRollup(): Promise<NextResponse> {
       SELECT
         ie.created_at::date                      AS day,
         ie.member_id::text                       AS daemon_id,
-        ie.team_id::text                         AS org_id,
+        COALESCE(MAX(ie.team_id::text), 'default') AS org_id,
         MAX(ie.created_at)                       AS last_heartbeat,
         COUNT(*) FILTER (WHERE ie.status = 'ok')::int         AS batches_received,
         COUNT(*) FILTER (WHERE ie.status != 'ok')::int        AS batches_failed,
@@ -180,9 +180,10 @@ async function runRollup(): Promise<NextResponse> {
         0                                        AS sanitize_errors
       FROM ingest_events ie
       LEFT JOIN daily_lag dl ON dl.member_id = ie.member_id AND dl.day = ie.created_at::date
-      WHERE ie.created_at::date <= CURRENT_DATE
-      GROUP BY ie.created_at::date, ie.member_id, ie.team_id
+      WHERE ie.created_at::date <= CURRENT_DATE AND ie.member_id IS NOT NULL
+      GROUP BY ie.created_at::date, ie.member_id::text
       ON CONFLICT (day, daemon_id) DO UPDATE SET
+        org_id                  = EXCLUDED.org_id,
         last_heartbeat          = EXCLUDED.last_heartbeat,
         batches_received        = EXCLUDED.batches_received,
         batches_failed          = EXCLUDED.batches_failed,
