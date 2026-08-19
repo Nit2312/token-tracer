@@ -127,8 +127,7 @@ async function runSync(configPath, statePath, logPath) {
 async function main() {
   const configPath = arg('--config') || process.env.DEVMETRICS_CONFIG || DEFAULT_CONFIG;
   const statePath = arg('--state') || process.env.DEVMETRICS_STATE || DEFAULT_STATE;
-  const logPath = arg('--log') || process.env.DEVMETRICS_LOG || DEFAULT_LOG;
-  const intervalMin = Number(arg('--interval-min') || loadJson(configPath, {})?.intervalMin || 10);
+  const intervalMin = Number(arg('--interval-min') || loadJson(configPath, {})?.intervalMin || 120);
 
   const tick = async () => {
     try {
@@ -141,7 +140,16 @@ async function main() {
   await tick();
   if (once) return;
 
-  setInterval(tick, Math.max(1, intervalMin) * 60_000);
+  const scheduleNextTick = () => {
+    const baseMs = Math.max(1, intervalMin) * 60_000;
+    const jitterMs = (Math.random() * 30 - 15) * 60_000; // ±15 minutes
+    const delay = Math.max(60_000, baseMs + jitterMs);
+    setTimeout(async () => {
+      await tick();
+      scheduleNextTick();
+    }, delay);
+  };
+  scheduleNextTick();
 }
 
 main().catch((err) => {

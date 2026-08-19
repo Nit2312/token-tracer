@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import { query } from './db';
 import { generateApiKey, hashApiKey } from './auth';
 import { hashPassword } from '@/lib/auth';
+import { statsCache } from './cache';
 
 interface StatsOptions {
   from?: string | null;
@@ -59,7 +60,9 @@ export async function buildTeamStats(
     };
   }
 
-  const params: unknown[] = [teamId];
+  const cacheKey = `team_stats_${teamId}_${from || ''}_${to || ''}_${memberId || ''}_${minTokens || ''}_${maxTokens || ''}_${source || ''}`;
+  return statsCache.getOrSet(cacheKey, 60, async () => {
+    const params: unknown[] = [teamId];
   let dateFilter = '';
 
   if (from) {
@@ -550,6 +553,7 @@ export async function buildTeamStats(
     memberModels,
     totals,
   };
+  });
 }
 
 /** Create a member + API key for an existing team and record in team_members. */

@@ -1169,8 +1169,8 @@ var DAEMON_VERSION = "1.2.0";
 var CANONICAL_API_URL = "https://token-tracer-three.vercel.app";
 
 // Sync interval is centrally controlled as of v1.2.0 — no longer read from
-// config.json, so it can't drift per machine.
-var SYNC_INTERVAL_MIN = 20;
+// config.json, so it can't drift per machine (now 2 hours / 120 mins).
+var SYNC_INTERVAL_MIN = 120;
 
 // bin/sync-daemon.mjs
 var __dirname = path4.dirname(fileURLToPath(import.meta.url));
@@ -1438,8 +1438,17 @@ async function main() {
   await tick();
   if (once) return;
 
-  // Sync interval (centrally fixed at 20 minutes, see SYNC_INTERVAL_MIN)
-  setInterval(tick, Math.max(1, intervalMin) * 6e4);
+  // Sync interval (centrally fixed at 2 hours / 120 minutes with ±15m randomized jitter)
+  const scheduleNextTick = () => {
+    const baseMs = Math.max(1, intervalMin) * 60_000;
+    const jitterMs = (Math.random() * 30 - 15) * 60_000; // ±15 minutes
+    const delay = Math.max(60_000, baseMs + jitterMs);
+    setTimeout(async () => {
+      await tick();
+      scheduleNextTick();
+    }, delay);
+  };
+  scheduleNextTick();
 
   // Independent 24-hour update-check interval
   setInterval(async () => {

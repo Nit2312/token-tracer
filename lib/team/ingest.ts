@@ -6,6 +6,7 @@
 import { query, insertMany } from './db';
 import { recalculateTeamCosts, matchesModelPattern } from './stats';
 import { saveSessionTurns } from './research';
+import { statsCache } from './cache';
 
 interface SessionPayload {
   source: string;
@@ -194,30 +195,31 @@ export async function ingestSessions(
       }
     }
 
-    await Promise.all([
-      query('DELETE FROM sync_session_tools WHERE sync_session_id = $1', [syncSessionId]),
-      query('DELETE FROM sync_session_files WHERE sync_session_id = $1', [syncSessionId]),
-    ]);
-
     const tools: NonNullable<SessionPayload['tools']> = s.tools ?? [];
     const files: NonNullable<SessionPayload['files']> = s.files ?? [];
+
     await Promise.all([
       tools.length
-        ? insertMany(
-            'sync_session_tools',
-            ['sync_session_id', 'tool_name', 'call_count'],
-            ['uuid', 'text', 'int'],
-            tools.map((t) => [syncSessionId, t.name, t.count]),
+        ? query('DELETE FROM sync_session_tools WHERE sync_session_id = $1', [syncSessionId]).then(() =>
+            insertMany(
+              'sync_session_tools',
+              ['sync_session_id', 'tool_name', 'call_count'],
+              ['uuid', 'text', 'int'],
+              tools.map((t) => [syncSessionId, t.name, t.count]),
+            )
           )
-        : Promise.resolve(),
+        : query('DELETE FROM sync_session_tools WHERE sync_session_id = $1', [syncSessionId]),
+
       files.length
-        ? insertMany(
-            'sync_session_files',
-            ['sync_session_id', 'path', 'edits', 'additions', 'deletions'],
-            ['uuid', 'text', 'int', 'int', 'int'],
-            files.map((f) => [syncSessionId, f.path, f.edits ?? 0, f.additions ?? 0, f.deletions ?? 0]),
+        ? query('DELETE FROM sync_session_files WHERE sync_session_id = $1', [syncSessionId]).then(() =>
+            insertMany(
+              'sync_session_files',
+              ['sync_session_id', 'path', 'edits', 'additions', 'deletions'],
+              ['uuid', 'text', 'int', 'int', 'int'],
+              files.map((f) => [syncSessionId, f.path, f.edits ?? 0, f.additions ?? 0, f.deletions ?? 0]),
+            )
           )
-        : Promise.resolve(),
+        : query('DELETE FROM sync_session_files WHERE sync_session_id = $1', [syncSessionId]),
     ]);
   }
 
@@ -225,6 +227,10 @@ export async function ingestSessions(
     'INSERT INTO ingest_events (team_id, member_id, session_count, accepted, status) VALUES ($1, $2, $3, $4, $5)',
     [member.team_id, member.member_id, sessions.length, accepted, 'ok'],
   );
+
+  if (accepted > 0) {
+    statsCache.clear();
+  }
 
   return { accepted, total: sessions.length };
 }

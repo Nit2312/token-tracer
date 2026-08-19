@@ -330,7 +330,7 @@ export async function query<T extends pg.QueryResultRow = pg.QueryResultRow>(
   text: string,
   params: unknown[] = [],
 ): Promise<pg.QueryResult<T>> {
-  if (!schemaChecked) {
+  if (process.env.AUTO_ENSURE_SCHEMA === 'true' && !schemaChecked) {
     await ensureSchema();
   }
   try {

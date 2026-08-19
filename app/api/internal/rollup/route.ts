@@ -151,6 +151,157 @@ async function runRollup(): Promise<NextResponse> {
     errors.push(`daily_behavior_rollup: ${(err as Error).message}`);
   }
 
+  // ── 3b. daily_member_usage ───────────────────────────────────────────────
+  try {
+    await query(`
+      INSERT INTO daily_member_usage (
+        day, team_id, member_id, source, model, project,
+        tokens_in, tokens_out, cache_read_tokens, cache_write_tokens,
+        api_cost, edits, additions, deletions, changed_lines, files_touched,
+        tool_calls, tool_errors, rework_loops, corrections, abandoned_count, session_count
+      )
+      SELECT
+        COALESCE(s.ended_at, s.started_at, s.synced_at)::date AS day,
+        s.team_id,
+        s.member_id,
+        COALESCE(NULLIF(s.source, ''), 'unknown') AS source,
+        COALESCE(NULLIF(s.model, ''), 'default') AS model,
+        COALESCE(NULLIF(s.agent, ''), 'default') AS project,
+        SUM(s.tokens_in)::bigint AS tokens_in,
+        SUM(s.tokens_out)::bigint AS tokens_out,
+        SUM(s.tokens_cache_read)::bigint AS cache_read_tokens,
+        SUM(s.tokens_cache_write)::bigint AS cache_write_tokens,
+        SUM(COALESCE(s.api_cost, 0))::float AS api_cost,
+        SUM(s.edits)::int AS edits,
+        SUM(s.additions)::int AS additions,
+        SUM(s.deletions)::int AS deletions,
+        SUM(s.changed_lines)::int AS changed_lines,
+        SUM(s.files_touched)::int AS files_touched,
+        SUM(s.tool_calls)::int AS tool_calls,
+        SUM(s.tool_errors)::int AS tool_errors,
+        SUM(s.rework_loops)::int AS rework_loops,
+        SUM(s.corrections)::int AS corrections,
+        SUM(CASE WHEN s.abandoned THEN 1 ELSE 0 END)::int AS abandoned_count,
+        COUNT(*)::int AS session_count
+      FROM sync_sessions s
+      WHERE
+        COALESCE(s.ended_at, s.started_at, s.synced_at) IS NOT NULL
+        AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date = CURRENT_DATE - 1
+      GROUP BY 1, 2, 3, 4, 5, 6
+      ON CONFLICT (day, team_id, member_id, source, model, project) DO UPDATE SET
+        tokens_in          = EXCLUDED.tokens_in,
+        tokens_out         = EXCLUDED.tokens_out,
+        cache_read_tokens  = EXCLUDED.cache_read_tokens,
+        cache_write_tokens = EXCLUDED.cache_write_tokens,
+        api_cost           = EXCLUDED.api_cost,
+        edits              = EXCLUDED.edits,
+        additions          = EXCLUDED.additions,
+        deletions          = EXCLUDED.deletions,
+        changed_lines      = EXCLUDED.changed_lines,
+        files_touched      = EXCLUDED.files_touched,
+        tool_calls         = EXCLUDED.tool_calls,
+        tool_errors        = EXCLUDED.tool_errors,
+        rework_loops       = EXCLUDED.rework_loops,
+        corrections        = EXCLUDED.corrections,
+        abandoned_count    = EXCLUDED.abandoned_count,
+        session_count      = EXCLUDED.session_count
+    `);
+  } catch (err) {
+    errors.push(`daily_member_usage: ${(err as Error).message}`);
+  }
+
+  // ── 3c. daily_member_tools ───────────────────────────────────────────────
+  try {
+    await query(`
+      INSERT INTO daily_member_tools (day, team_id, member_id, tool_name, call_count)
+      SELECT
+        COALESCE(s.ended_at, s.started_at, s.synced_at)::date AS day,
+        s.team_id,
+        s.member_id,
+        t.tool_name,
+        SUM(t.call_count)::int AS call_count
+      FROM sync_session_tools t
+      JOIN sync_sessions s ON s.id = t.sync_session_id
+      WHERE
+        COALESCE(s.ended_at, s.started_at, s.synced_at) IS NOT NULL
+        AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date = CURRENT_DATE - 1
+      GROUP BY 1, 2, 3, 4
+      ON CONFLICT (day, team_id, member_id, tool_name) DO UPDATE SET
+        call_count = EXCLUDED.call_count
+    `);
+  } catch (err) {
+    errors.push(`daily_member_tools: ${(err as Error).message}`);
+  }
+
+  // ── 3d. daily_member_files ───────────────────────────────────────────────
+  try {
+    await query(`
+      INSERT INTO daily_member_files (day, team_id, member_id, path, edits, additions, deletions, changed_lines, session_count)
+      SELECT
+        COALESCE(s.ended_at, s.started_at, s.synced_at)::date AS day,
+        s.team_id,
+        s.member_id,
+        f.path,
+        SUM(f.edits)::int AS edits,
+        SUM(f.additions)::int AS additions,
+        SUM(f.deletions)::int AS deletions,
+        SUM(f.additions + f.deletions)::int AS changed_lines,
+        COUNT(DISTINCT s.id)::int AS session_count
+      FROM sync_session_files f
+      JOIN sync_sessions s ON s.id = f.sync_session_id
+      WHERE
+        COALESCE(s.ended_at, s.started_at, s.synced_at) IS NOT NULL
+        AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date = CURRENT_DATE - 1
+      GROUP BY 1, 2, 3, 4
+      ON CONFLICT (day, team_id, member_id, path) DO UPDATE SET
+        edits         = EXCLUDED.edits,
+        additions     = EXCLUDED.additions,
+        deletions     = EXCLUDED.deletions,
+        changed_lines = EXCLUDED.changed_lines,
+        session_count = EXCLUDED.session_count
+    `);
+  } catch (err) {
+    errors.push(`daily_member_files: ${(err as Error).message}`);
+  }
+
+  // ── 3e. daily_punch_card ─────────────────────────────────────────────────
+  try {
+    await query(`
+      INSERT INTO daily_punch_card (day, team_id, member_id, weekday, hour, session_count)
+      SELECT
+        COALESCE(s.ended_at, s.started_at, s.synced_at)::date AS day,
+        s.team_id,
+        s.member_id,
+        EXTRACT(DOW FROM COALESCE(s.ended_at, s.started_at, s.synced_at))::int AS weekday,
+        EXTRACT(HOUR FROM COALESCE(s.ended_at, s.started_at, s.synced_at))::int AS hour,
+        COUNT(*)::int AS session_count
+      FROM sync_sessions s
+      WHERE
+        COALESCE(s.ended_at, s.started_at, s.synced_at) IS NOT NULL
+        AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date = CURRENT_DATE - 1
+      GROUP BY 1, 2, 3, 4, 5
+      ON CONFLICT (day, team_id, member_id, weekday, hour) DO UPDATE SET
+        session_count = EXCLUDED.session_count
+    `);
+  } catch (err) {
+    errors.push(`daily_punch_card: ${(err as Error).message}`);
+  }
+
+  // ── 4. Rolling Retention & Data Pruning (Keeps Database < 250 MB) ──────────
+  try {
+    // A. Clear raw events JSONB payload older than 7 days
+    await query(`UPDATE sync_sessions SET events = NULL WHERE synced_at < NOW() - INTERVAL '7 days' AND events IS NOT NULL`);
+
+    // B. Prune granular turn and tool error logs older than 14 days
+    await query(`DELETE FROM session_tool_errors WHERE created_at < NOW() - INTERVAL '14 days'`);
+    await query(`DELETE FROM session_turns WHERE created_at < NOW() - INTERVAL '14 days'`);
+
+    // C. Prune raw sync_sessions older than 30 days (pre-computed rollups retain 100% of historical analytics)
+    await query(`DELETE FROM sync_sessions WHERE synced_at < NOW() - INTERVAL '30 days'`);
+  } catch (err) {
+    errors.push(`data_pruning: ${(err as Error).message}`);
+  }
+
   const elapsed = Date.now() - startedAt;
 
   if (errors.length > 0) {
