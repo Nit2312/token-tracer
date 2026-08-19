@@ -1162,7 +1162,7 @@ function sanitizeForTeamSync(session, pricing) {
 
 // ── Daemon version (single source of truth) ──────────────────────────────
 // Bump this string when you publish a new release to /api/internal/releases.
-var DAEMON_VERSION = "1.2.0";
+var DAEMON_VERSION = "1.3.0";
 
 // Canonical backend URL — self-heals any machine whose config.json still
 // points somewhere stale (e.g. a decommissioned deployment).
