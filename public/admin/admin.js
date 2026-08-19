@@ -13,6 +13,48 @@ let userFilterTeam = '';
 let userFilterStatus = '';
 
 let currentAdminSession = null;
+let latestDaemonVersion = null;
+
+function compareVersionParts(a, b) {
+  const pa = (a || '').split('.').map((x) => parseInt(x, 10) || 0);
+  const pb = (b || '').split('.').map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function renderDaemonVersionBadge(daemonVersion, lastSeenAt) {
+  if (!daemonVersion) {
+    return `<span class="muted" style="font-size:11.5px;">— none —</span>`;
+  }
+  let colorClass = 'daemon-badge--current';
+  let icon = '🟢';
+  let hint = 'Up to date';
+  if (latestDaemonVersion && daemonVersion !== latestDaemonVersion) {
+    const delta = compareVersionParts(latestDaemonVersion, daemonVersion);
+    if (delta >= 2) {
+      colorClass = 'daemon-badge--outdated';
+      icon = '🔴';
+      hint = `Outdated — latest is v${latestDaemonVersion}`;
+    } else if (delta === 1) {
+      colorClass = 'daemon-badge--behind';
+      icon = '🟡';
+      hint = `1 version behind — latest is v${latestDaemonVersion}`;
+    } else if (delta < 0) {
+      colorClass = 'daemon-badge--current';
+      icon = '🟢';
+      hint = 'Up to date (pre-release)';
+    } else {
+      colorClass = 'daemon-badge--outdated';
+      icon = '🔴';
+      hint = `Outdated — latest is v${latestDaemonVersion}`;
+    }
+  }
+  const seenStr = lastSeenAt ? `Last seen: ${typeof fmtDate === 'function' ? fmtDate(lastSeenAt) : new Date(lastSeenAt).toLocaleDateString()}` : 'Never synced';
+  return `<span class="source-tag daemon-badge ${colorClass}" title="${hint} | ${seenStr}">${icon} v${esc(daemonVersion)}</span>`;
+}
 
 // Helpers
 const $ = (s) => document.querySelector(s);
@@ -189,9 +231,29 @@ async function loadData() {
     window.setDataLoading(true, 'Loading accounts…');
   }
   try {
-    const res = await fetch('/api/admin/users');
-    if (!res.ok) throw new Error('Failed to load user list');
-    const data = await res.json();
+    // Fetch users and releases in parallel so latestDaemonVersion is ready for badge rendering
+    const [usersRes, relRes] = await Promise.allSettled([
+      fetch('/api/admin/users'),
+      fetch('/api/internal/releases')
+    ]);
+
+    if (relRes.status === 'fulfilled' && relRes.value.ok) {
+      try {
+        const relData = await relRes.value.json();
+        releasesData = relData.releases || [];
+        const active = releasesData.find((r) => r.active);
+        latestDaemonVersion = active ? active.version : null;
+        const latestEl = $('#daemon-latest-version-badge');
+        if (latestEl) {
+          latestEl.textContent = active ? `Latest: v${active.version}` : 'No active release';
+        }
+      } catch (_) {}
+    }
+
+    if (usersRes.status !== 'fulfilled' || !usersRes.value.ok) {
+      throw new Error('Failed to load user list');
+    }
+    const data = await usersRes.value.json();
     
     if (data.needsMigration) {
       const btn = $('#migrate-btn');
@@ -318,9 +380,7 @@ function renderUsers() {
   }
 
   tbody.innerHTML = filteredUsers.map(u => {
-    const daemonVersion = u.daemon_version
-      ? `<span class="badge-pill ${u.daemon_version === '1.3.0' ? 'green' : 'amber'}" style="font-size:11.5px; font-weight:600;">v${esc(u.daemon_version)}</span>`
-      : `<span class="muted" style="font-size:11.5px;">— none —</span>`;
+    const daemonVersion = renderDaemonVersionBadge(u.daemon_version, u.daemon_last_seen_at);
     const status = u.active ? '<span class="status-badge active-badge">Active</span>' : '<span class="status-badge inactive-badge">Inactive</span>';
     const sessionCount = u.session_count || 0;
     
@@ -2139,14 +2199,16 @@ async function loadReleases() {
     const data = await res.json();
     releasesData = data.releases || [];
 
-    // Update latest version badge
+    // Update latest version badge & variable
+    const active = releasesData.find((r) => r.active);
+    latestDaemonVersion = active ? active.version : null;
     const latestEl = $('#daemon-latest-version-badge');
     if (latestEl) {
-      const active = releasesData.find((r) => r.active);
       latestEl.textContent = active ? `Latest: v${active.version}` : 'No active release';
     }
 
     renderReleasesTable();
+    renderUsers();
   } catch (err) {
     if (el) el.innerHTML = `<p class="error admin-empty" style="padding:12px">Unable to load releases: ${esc(err.message)}</p>`;
   }
