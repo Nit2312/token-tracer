@@ -156,6 +156,15 @@ async function runRollup(): Promise<NextResponse> {
   // ── 2. daily_pipeline_health ──────────────────────────────────────────────
   try {
     await query(`
+      WITH daily_lag AS (
+        SELECT
+          s.synced_at::date AS day,
+          s.member_id,
+          AVG(EXTRACT(EPOCH FROM (s.synced_at - COALESCE(s.ended_at, s.started_at))))::int AS avg_lag
+        FROM sync_sessions s
+        WHERE s.ended_at IS NOT NULL AND s.synced_at::date <= CURRENT_DATE
+        GROUP BY 1, 2
+      )
       INSERT INTO daily_pipeline_health (day, daemon_id, org_id,
         last_heartbeat, batches_received, batches_failed,
         avg_ingestion_lag_seconds, parse_errors, sanitize_errors)
@@ -166,18 +175,11 @@ async function runRollup(): Promise<NextResponse> {
         MAX(ie.created_at)                       AS last_heartbeat,
         COUNT(*) FILTER (WHERE ie.status = 'ok')::int         AS batches_received,
         COUNT(*) FILTER (WHERE ie.status != 'ok')::int        AS batches_failed,
-        COALESCE((
-          SELECT AVG(
-            EXTRACT(EPOCH FROM (s.synced_at - COALESCE(s.ended_at, s.started_at)))
-          )::int
-          FROM sync_sessions s
-          WHERE s.member_id = ie.member_id
-            AND s.synced_at::date = ie.created_at::date
-            AND s.ended_at IS NOT NULL
-        ), 0)                                    AS avg_ingestion_lag_seconds,
+        COALESCE(MAX(dl.avg_lag), 0)             AS avg_ingestion_lag_seconds,
         0                                        AS parse_errors,
         0                                        AS sanitize_errors
       FROM ingest_events ie
+      LEFT JOIN daily_lag dl ON dl.member_id = ie.member_id AND dl.day = ie.created_at::date
       WHERE ie.created_at::date <= CURRENT_DATE
       GROUP BY ie.created_at::date, ie.member_id, ie.team_id
       ON CONFLICT (day, daemon_id) DO UPDATE SET
