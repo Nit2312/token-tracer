@@ -27,6 +27,7 @@ export async function GET(req: NextRequest) {
       SELECT u.id, u.username, u.display_name, u.role, u.active,
              u.member_id, u.team_id, u.last_login_at, u.created_at, u.updated_at,
              m.display_name AS member_name,
+             m.daemon_version, m.daemon_last_seen_at,
              COALESCE(
                (SELECT string_agg(t.name, ', ')
                 FROM team_members tm

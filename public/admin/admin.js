@@ -318,7 +318,9 @@ function renderUsers() {
   }
 
   tbody.innerHTML = filteredUsers.map(u => {
-    const lastLogin = u.last_login_at ? new Date(u.last_login_at).toLocaleString() : 'Never';
+    const daemonVersion = u.daemon_version
+      ? `<span class="badge-pill ${u.daemon_version === '1.3.0' ? 'green' : 'amber'}" style="font-size:11.5px; font-weight:600;">v${esc(u.daemon_version)}</span>`
+      : `<span class="muted" style="font-size:11.5px;">— none —</span>`;
     const status = u.active ? '<span class="status-badge active-badge">Active</span>' : '<span class="status-badge inactive-badge">Inactive</span>';
     const sessionCount = u.session_count || 0;
     
@@ -347,7 +349,7 @@ function renderUsers() {
         </td>
         <td>${teamBadges}</td>
         <td>${sessionCount} sessions</td>
-        <td><span class="muted">${lastLogin}</span></td>
+        <td>${daemonVersion}</td>
         <td>${status}</td>
         <td>
           <div class="actions-cell">
@@ -2060,6 +2062,10 @@ function setupAnalyticsTabs() {
   const _origSwitchTab = window._switchTab || switchTab;
   function patchedSwitchTab(tabId) {
     _origSwitchTab(tabId);
+    if (tabId === 'tab-infra') {
+      infraLoaded = true;
+      loadInfraHealth();
+    }
     if (tabId === 'tab-pipeline' && !pipelineLoaded) {
       pipelineLoaded = true;
       loadPipelineHealth($('#pipeline-range-select')?.value || '7d');
@@ -2373,5 +2379,131 @@ function bindAuditLogFilters() {
 if (typeof window !== 'undefined') {
   setTimeout(bindAuditLogFilters, 0);
 }
+
+// ── Infrastructure & Compute Monitoring Panel ────────────────────────────────
+let infraLoaded = false;
+
+async function loadInfraHealth() {
+  const tbody = $('#infra-tables-tbody');
+  try {
+    const res = await fetch('/api/admin/infra-health');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    renderInfraHealth(data);
+  } catch (err) {
+    if (tbody) {
+      tbody.innerHTML = `<tr><td colspan="6" class="error admin-empty" style="padding:20px; text-align:center">Unable to load infrastructure metrics: ${esc(err.message)}</td></tr>`;
+    }
+  }
+}
+
+function renderInfraHealth(data) {
+  if (!data || !data.limits) return;
+
+  const { neonStorage, vercelInvocations, cacheEfficiency, activeConnections } = data.limits;
+
+  // 1. Neon DB Storage KPI
+  const storageVal = $('#infra-storage-val');
+  const storageBar = $('#infra-storage-bar');
+  const storageSub = $('#infra-storage-sub');
+  if (storageVal) storageVal.textContent = `${neonStorage.prettySize} / 500 MB`;
+  if (storageBar) {
+    storageBar.style.width = `${neonStorage.usedPct}%`;
+    storageBar.style.background = neonStorage.status === 'critical' ? '#ef4444' : neonStorage.status === 'warning' ? '#f59e0b' : '#3b82f6';
+  }
+  if (storageSub) storageSub.textContent = `${neonStorage.usedPct}% used • Status: ${neonStorage.status.toUpperCase()}`;
+
+  // 2. Vercel Invocations KPI
+  const invocationsVal = $('#infra-invocations-val');
+  const invocationsBar = $('#infra-invocations-bar');
+  const invocationsSub = $('#infra-invocations-sub');
+  if (invocationsVal) invocationsVal.textContent = `~${vercelInvocations.estimatedToday.toLocaleString()} / 100k`;
+  if (invocationsBar) {
+    invocationsBar.style.width = `${vercelInvocations.usedPct}%`;
+    invocationsBar.style.background = vercelInvocations.status === 'critical' ? '#ef4444' : vercelInvocations.status === 'warning' ? '#f59e0b' : '#10b981';
+  }
+  if (invocationsSub) invocationsSub.textContent = `${vercelInvocations.usedPct}% used • Batches today: ${vercelInvocations.batchesToday.toLocaleString()} (${vercelInvocations.sessionsToday.toLocaleString()} sessions)`;
+
+  // 3. Cache Hit Ratio
+  const cacheVal = $('#infra-cache-val');
+  const cacheSub = $('#infra-cache-sub');
+  if (cacheVal) cacheVal.textContent = `${cacheEfficiency.hitRatio.toFixed(1)}%`;
+  if (cacheSub) cacheSub.textContent = `Memory efficiency: ${cacheEfficiency.status.toUpperCase()}`;
+
+  // 4. Active DB Connections
+  const connVal = $('#infra-conn-val');
+  if (connVal) connVal.textContent = activeConnections.count;
+
+  // 5. Daemon Rollout Progress Bar (v1.3.0)
+  const rollout = data.daemonRollout || { v130Pct: 0, v130Count: 0, totalMembers: 0, breakdown: [] };
+  const rolloutPct = $('#infra-rollout-pct');
+  const rolloutBar = $('#infra-rollout-bar');
+  const rolloutBadge = $('#infra-v130-badge');
+  const rolloutList = $('#infra-versions-list');
+
+  if (rolloutPct) rolloutPct.textContent = `${rollout.v130Pct}% (${rollout.v130Count} / ${rollout.totalMembers})`;
+  if (rolloutBar) rolloutBar.style.width = `${rollout.v130Pct}%`;
+  if (rolloutBadge) {
+    rolloutBadge.textContent = `${rollout.v130Count} on v1.3.0`;
+    rolloutBadge.className = rollout.v130Pct >= 80 ? 'badge-pill green' : 'badge-pill';
+  }
+
+  if (rolloutList && rollout.breakdown) {
+    rolloutList.innerHTML = rollout.breakdown.map((r) => `
+      <div style="background:var(--bg-subtle, rgba(255,255,255,0.05)); padding:4px 10px; borderRadius:4px; border:1px solid var(--border, #333)">
+        <strong>${esc(r.version)}:</strong> ${r.member_count} members (${r.active_count} active 7d)
+      </div>
+    `).join('');
+  }
+
+  // 6. Table Storage Breakdown Table
+  const tbody = $('#infra-tables-tbody');
+  if (tbody && data.tableStorage) {
+    if (!data.tableStorage.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="muted admin-empty" style="padding:20px; text-align:center">No table statistics available.</td></tr>';
+    } else {
+      tbody.innerHTML = data.tableStorage.map((t) => {
+        let policy = 'Permanent';
+        if (t.table_name === 'sync_sessions' || t.table_name === 'sync_session_files' || t.table_name === 'sync_session_tools') {
+          policy = '30-Day Rolling Prune';
+        } else if (t.table_name === 'session_turns' || t.table_name === 'session_tool_errors') {
+          policy = '14-Day Rolling Prune';
+        } else if (t.table_name.startsWith('daily_')) {
+          policy = 'Permanent Pre-Computed';
+        }
+        return `
+          <tr>
+            <td><code>${esc(t.table_name)}</code></td>
+            <td><strong>${esc(t.total_size)}</strong></td>
+            <td>${esc(t.table_size)}</td>
+            <td>${esc(t.index_size)}</td>
+            <td>${Number(t.row_estimate).toLocaleString()}</td>
+            <td><span class="badge-pill ${policy.includes('Prune') ? 'amber' : 'green'}">${policy}</span></td>
+          </tr>
+        `;
+      }).join('');
+    }
+  }
+
+  // 7. Retention Status
+  const retention = data.retentionStatus;
+  const unprunedEl = $('#infra-unpruned-events');
+  const oldestSessionEl = $('#infra-oldest-session');
+  if (unprunedEl && retention) {
+    unprunedEl.textContent = `${retention.unprunedEventsCount} unpruned raw events`;
+  }
+  if (oldestSessionEl && retention) {
+    const oldest = retention.oldestSessionDate ? String(retention.oldestSessionDate).slice(0, 10) : 'None';
+    oldestSessionEl.textContent = `Oldest session: ${oldest} • ${retention.totalSessionsInDb.toLocaleString()} active rows`;
+  }
+}
+
+function bindInfraEvents() {
+  $('#infra-refresh-btn')?.addEventListener('click', () => loadInfraHealth());
+}
+if (typeof window !== 'undefined') {
+  setTimeout(bindInfraEvents, 0);
+}
+
 
 
