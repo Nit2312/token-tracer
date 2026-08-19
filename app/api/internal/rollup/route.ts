@@ -12,8 +12,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/team/db';
 import { cronSecret } from '@/lib/team/env';
+import { getSessionFromCookie } from '@/lib/auth';
 
 function isCronAuthorized(req: NextRequest): boolean {
+  const cookieHeader = req.headers.get('cookie') || '';
+  const session = getSessionFromCookie(cookieHeader);
+  if (session && session.role === 'superadmin') return true;
+
   const secret = cronSecret();
   if (!secret) return false; // CRON_SECRET not set → deny
   const auth = req.headers.get('authorization');
@@ -42,12 +47,77 @@ async function runRollup(): Promise<NextResponse> {
   const startedAt = Date.now();
   const errors: string[] = [];
 
+  // Ensure rollup tables exist
+  try {
+    await query(`
+      CREATE TABLE IF NOT EXISTS daily_member_usage (
+        day DATE NOT NULL,
+        team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        member_id UUID NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+        source TEXT NOT NULL,
+        model TEXT NOT NULL DEFAULT 'default',
+        project TEXT NOT NULL DEFAULT 'default',
+        tokens_in BIGINT DEFAULT 0,
+        tokens_out BIGINT DEFAULT 0,
+        cache_read_tokens BIGINT DEFAULT 0,
+        cache_write_tokens BIGINT DEFAULT 0,
+        api_cost DOUBLE PRECISION DEFAULT 0,
+        edits INT DEFAULT 0,
+        additions INT DEFAULT 0,
+        deletions INT DEFAULT 0,
+        changed_lines INT DEFAULT 0,
+        files_touched INT DEFAULT 0,
+        tool_calls INT DEFAULT 0,
+        tool_errors INT DEFAULT 0,
+        rework_loops INT DEFAULT 0,
+        corrections INT DEFAULT 0,
+        abandoned_count INT DEFAULT 0,
+        session_count INT DEFAULT 0,
+        PRIMARY KEY (day, team_id, member_id, source, model, project)
+      );
+      CREATE INDEX IF NOT EXISTS idx_daily_member_usage_team_day ON daily_member_usage(team_id, day DESC);
+      CREATE INDEX IF NOT EXISTS idx_daily_member_usage_member_day ON daily_member_usage(member_id, day DESC);
+
+      CREATE TABLE IF NOT EXISTS daily_member_tools (
+        day DATE NOT NULL,
+        team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        member_id UUID NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+        tool_name TEXT NOT NULL,
+        call_count INT DEFAULT 0,
+        PRIMARY KEY (day, team_id, member_id, tool_name)
+      );
+      CREATE INDEX IF NOT EXISTS idx_daily_member_tools_team ON daily_member_tools(team_id, day DESC);
+
+      CREATE TABLE IF NOT EXISTS daily_member_files (
+        day DATE NOT NULL,
+        team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        member_id UUID NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        edits INT DEFAULT 0,
+        additions INT DEFAULT 0,
+        deletions INT DEFAULT 0,
+        changed_lines INT DEFAULT 0,
+        session_count INT DEFAULT 0,
+        PRIMARY KEY (day, team_id, member_id, path)
+      );
+      CREATE INDEX IF NOT EXISTS idx_daily_member_files_team ON daily_member_files(team_id, day DESC);
+
+      CREATE TABLE IF NOT EXISTS daily_punch_card (
+        day DATE NOT NULL,
+        team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        member_id UUID NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+        weekday INT NOT NULL,
+        hour INT NOT NULL,
+        session_count INT DEFAULT 0,
+        PRIMARY KEY (day, team_id, member_id, weekday, hour)
+      );
+      CREATE INDEX IF NOT EXISTS idx_daily_punch_card_team ON daily_punch_card(team_id, day DESC);
+    `);
+  } catch (err) {
+    errors.push(`schema_ensure: ${(err as Error).message}`);
+  }
+
   // ── 1. daily_org_usage ────────────────────────────────────────────────────
-  // Aggregate sync_sessions into per-org/tool/model/day rows.
-  // Uses the team_id as org_id. list_price_cost comes from the api_cost column
-  // (which ingest.ts calculates using team pricing overrides already stored in
-  // model_pricing). actual_cost mirrors it — when override pricing differs from
-  // list price, ingest already stores the overridden cost in api_cost.
   try {
     await query(`
       INSERT INTO daily_org_usage (day, org_id, tool, model,
@@ -68,7 +138,7 @@ async function runRollup(): Promise<NextResponse> {
       FROM sync_sessions s
       WHERE
         COALESCE(s.ended_at, s.started_at, s.synced_at) IS NOT NULL
-        AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date = CURRENT_DATE - 1
+        AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date <= CURRENT_DATE
       GROUP BY 1, 2, 3, 4
       ON CONFLICT (day, org_id, tool, model) DO UPDATE SET
         input_tokens       = EXCLUDED.input_tokens,
@@ -84,9 +154,6 @@ async function runRollup(): Promise<NextResponse> {
   }
 
   // ── 2. daily_pipeline_health ──────────────────────────────────────────────
-  // One row per member-as-daemon per day. Uses ingest_events as the health
-  // signal — each successful batch that arrived gets counted.
-  // Ingestion lag = time between synced_at and ended_at on sync_sessions.
   try {
     await query(`
       INSERT INTO daily_pipeline_health (day, daemon_id, org_id,
@@ -111,7 +178,7 @@ async function runRollup(): Promise<NextResponse> {
         0                                        AS parse_errors,
         0                                        AS sanitize_errors
       FROM ingest_events ie
-      WHERE ie.created_at::date = CURRENT_DATE - 1
+      WHERE ie.created_at::date <= CURRENT_DATE
       GROUP BY ie.created_at::date, ie.member_id, ie.team_id
       ON CONFLICT (day, daemon_id) DO UPDATE SET
         last_heartbeat          = EXCLUDED.last_heartbeat,
@@ -140,7 +207,7 @@ async function runRollup(): Promise<NextResponse> {
       FROM sync_sessions s
       WHERE
         COALESCE(s.ended_at, s.started_at, s.synced_at) IS NOT NULL
-        AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date = CURRENT_DATE - 1
+        AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date <= CURRENT_DATE
       GROUP BY 1, 2, 3
       ON CONFLICT (day, org_id, tool) DO UPDATE SET
         rework_loop_count = EXCLUDED.rework_loop_count,
@@ -186,7 +253,7 @@ async function runRollup(): Promise<NextResponse> {
       FROM sync_sessions s
       WHERE
         COALESCE(s.ended_at, s.started_at, s.synced_at) IS NOT NULL
-        AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date = CURRENT_DATE - 1
+        AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date <= CURRENT_DATE
       GROUP BY 1, 2, 3, 4, 5, 6
       ON CONFLICT (day, team_id, member_id, source, model, project) DO UPDATE SET
         tokens_in          = EXCLUDED.tokens_in,
@@ -224,7 +291,7 @@ async function runRollup(): Promise<NextResponse> {
       JOIN sync_sessions s ON s.id = t.sync_session_id
       WHERE
         COALESCE(s.ended_at, s.started_at, s.synced_at) IS NOT NULL
-        AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date = CURRENT_DATE - 1
+        AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date <= CURRENT_DATE
       GROUP BY 1, 2, 3, 4
       ON CONFLICT (day, team_id, member_id, tool_name) DO UPDATE SET
         call_count = EXCLUDED.call_count
@@ -251,7 +318,7 @@ async function runRollup(): Promise<NextResponse> {
       JOIN sync_sessions s ON s.id = f.sync_session_id
       WHERE
         COALESCE(s.ended_at, s.started_at, s.synced_at) IS NOT NULL
-        AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date = CURRENT_DATE - 1
+        AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date <= CURRENT_DATE
       GROUP BY 1, 2, 3, 4
       ON CONFLICT (day, team_id, member_id, path) DO UPDATE SET
         edits         = EXCLUDED.edits,
@@ -278,7 +345,7 @@ async function runRollup(): Promise<NextResponse> {
       FROM sync_sessions s
       WHERE
         COALESCE(s.ended_at, s.started_at, s.synced_at) IS NOT NULL
-        AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date = CURRENT_DATE - 1
+        AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date <= CURRENT_DATE
       GROUP BY 1, 2, 3, 4, 5
       ON CONFLICT (day, team_id, member_id, weekday, hour) DO UPDATE SET
         session_count = EXCLUDED.session_count
@@ -288,16 +355,26 @@ async function runRollup(): Promise<NextResponse> {
   }
 
   // ── 4. Rolling Retention & Data Pruning (Keeps Database < 250 MB) ──────────
+  let nullifiedEvents = 0;
+  let deletedErrors = 0;
+  let deletedTurns = 0;
+  let deletedSessions = 0;
+
   try {
     // A. Clear raw events JSONB payload older than 7 days
-    await query(`UPDATE sync_sessions SET events = NULL WHERE synced_at < NOW() - INTERVAL '7 days' AND events IS NOT NULL`);
+    const eventsRes = await query(`UPDATE sync_sessions SET events = NULL WHERE synced_at < NOW() - INTERVAL '7 days' AND events IS NOT NULL`);
+    nullifiedEvents = eventsRes.rowCount ?? 0;
 
     // B. Prune granular turn and tool error logs older than 14 days
-    await query(`DELETE FROM session_tool_errors WHERE created_at < NOW() - INTERVAL '14 days'`);
-    await query(`DELETE FROM session_turns WHERE created_at < NOW() - INTERVAL '14 days'`);
+    const errorsRes = await query(`DELETE FROM session_tool_errors WHERE created_at < NOW() - INTERVAL '14 days'`);
+    deletedErrors = errorsRes.rowCount ?? 0;
+
+    const turnsRes = await query(`DELETE FROM session_turns WHERE created_at < NOW() - INTERVAL '14 days'`);
+    deletedTurns = turnsRes.rowCount ?? 0;
 
     // C. Prune raw sync_sessions older than 30 days (pre-computed rollups retain 100% of historical analytics)
-    await query(`DELETE FROM sync_sessions WHERE synced_at < NOW() - INTERVAL '30 days'`);
+    const sessionsRes = await query(`DELETE FROM sync_sessions WHERE synced_at < NOW() - INTERVAL '30 days'`);
+    deletedSessions = sessionsRes.rowCount ?? 0;
   } catch (err) {
     errors.push(`data_pruning: ${(err as Error).message}`);
   }
@@ -312,5 +389,14 @@ async function runRollup(): Promise<NextResponse> {
     }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, elapsed_ms: elapsed });
+  return NextResponse.json({
+    ok: true,
+    elapsed_ms: elapsed,
+    pruning: {
+      nullifiedEventsOlderThan7d: nullifiedEvents,
+      deletedToolErrorsOlderThan14d: deletedErrors,
+      deletedTurnsOlderThan14d: deletedTurns,
+      deletedSessionsOlderThan30d: deletedSessions,
+    }
+  });
 }
