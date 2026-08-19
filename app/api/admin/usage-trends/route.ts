@@ -1,12 +1,13 @@
 /**
  * GET /api/admin/usage-trends?range=30d&groupBy=tool
  * Superadmin-only. Returns platform-wide usage and growth data.
- * Queries live from sync_sessions + ingest_events — no rollup dependency.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { getSessionFromCookie } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { queryCol } from '@/lib/team/db';
+
+export const dynamic = 'force-dynamic';
 
 function parseDays(range: string | null): number {
   if (!range) return 30;
@@ -15,7 +16,6 @@ function parseDays(range: string | null): number {
 }
 
 export async function GET(req: NextRequest) {
-  // ── Auth: superadmin only ─────────────────────────────────────────────────
   const cookieStore = await cookies();
   const session = getSessionFromCookie(cookieStore.toString());
   if (!session || session.role !== 'superadmin') {
@@ -25,84 +25,118 @@ export async function GET(req: NextRequest) {
   const days = parseDays(req.nextUrl.searchParams.get('range'));
   const groupBy = req.nextUrl.searchParams.get('groupBy') || 'tool';
 
-  // ── 1. Token trend by tool/source (live) ─────────────────────────────────
-  const { rows: tokensByTool } = await query(`
-    SELECT
-      COALESCE(s.ended_at, s.started_at, s.synced_at)::date AS day,
-      COALESCE(NULLIF(s.source, ''), 'unknown')              AS tool,
-      SUM(s.tokens_in)::bigint                               AS input_tokens,
-      SUM(s.tokens_out)::bigint                              AS output_tokens,
-      SUM(s.tokens_cache_read)::bigint                       AS cache_read_tokens,
-      COUNT(*)::int                                          AS session_count
-    FROM sync_sessions s
-    WHERE COALESCE(s.ended_at, s.started_at, s.synced_at) >= CURRENT_DATE - $1::int
-    GROUP BY 1, 2
-    ORDER BY 1 ASC, 2 ASC
-  `, [days]);
+  const cutoff = new Date(Date.now() - days * 86400 * 1000).toISOString();
+  const cutoffDate = cutoff.slice(0, 10);
 
-  // ── 2. Model mix over time (live) ─────────────────────────────────────────
-  const { rows: modelMix } = await query(`
-    SELECT
-      COALESCE(s.ended_at, s.started_at, s.synced_at)::date  AS day,
-      COALESCE(NULLIF(s.model, ''), 'unknown')                AS model,
-      SUM(s.tokens_in + s.tokens_out)::bigint                 AS total_tokens,
-      COUNT(*)::int                                           AS session_count
-    FROM sync_sessions s
-    WHERE COALESCE(s.ended_at, s.started_at, s.synced_at) >= CURRENT_DATE - $1::int
-    GROUP BY 1, 2
-    ORDER BY 1 ASC, total_tokens DESC
-  `, [days]);
+  const [sessionDocs, memberDocs, eventDocs, teamDocs] = await Promise.all([
+    queryCol<any>('sync_sessions'),
+    queryCol<any>('members'),
+    queryCol<any>('ingest_events'),
+    queryCol<any>('teams'),
+  ]);
 
-  // ── 3. Top models overall for punchcard (live) ────────────────────────────
-  const { rows: topModels } = await query(`
-    SELECT
-      COALESCE(NULLIF(s.model, ''), 'unknown') AS model,
-      SUM(s.tokens_in + s.tokens_out)::bigint  AS total_tokens,
-      COUNT(*)::int                             AS session_count
-    FROM sync_sessions s
-    WHERE COALESCE(s.ended_at, s.started_at, s.synced_at) >= CURRENT_DATE - $1::int
-    GROUP BY 1
-    ORDER BY total_tokens DESC
-    LIMIT 10
-  `, [days]);
+  const inRangeSessions = sessionDocs.filter((s) => {
+    const ts = s.ended_at || s.started_at || s.synced_at;
+    return ts && String(ts).slice(0, 10) >= cutoffDate;
+  });
 
-  // ── 4. Daemon activity (live from ingest_events) ──────────────────────────
-  const { rows: daemonActivity } = await query(`
-    SELECT
-      COUNT(DISTINCT m.id)::int                                       AS total_registered,
-      COUNT(DISTINCT ie.member_id) FILTER (
-        WHERE ie.created_at >= NOW() - INTERVAL '24 hours'
-      )::int                                                          AS active_24h,
-      COUNT(DISTINCT ie.member_id) FILTER (
-        WHERE ie.created_at >= NOW() - INTERVAL '7 days'
-      )::int                                                          AS active_7d
-    FROM members m
-    LEFT JOIN ingest_events ie ON ie.member_id = m.id
-  `);
+  // 1. Token trend by tool/source
+  const toolMap = new Map<string, { day: string; tool: string; input_tokens: number; output_tokens: number; cache_read_tokens: number; session_count: number }>();
+  for (const s of inRangeSessions) {
+    const ts = s.ended_at || s.started_at || s.synced_at;
+    const day = String(ts).slice(0, 10);
+    const tool = s.source || 'unknown';
+    const key = `${day}_${tool}`;
+    if (!toolMap.has(key)) {
+      toolMap.set(key, { day, tool, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, session_count: 0 });
+    }
+    const row = toolMap.get(key)!;
+    row.input_tokens += Number(s.tokens_in || 0);
+    row.output_tokens += Number(s.tokens_out || 0);
+    row.cache_read_tokens += Number(s.tokens_cache_read || 0);
+    row.session_count += 1;
+  }
+  const tokensByTool = Array.from(toolMap.values()).sort((a, b) => a.day.localeCompare(b.day) || a.tool.localeCompare(b.tool));
 
-  // ── 5. New orgs over time (live) ──────────────────────────────────────────
-  const { rows: orgGrowth } = await query(`
-    SELECT
-      created_at::date AS day,
-      COUNT(*)::int    AS new_orgs
-    FROM teams
-    WHERE created_at::date >= CURRENT_DATE - $1::int
-    GROUP BY 1
-    ORDER BY 1 ASC
-  `, [days]);
+  // 2. Model mix over time
+  const modelMap = new Map<string, { day: string; model: string; total_tokens: number; session_count: number }>();
+  for (const s of inRangeSessions) {
+    const ts = s.ended_at || s.started_at || s.synced_at;
+    const day = String(ts).slice(0, 10);
+    const model = s.model || 'unknown';
+    const key = `${day}_${model}`;
+    if (!modelMap.has(key)) {
+      modelMap.set(key, { day, model, total_tokens: 0, session_count: 0 });
+    }
+    const row = modelMap.get(key)!;
+    row.total_tokens += Number(s.tokens_in || 0) + Number(s.tokens_out || 0);
+    row.session_count += 1;
+  }
+  const modelMix = Array.from(modelMap.values()).sort((a, b) => a.day.localeCompare(b.day) || b.total_tokens - a.total_tokens);
 
-  // ── 6. Platform daily summary (live) ─────────────────────────────────────
-  const { rows: dailySummary } = await query(`
-    SELECT
-      COALESCE(s.ended_at, s.started_at, s.synced_at)::date            AS day,
-      SUM(s.tokens_in + s.tokens_out + s.tokens_cache_read)::bigint    AS total_tokens,
-      COUNT(*)::int                                                      AS total_sessions,
-      COUNT(DISTINCT s.team_id)::int                                     AS active_orgs
-    FROM sync_sessions s
-    WHERE COALESCE(s.ended_at, s.started_at, s.synced_at) >= CURRENT_DATE - $1::int
-    GROUP BY 1
-    ORDER BY 1 ASC
-  `, [days]);
+  // 3. Top models overall
+  const topModelMap = new Map<string, { model: string; total_tokens: number; session_count: number }>();
+  for (const s of inRangeSessions) {
+    const model = s.model || 'unknown';
+    if (!topModelMap.has(model)) {
+      topModelMap.set(model, { model, total_tokens: 0, session_count: 0 });
+    }
+    const row = topModelMap.get(model)!;
+    row.total_tokens += Number(s.tokens_in || 0) + Number(s.tokens_out || 0);
+    row.session_count += 1;
+  }
+  const topModels = Array.from(topModelMap.values())
+    .sort((a, b) => b.total_tokens - a.total_tokens)
+    .slice(0, 10);
+
+  // 4. Daemon activity
+  const now = Date.now();
+  const h24Ago = new Date(now - 24 * 3600 * 1000).toISOString();
+  const d7Ago = new Date(now - 7 * 86400 * 1000).toISOString();
+
+  const active24hSet = new Set<string>();
+  const active7dSet = new Set<string>();
+  for (const ie of eventDocs) {
+    if (!ie.member_id || !ie.created_at) continue;
+    if (ie.created_at >= h24Ago) active24hSet.add(ie.member_id);
+    if (ie.created_at >= d7Ago) active7dSet.add(ie.member_id);
+  }
+
+  const daemonActivity = {
+    total_registered: memberDocs.length,
+    active_24h: active24hSet.size,
+    active_7d: active7dSet.size,
+  };
+
+  // 5. New orgs over time
+  const orgGrowthMap = new Map<string, number>();
+  for (const t of teamDocs) {
+    if (!t.created_at) continue;
+    const day = String(t.created_at).slice(0, 10);
+    if (day >= cutoffDate) {
+      orgGrowthMap.set(day, (orgGrowthMap.get(day) || 0) + 1);
+    }
+  }
+  const orgGrowth = Array.from(orgGrowthMap.entries())
+    .map(([day, new_orgs]) => ({ day, new_orgs }))
+    .sort((a, b) => a.day.localeCompare(b.day));
+
+  // 6. Platform daily summary
+  const dailySummaryMap = new Map<string, { day: string; total_tokens: number; total_sessions: number; orgs: Set<string> }>();
+  for (const s of inRangeSessions) {
+    const ts = s.ended_at || s.started_at || s.synced_at;
+    const day = String(ts).slice(0, 10);
+    if (!dailySummaryMap.has(day)) {
+      dailySummaryMap.set(day, { day, total_tokens: 0, total_sessions: 0, orgs: new Set() });
+    }
+    const row = dailySummaryMap.get(day)!;
+    row.total_tokens += Number(s.tokens_in || 0) + Number(s.tokens_out || 0) + Number(s.tokens_cache_read || 0);
+    row.total_sessions += 1;
+    if (s.team_id) row.orgs.add(s.team_id);
+  }
+  const dailySummary = Array.from(dailySummaryMap.values())
+    .map(r => ({ day: r.day, total_tokens: r.total_tokens, total_sessions: r.total_sessions, active_orgs: r.orgs.size }))
+    .sort((a, b) => a.day.localeCompare(b.day));
 
   return NextResponse.json({
     range_days: days,
@@ -110,7 +144,7 @@ export async function GET(req: NextRequest) {
     tokens_by_tool: tokensByTool,
     model_mix: modelMix,
     top_models: topModels,
-    daemon_activity: daemonActivity[0] ?? {},
+    daemon_activity: daemonActivity,
     org_growth: orgGrowth,
     daily_summary: dailySummary,
   });

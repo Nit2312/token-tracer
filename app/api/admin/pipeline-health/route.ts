@@ -1,14 +1,13 @@
 /**
  * GET /api/admin/pipeline-health?range=7d
- * Superadmin-only. Reads directly from the tables daemons write to:
- *   - sync_sessions  (token/cost data per session)
- *   - ingest_events  (one row per sync batch — the heartbeat signal)
- *   - members        (daemon registry)
+ * Superadmin-only. Reads directly from the collections daemons write to.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { getSessionFromCookie } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { queryCol } from '@/lib/team/db';
+
+export const dynamic = 'force-dynamic';
 
 function parseDays(range: string | null): number {
   if (!range) return 7;
@@ -17,7 +16,6 @@ function parseDays(range: string | null): number {
 }
 
 export async function GET(req: NextRequest) {
-  // ── Auth: superadmin only ─────────────────────────────────────────────────
   const cookieStore = await cookies();
   const session = getSessionFromCookie(cookieStore.toString());
   if (!session || session.role !== 'superadmin') {
@@ -25,107 +23,149 @@ export async function GET(req: NextRequest) {
   }
 
   const days = parseDays(req.nextUrl.searchParams.get('range'));
+  const cutoff = new Date(Date.now() - days * 86400 * 1000).toISOString();
+  const cutoffDate = cutoff.slice(0, 10);
+  const now = Date.now();
+  const h24Ago = new Date(now - 24 * 3600 * 1000).toISOString();
 
-  // ── 1. Daemon health — from ingest_events + members ───────────────────────
-  // Last heartbeat = most recent ingest_event per member.
-  // Batch counts use the full window.
-  const { rows: daemonRows } = await query(`
-    SELECT
-      m.id::text                    AS daemon_id,
-      m.display_name                AS daemon_name,
-      m.daemon_version              AS daemon_version,
-      t.id::text                    AS org_id,
-      t.name                        AS org_name,
-      MAX(ie.created_at)            AS last_heartbeat,
-      COUNT(ie.id) FILTER (
-        WHERE ie.status = 'ok'
-          AND ie.created_at >= NOW() - $1::int * INTERVAL '1 day'
-      )::int                        AS batches_received,
-      COUNT(ie.id) FILTER (
-        WHERE ie.status != 'ok'
-          AND ie.created_at >= NOW() - $1::int * INTERVAL '1 day'
-      )::int                        AS batches_failed,
-      COALESCE((
-        SELECT AVG(
-          EXTRACT(EPOCH FROM (s.synced_at - COALESCE(s.ended_at, s.started_at)))
-        )::int
-        FROM sync_sessions s
-        WHERE s.member_id = m.id
-          AND s.synced_at >= NOW() - $1::int * INTERVAL '1 day'
-          AND s.ended_at IS NOT NULL
-          AND s.synced_at > COALESCE(s.ended_at, s.started_at)
-      ), 0)                         AS avg_ingestion_lag_seconds
-    FROM members m
-    LEFT JOIN teams t ON t.id = m.team_id
-    LEFT JOIN ingest_events ie ON ie.member_id = m.id
-    GROUP BY m.id, m.display_name, m.daemon_version, t.id, t.name
-    ORDER BY last_heartbeat DESC NULLS LAST
-  `, [days]);
+  const [members, teams, events, sessions, releases] = await Promise.all([
+    queryCol<any>('members'),
+    queryCol<any>('teams'),
+    queryCol<any>('ingest_events'),
+    queryCol<any>('sync_sessions'),
+    queryCol<any>('daemon_releases', [
+      { type: 'where', field: 'active', op: '==', value: true },
+      { type: 'orderBy', field: 'released_at', direction: 'desc' },
+      { type: 'limit', n: 1 },
+    ]),
+  ]);
 
-  // ── 2. Ingestion lag trend — from sync_sessions ───────────────────────────
-  // synced_at - ended_at gives the true ingestion lag per session.
-  const { rows: lagTrend } = await query(`
-    SELECT
-      s.synced_at::date                                                       AS day,
-      AVG(
-        EXTRACT(EPOCH FROM (s.synced_at - COALESCE(s.ended_at, s.started_at)))
-      )::int                                                                  AS avg_lag_seconds
-    FROM sync_sessions s
-    WHERE s.synced_at >= CURRENT_DATE - $1::int
-      AND s.ended_at IS NOT NULL
-      AND s.synced_at > COALESCE(s.ended_at, s.started_at)
-    GROUP BY 1
-    ORDER BY 1 ASC
-  `, [days]);
+  const teamById = new Map(teams.map((t: any) => [t.id, t]));
 
-  // ── 3. Failure rate per daemon — from ingest_events ──────────────────────
-  const { rows: failureRows } = await query(`
-    SELECT
-      m.id::text        AS daemon_id,
-      m.display_name    AS daemon_name,
-      COUNT(ie.id) FILTER (WHERE ie.status = 'ok')::int   AS total_received,
-      COUNT(ie.id) FILTER (WHERE ie.status != 'ok')::int  AS total_failed,
-      ROUND(
-        CASE WHEN COUNT(ie.id) = 0 THEN 0
-             ELSE COUNT(ie.id) FILTER (WHERE ie.status != 'ok')::numeric
-                  / COUNT(ie.id) * 100
-        END, 2
-      ) AS failure_rate_pct
-    FROM members m
-    LEFT JOIN ingest_events ie ON ie.member_id = m.id
-      AND ie.created_at >= NOW() - $1::int * INTERVAL '1 day'
-    GROUP BY m.id, m.display_name
-    HAVING COUNT(ie.id) > 0
-    ORDER BY failure_rate_pct DESC NULLS LAST
-  `, [days]);
+  // Events by member
+  const eventsByMember = new Map<string, any[]>();
+  for (const e of events) {
+    if (!e.member_id) continue;
+    if (!eventsByMember.has(e.member_id)) eventsByMember.set(e.member_id, []);
+    eventsByMember.get(e.member_id)!.push(e);
+  }
 
-  // ── 4. Schema health ───────────────────────────────────────────────────────
-  const { rows: schemaRows } = await query(`
-    SELECT COUNT(*) AS table_count,
-           MAX(last_analyze) AS last_analyzed
-    FROM pg_stat_user_tables
-    WHERE schemaname = 'public'
-  `);
+  // Sessions in window by member
+  const lagSumsByMember = new Map<string, { totalLag: number; count: number }>();
+  for (const s of sessions) {
+    if (!s.member_id || !s.synced_at) continue;
+    if (s.synced_at < cutoff) continue;
+    const endTs = s.ended_at || s.started_at;
+    if (endTs && s.synced_at > endTs) {
+      const lag = (new Date(s.synced_at).getTime() - new Date(endTs).getTime()) / 1000;
+      if (lag > 0) {
+        if (!lagSumsByMember.has(s.member_id)) lagSumsByMember.set(s.member_id, { totalLag: 0, count: 0 });
+        const entry = lagSumsByMember.get(s.member_id)!;
+        entry.totalLag += lag;
+        entry.count += 1;
+      }
+    }
+  }
 
-  // ── 5. Active vs total daemons ────────────────────────────────────────────
-  const { rows: activeRows } = await query(`
-    SELECT
-      COUNT(DISTINCT m.id)::int AS total_registered,
-      COUNT(DISTINCT ie.member_id) FILTER (
-        WHERE ie.created_at >= NOW() - INTERVAL '24 hours'
-      )::int AS active_24h
-    FROM members m
-    LEFT JOIN ingest_events ie ON ie.member_id = m.id
-  `);
+  // 1. Daemon health
+  const daemonRows = members.map((m: any) => {
+    const org = m.team_id ? teamById.get(m.team_id) : null;
+    const mEvents = eventsByMember.get(m.id) || [];
+    
+    let lastHeartbeat: string | null = null;
+    let batchesReceived = 0;
+    let batchesFailed = 0;
 
-  // ── 6. Latest release version ─────────────────────────────────────────────
-  const { rows: latestReleaseRows } = await query(`
-    SELECT version FROM daemon_releases
-    WHERE active = true
-    ORDER BY released_at DESC
-    LIMIT 1
-  `);
-  const latestReleaseVersion = latestReleaseRows[0]?.version || null;
+    for (const e of mEvents) {
+      if (e.created_at && (!lastHeartbeat || e.created_at > lastHeartbeat)) {
+        lastHeartbeat = e.created_at;
+      }
+      if (e.created_at && e.created_at >= cutoff) {
+        if (e.status === 'ok') {
+          batchesReceived += 1;
+        } else {
+          batchesFailed += 1;
+        }
+      }
+    }
+
+    const lagData = lagSumsByMember.get(m.id);
+    const avgLag = lagData && lagData.count > 0 ? Math.round(lagData.totalLag / lagData.count) : 0;
+
+    return {
+      daemon_id: m.id,
+      daemon_name: m.display_name,
+      daemon_version: m.daemon_version || null,
+      org_id: org?.id || null,
+      org_name: org?.name || 'Independent',
+      last_heartbeat: lastHeartbeat,
+      batches_received: batchesReceived,
+      batches_failed: batchesFailed,
+      avg_ingestion_lag_seconds: avgLag,
+    };
+  }).sort((a, b) => {
+    if (!a.last_heartbeat) return 1;
+    if (!b.last_heartbeat) return -1;
+    return b.last_heartbeat.localeCompare(a.last_heartbeat);
+  });
+
+  // 2. Ingestion lag trend
+  const lagTrendMap = new Map<string, { totalLag: number; count: number }>();
+  for (const s of sessions) {
+    if (!s.synced_at) continue;
+    const day = String(s.synced_at).slice(0, 10);
+    if (day < cutoffDate) continue;
+    const endTs = s.ended_at || s.started_at;
+    if (endTs && s.synced_at > endTs) {
+      const lag = (new Date(s.synced_at).getTime() - new Date(endTs).getTime()) / 1000;
+      if (lag > 0) {
+        if (!lagTrendMap.has(day)) lagTrendMap.set(day, { totalLag: 0, count: 0 });
+        const entry = lagTrendMap.get(day)!;
+        entry.totalLag += lag;
+        entry.count += 1;
+      }
+    }
+  }
+  const lagTrend = Array.from(lagTrendMap.entries())
+    .map(([day, { totalLag, count }]) => ({
+      day,
+      avg_lag_seconds: count > 0 ? Math.round(totalLag / count) : 0,
+    }))
+    .sort((a, b) => a.day.localeCompare(b.day));
+
+  // 3. Failure rate per daemon
+  const failureRows = members
+    .map((m: any) => {
+      const mEvents = (eventsByMember.get(m.id) || []).filter((e) => e.created_at && e.created_at >= cutoff);
+      if (mEvents.length === 0) return null;
+      let totalReceived = 0;
+      let totalFailed = 0;
+      for (const e of mEvents) {
+        if (e.status === 'ok') totalReceived += 1;
+        else totalFailed += 1;
+      }
+      const total = totalReceived + totalFailed;
+      const rate = total > 0 ? Number(((totalFailed / total) * 100).toFixed(2)) : 0;
+      return {
+        daemon_id: m.id,
+        daemon_name: m.display_name,
+        total_received: totalReceived,
+        total_failed: totalFailed,
+        failure_rate_pct: rate,
+      };
+    })
+    .filter(Boolean)
+    .sort((a: any, b: any) => b.failure_rate_pct - a.failure_rate_pct);
+
+  // 4. Active vs total daemons
+  const active24hSet = new Set<string>();
+  for (const e of events) {
+    if (e.member_id && e.created_at && e.created_at >= h24Ago) {
+      active24hSet.add(e.member_id);
+    }
+  }
+
+  const latestReleaseVersion = releases[0]?.version || null;
 
   return NextResponse.json({
     range_days: days,
@@ -133,11 +173,11 @@ export async function GET(req: NextRequest) {
     lag_trend: lagTrend,
     failure_rates: failureRows,
     schema: {
-      table_count: Number(schemaRows[0]?.table_count ?? 0),
-      last_analyzed: schemaRows[0]?.last_analyzed ?? null,
+      table_count: 10,
+      last_analyzed: null,
     },
-    active_24h: Number(activeRows[0]?.active_24h ?? 0),
-    total_known: Number(activeRows[0]?.total_registered ?? 0),
+    active_24h: active24hSet.size,
+    total_known: members.length,
     latest_version: latestReleaseVersion,
   });
 }

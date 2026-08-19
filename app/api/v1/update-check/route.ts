@@ -21,7 +21,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { memberFromAuthHeader } from '@/lib/team/auth';
-import { query } from '@/lib/team/db';
+import { setDocById, queryCol } from '@/lib/team/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -51,29 +51,23 @@ export async function GET(req: NextRequest) {
 
     // 3. Update member's daemon_version and daemon_last_seen_at in DB
     if (currentVersion) {
-      await query(
-        `UPDATE members
-            SET daemon_version = $1, daemon_last_seen_at = now()
-          WHERE id = $2`,
-        [currentVersion, member.member_id],
-      );
+      await setDocById('members', member.member_id, { daemon_version: currentVersion, daemon_last_seen_at: new Date().toISOString() }, true);
     }
 
-    // 4. Fetch the latest active release
-    const { rows } = await query<{
+    const releaseDocs = await queryCol<{
       version: string;
       download_url: string;
       sha256: string;
       mandatory: boolean;
-    }>(
-      `SELECT version, download_url, sha256, mandatory
-         FROM daemon_releases
-        WHERE active = true
-        ORDER BY released_at DESC
-        LIMIT 1`,
-    );
+      active: boolean;
+      released_at: string;
+    }>('daemon_releases', [
+      { type: 'where', field: 'active', op: '==', value: true },
+      { type: 'orderBy', field: 'released_at', direction: 'desc' },
+      { type: 'limit', n: 1 },
+    ]);
 
-    if (!rows.length) {
+    if (!releaseDocs.length) {
       // No release record yet — tell the daemon it's up-to-date
       return NextResponse.json(
         {
@@ -88,7 +82,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const latest = rows[0];
+    const latest = releaseDocs[0];
     const updateAvailable =
       !!currentVersion && compareVersions(latest.version, currentVersion) > 0;
 

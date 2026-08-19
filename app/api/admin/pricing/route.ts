@@ -7,7 +7,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { queryCol, setDocById, deleteDocById, newUuid } from '@/lib/team/db';
 import { recalculateAllCosts, recalculateTeamCosts } from '@/lib/team/stats';
 import { recordAuditEvent } from '@/lib/team/audit';
 
@@ -32,35 +32,25 @@ const DEFAULT_SYSTEM_RULES = [
 ];
 
 export async function GET(req: NextRequest) {
-  if (!requireSuperadmin(req)) {
-    return NextResponse.json({ error: 'superadmin access required' }, { status: 403 });
-  }
+  if (!requireSuperadmin(req)) return NextResponse.json({ error: 'superadmin access required' }, { status: 403 });
 
   try {
-    const { rows: pricing } = await query(`
-      SELECT 
-        mp.id, 
-        mp.team_id, 
-        mp.model_pattern, 
-        mp.cost_in_per_m, 
-        mp.cost_out_per_m, 
-        mp.cost_cache_read_per_m, 
-        mp.created_at,
-        t.name AS team_name
-      FROM model_pricing mp
-      LEFT JOIN teams t ON t.id = mp.team_id
-      ORDER BY (mp.team_id IS NOT NULL) ASC, mp.model_pattern ASC
-    `);
+    const pricingDocs = await queryCol<any>('model_pricing');
+    const teamDocs = await queryCol<any>('teams');
+    const teamById = new Map(teamDocs.map((t: any) => [t.id, t]));
 
-    const { rows: teams } = await query(`
-      SELECT id, name FROM teams ORDER BY name ASC
-    `);
-
-    return NextResponse.json({
-      pricing,
-      teams,
-      defaultRules: DEFAULT_SYSTEM_RULES,
+    const pricing = pricingDocs.map((mp: any) => ({
+      ...mp,
+      team_name: mp.team_id ? (teamById.get(mp.team_id)?.name || mp.team_id) : null,
+    })).sort((a: any, b: any) => {
+      if (!a.team_id && b.team_id) return -1;
+      if (a.team_id && !b.team_id) return 1;
+      return String(a.model_pattern).localeCompare(String(b.model_pattern));
     });
+
+    const teams = teamDocs.sort((a: any, b: any) => String(a.name).localeCompare(String(b.name)));
+
+    return NextResponse.json({ pricing, teams, defaultRules: DEFAULT_SYSTEM_RULES });
   } catch (err: any) {
     console.error('[admin/pricing GET error]', err);
     return NextResponse.json({ error: String(err?.message || err) }, { status: 500 });
@@ -68,9 +58,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  if (!requireSuperadmin(req)) {
-    return NextResponse.json({ error: 'superadmin access required' }, { status: 403 });
-  }
+  if (!requireSuperadmin(req)) return NextResponse.json({ error: 'superadmin access required' }, { status: 403 });
   const actorSession = getSessionFromCookie(req.headers.get('cookie'));
 
   try {
@@ -78,55 +66,24 @@ export async function POST(req: NextRequest) {
     const { id, teamId, modelPattern, costInPerM, costOutPerM, costCacheReadPerM, syncRecalc } = body;
 
     const pattern = String(modelPattern || '').trim();
-    if (!pattern) {
-      return NextResponse.json({ error: 'modelPattern is required' }, { status: 400 });
-    }
+    if (!pattern) return NextResponse.json({ error: 'modelPattern is required' }, { status: 400 });
 
     const costIn = parseFloat(costInPerM) || 0;
     const costOut = parseFloat(costOutPerM) || 0;
     const costCache = parseFloat(costCacheReadPerM) || 0;
     const finalTeamId = (!teamId || teamId === 'global' || teamId === '') ? null : teamId;
 
-    let savedRule;
-    if (id) {
-      const { rows } = await query(`
-        UPDATE model_pricing
-        SET team_id = $2,
-            model_pattern = $3,
-            cost_in_per_m = $4,
-            cost_out_per_m = $5,
-            cost_cache_read_per_m = $6
-        WHERE id = $1
-        RETURNING *
-      `, [id, finalTeamId, pattern, costIn, costOut, costCache]);
-      savedRule = rows[0];
-    } else {
-      if (finalTeamId) {
-        const { rows } = await query(`
-          INSERT INTO model_pricing (team_id, model_pattern, cost_in_per_m, cost_out_per_m, cost_cache_read_per_m)
-          VALUES ($1, $2, $3, $4, $5)
-          ON CONFLICT (team_id, LOWER(model_pattern))
-          DO UPDATE SET
-            cost_in_per_m = EXCLUDED.cost_in_per_m,
-            cost_out_per_m = EXCLUDED.cost_out_per_m,
-            cost_cache_read_per_m = EXCLUDED.cost_cache_read_per_m
-          RETURNING *
-        `, [finalTeamId, pattern, costIn, costOut, costCache]);
-        savedRule = rows[0];
-      } else {
-        const { rows } = await query(`
-          INSERT INTO model_pricing (team_id, model_pattern, cost_in_per_m, cost_out_per_m, cost_cache_read_per_m)
-          VALUES (NULL, $1, $2, $3, $4)
-          ON CONFLICT (LOWER(model_pattern)) WHERE team_id IS NULL
-          DO UPDATE SET
-            cost_in_per_m = EXCLUDED.cost_in_per_m,
-            cost_out_per_m = EXCLUDED.cost_out_per_m,
-            cost_cache_read_per_m = EXCLUDED.cost_cache_read_per_m
-          RETURNING *
-        `, [pattern, costIn, costOut, costCache]);
-        savedRule = rows[0];
-      }
-    }
+    const ruleId = id || newUuid();
+    const ruleDoc = {
+      id: ruleId,
+      team_id: finalTeamId,
+      model_pattern: pattern,
+      cost_in_per_m: costIn,
+      cost_out_per_m: costOut,
+      cost_cache_read_per_m: costCache,
+      created_at: new Date().toISOString(),
+    };
+    await setDocById('model_pricing', ruleId, ruleDoc, true);
 
     let recalcStats = null;
     if (syncRecalc !== false) {
@@ -142,15 +99,11 @@ export async function POST(req: NextRequest) {
       actorUsername: actorSession?.username,
       action: id ? 'pricing.update' : 'pricing.create',
       targetType: 'model_pricing',
-      targetId: savedRule?.id ?? null,
+      targetId: ruleId,
       metadata: { teamId: finalTeamId, modelPattern: pattern, costIn, costOut, costCache },
     });
 
-    return NextResponse.json({
-      ok: true,
-      rule: savedRule,
-      recalculated: recalcStats,
-    }, { status: 201 });
+    return NextResponse.json({ ok: true, rule: ruleDoc, recalculated: recalcStats }, { status: 201 });
   } catch (err: any) {
     console.error('[admin/pricing POST error]', err);
     return NextResponse.json({ error: String(err?.message || err) }, { status: 500 });
@@ -158,21 +111,18 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
-  if (!requireSuperadmin(req)) {
-    return NextResponse.json({ error: 'superadmin access required' }, { status: 403 });
-  }
+  if (!requireSuperadmin(req)) return NextResponse.json({ error: 'superadmin access required' }, { status: 403 });
   const actorSession = getSessionFromCookie(req.headers.get('cookie'));
 
   const id = req.nextUrl.searchParams.get('id');
-  if (!id) {
-    return NextResponse.json({ error: 'id required' }, { status: 400 });
-  }
+  if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
 
   try {
-    const { rows } = await query('SELECT team_id, model_pattern FROM model_pricing WHERE id = $1', [id]);
-    const teamId = rows[0]?.team_id || null;
+    const { getDocById } = await import('@/lib/team/db');
+    const ruleDoc = await getDocById('model_pricing', id) as any;
+    const teamId = ruleDoc?.team_id || null;
 
-    const { rowCount } = await query('DELETE FROM model_pricing WHERE id = $1', [id]);
+    await deleteDocById('model_pricing', id);
 
     if (teamId) {
       await recalculateTeamCosts(teamId, true);
@@ -186,10 +136,10 @@ export async function DELETE(req: NextRequest) {
       action: 'pricing.delete',
       targetType: 'model_pricing',
       targetId: id,
-      metadata: { teamId, modelPattern: rows[0]?.model_pattern ?? null },
+      metadata: { teamId, modelPattern: ruleDoc?.model_pattern ?? null },
     });
 
-    return NextResponse.json({ ok: true, deleted: (rowCount || 0) > 0 });
+    return NextResponse.json({ ok: true, deleted: true });
   } catch (err: any) {
     console.error('[admin/pricing DELETE error]', err);
     return NextResponse.json({ error: String(err?.message || err) }, { status: 500 });

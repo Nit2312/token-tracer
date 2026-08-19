@@ -1,15 +1,15 @@
 /**
- * CRUD for users table — superadmin only.
+ * CRUD for users collection — superadmin only.
  *
  * GET    /api/admin/users          → list all users with linked member info
- * POST   /api/admin/users          → create a user (hashes password, generates API key if memberId given)
- * PUT    /api/admin/users          → update display name, role, active, memberId
+ * POST   /api/admin/users          → create a user
+ * PUT    /api/admin/users          → update user
  * DELETE /api/admin/users?id=uuid  → hard delete a user
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie, hashPassword } from '@/lib/auth';
 import { generateApiKey, hashApiKey } from '@/lib/team/auth';
-import { query } from '@/lib/team/db';
+import { queryCol, getDocById, setDocById, deleteDocById, batchWrite, newUuid } from '@/lib/team/db';
 import { recordAuditEvent } from '@/lib/team/audit';
 
 export const dynamic = 'force-dynamic';
@@ -23,73 +23,83 @@ export async function GET(req: NextRequest) {
   if (!requireSuperadmin(req)) return NextResponse.json({ error: 'superadmin access required' }, { status: 403 });
 
   try {
-    const { rows } = await query(`
-      SELECT u.id, u.username, u.display_name, u.role, u.active,
-             u.member_id, u.team_id, u.last_login_at, u.created_at, u.updated_at,
-             m.display_name AS member_name,
-             COALESCE(
-               (SELECT string_agg(t.name, ', ')
-                FROM team_members tm
-                JOIN teams t ON t.id = tm.team_id
-                WHERE tm.member_id = u.member_id),
-               t.name,
-               '—'
-             ) AS team_name,
-             COALESCE(
-               (SELECT json_agg(json_build_object('id', t.id, 'name', t.name, 'role', tm.role))
-                FROM team_members tm
-                JOIN teams t ON t.id = tm.team_id
-                WHERE tm.member_id = u.member_id),
-               '[]'::json
-             ) AS teams,
-             (u.api_key IS NOT NULL) AS has_api_key,
-             (SELECT count(*)::int FROM sync_sessions s WHERE s.member_id = u.member_id) AS session_count,
-             (SELECT max(COALESCE(s.ended_at, s.started_at)) FROM sync_sessions s WHERE s.member_id = u.member_id) AS last_session_at
-      FROM users u
-      LEFT JOIN members m ON m.id = u.member_id
-      LEFT JOIN teams t ON t.id = u.team_id
-      ORDER BY u.created_at ASC
-    `);
+    const userDocs = await queryCol<any>('users');
+    const memberDocs = await queryCol<any>('members');
+    const teamMemberDocs = await queryCol<any>('team_members');
+    const teamDocs = await queryCol<any>('teams');
+    const sessionDocs = await queryCol<any>('sync_sessions');
 
-    // Also fetch members that have no user account (to help with linking)
-    const { rows: unlinkedMembers } = await query(`
-      SELECT m.id, m.display_name, m.team_id,
-             COALESCE(
-               (SELECT string_agg(t.name, ', ')
-                FROM team_members tm
-                JOIN teams t ON t.id = tm.team_id
-                WHERE tm.member_id = m.id),
-               t.name,
-               'Independent'
-             ) AS team_name,
-             COALESCE(
-               (SELECT json_agg(json_build_object('id', t.id, 'name', t.name, 'role', tm.role))
-                FROM team_members tm
-                JOIN teams t ON t.id = tm.team_id
-                WHERE tm.member_id = m.id),
-               '[]'::json
-             ) AS teams
-      FROM members m
-      LEFT JOIN teams t ON t.id = m.team_id
-      WHERE m.id NOT IN (SELECT member_id FROM users WHERE member_id IS NOT NULL)
-      ORDER BY m.display_name
-    `);
+    const memberById = new Map(memberDocs.map((m: any) => [m.id, m]));
+    const teamById = new Map(teamDocs.map((t: any) => [t.id, t]));
 
-    // Also fetch all teams with accurate member counts
-    const { rows: teams } = await query(`
-      SELECT t.id, t.name,
-             (SELECT count(DISTINCT tm.member_id)::int FROM team_members tm WHERE tm.team_id = t.id) AS member_count
-      FROM teams t
-      ORDER BY t.name
-    `);
-
-    return NextResponse.json({ users: rows, unlinkedMembers, teams });
-  } catch (err: any) {
-    const errMsg = String(err?.message || err);
-    if (errMsg.includes('relation "users" does not exist')) {
-      return NextResponse.json({ users: [], unlinkedMembers: [], teams: [], needsMigration: true });
+    // Build session count + last session per member
+    const sessionCountByMember = new Map<string, number>();
+    const lastSessionByMember = new Map<string, string>();
+    for (const s of sessionDocs) {
+      const mid = s.member_id;
+      if (!mid) continue;
+      sessionCountByMember.set(mid, (sessionCountByMember.get(mid) || 0) + 1);
+      const ts = s.ended_at || s.started_at;
+      const prev = lastSessionByMember.get(mid);
+      if (!prev || (ts && ts > prev)) lastSessionByMember.set(mid, ts);
     }
-    return NextResponse.json({ error: errMsg }, { status: 500 });
+
+    // Build team membership per member
+    const teamsByMember = new Map<string, Array<{ id: string; name: string; role: string }>>();
+    for (const tm of teamMemberDocs) {
+      if (!teamsByMember.has(tm.member_id)) teamsByMember.set(tm.member_id, []);
+      const t = teamById.get(tm.team_id);
+      if (t) teamsByMember.get(tm.member_id)!.push({ id: t.id, name: t.name, role: tm.role });
+    }
+
+    const users = userDocs.map((u: any) => {
+      const member = u.member_id ? memberById.get(u.member_id) : null;
+      const memberTeams = u.member_id ? (teamsByMember.get(u.member_id) || []) : [];
+      const primaryTeam = u.team_id ? teamById.get(u.team_id) : null;
+      const teamName = memberTeams.length > 0
+        ? memberTeams.map((t: any) => t.name).join(', ')
+        : (primaryTeam?.name || '—');
+      return {
+        ...u,
+        member_name: member?.display_name || null,
+        team_name: teamName,
+        teams: memberTeams,
+        has_api_key: Boolean(u.api_key),
+        session_count: sessionCountByMember.get(u.member_id) || 0,
+        last_session_at: lastSessionByMember.get(u.member_id) || null,
+      };
+    }).sort((a: any, b: any) => String(a.created_at).localeCompare(String(b.created_at)));
+
+    // Members not linked to any user
+    const linkedMemberIds = new Set(userDocs.map((u: any) => u.member_id).filter(Boolean));
+    const unlinkedMembers = memberDocs
+      .filter((m: any) => !linkedMemberIds.has(m.id))
+      .map((m: any) => {
+        const memberTeams = teamsByMember.get(m.id) || [];
+        const primaryTeam = m.team_id ? teamById.get(m.team_id) : null;
+        return {
+          ...m,
+          team_name: memberTeams.length > 0 ? memberTeams.map((t: any) => t.name).join(', ') : (primaryTeam?.name || 'Independent'),
+          teams: memberTeams,
+        };
+      })
+      .sort((a: any, b: any) => String(a.display_name).localeCompare(String(b.display_name)));
+
+    // Teams with member counts
+    const memberCountByTeam = new Map<string, Set<string>>();
+    for (const tm of teamMemberDocs) {
+      if (!memberCountByTeam.has(tm.team_id)) memberCountByTeam.set(tm.team_id, new Set());
+      memberCountByTeam.get(tm.team_id)!.add(tm.member_id);
+    }
+    const teams = teamDocs.map((t: any) => ({
+      id: t.id, name: t.name,
+      member_count: memberCountByTeam.get(t.id)?.size || 0,
+    })).sort((a: any, b: any) => String(a.name).localeCompare(String(b.name)));
+
+    return NextResponse.json({ users, unlinkedMembers, teams });
+  } catch (err: any) {
+    console.error('[admin/users GET error]', err);
+    return NextResponse.json({ error: String(err?.message || err) }, { status: 500 });
   }
 }
 
@@ -111,47 +121,24 @@ export async function POST(req: NextRequest) {
     if (!username || !password || !displayName) {
       return NextResponse.json({ error: 'username, password, and displayName are required' }, { status: 400 });
     }
-
-    if (password.length < 8) {
-      return NextResponse.json({ error: 'Password must be at least 8 characters long' }, { status: 400 });
-    }
-    if (!['user', 'admin', 'superadmin'].includes(role)) {
-      return NextResponse.json({ error: 'invalid role' }, { status: 400 });
-    }
-
-    // Validate username format
-    if (username.length < 2) {
-      return NextResponse.json({ error: 'Username must be at least 2 characters long' }, { status: 400 });
-    }
-    if (!/^[a-z0-9_.-]+$/.test(username)) {
-      return NextResponse.json({ error: 'Username can only contain letters, numbers, dots, hyphens, and underscores' }, { status: 400 });
-    }
-
-    // Reserved usernames check
+    if (password.length < 8) return NextResponse.json({ error: 'Password must be at least 8 characters long' }, { status: 400 });
+    if (!['user', 'admin', 'superadmin'].includes(role)) return NextResponse.json({ error: 'invalid role' }, { status: 400 });
+    if (username.length < 2) return NextResponse.json({ error: 'Username must be at least 2 characters long' }, { status: 400 });
+    if (!/^[a-z0-9_.-]+$/.test(username)) return NextResponse.json({ error: 'Username can only contain letters, numbers, dots, hyphens, and underscores' }, { status: 400 });
     const reservedUsernames = ['team', 'superadmin', 'admin', 'root', 'api', 'system', 'dashboard'];
-    if (reservedUsernames.includes(username)) {
-      return NextResponse.json({ error: 'This username is reserved. Please choose another username.' }, { status: 409 });
-    }
+    if (reservedUsernames.includes(username)) return NextResponse.json({ error: 'This username is reserved.' }, { status: 409 });
 
-    // Check if username exists (case-insensitive)
-    const { rows: existing } = await query('SELECT id FROM users WHERE LOWER(username) = $1', [username]);
-    if (existing.length > 0) {
-      return NextResponse.json({ error: `Username '${username}' is already taken. Please choose another one.` }, { status: 409 });
-    }
+    const existing = await queryCol('users', [{ type: 'where', field: 'username', op: '==', value: username }, { type: 'limit', n: 1 }]);
+    if (existing.length > 0) return NextResponse.json({ error: `Username '${username}' is already taken.` }, { status: 409 });
 
     const passwordHash = await hashPassword(password);
-
     let finalMemberId = memberId;
     let rawApiKey: string | null = null;
-    let apiKeyHash: string | null = null;
 
     let finalTeamId = teamId;
     if (role === 'admin' && newTeamName) {
-      const { rows: teamRows } = await query(
-        'INSERT INTO teams (name) VALUES ($1) RETURNING id',
-        [newTeamName]
-      );
-      finalTeamId = teamRows[0].id;
+      finalTeamId = newUuid();
+      await setDocById('teams', finalTeamId, { name: newTeamName, created_at: new Date().toISOString() });
     } else if (role !== 'admin') {
       finalTeamId = null;
     }
@@ -159,96 +146,55 @@ export async function POST(req: NextRequest) {
     if (memberId === 'new') {
       let memberTeamId = finalTeamId;
       if (!memberTeamId) {
-        let teamRes = await query("SELECT id FROM teams WHERE name = 'Independent' LIMIT 1");
-        memberTeamId = teamRes.rows[0]?.id;
+        const indep = await queryCol<{ id: string }>('teams', [{ type: 'where', field: 'name', op: '==', value: 'Independent' }, { type: 'limit', n: 1 }]);
+        memberTeamId = indep[0]?.id;
         if (!memberTeamId) {
-          const newTeamRes = await query("INSERT INTO teams (name) VALUES ('Independent') RETURNING id");
-          memberTeamId = newTeamRes.rows[0].id;
+          memberTeamId = newUuid();
+          await setDocById('teams', memberTeamId, { name: 'Independent', created_at: new Date().toISOString() });
         }
       }
-
-      const memberRes = await query(
-        "INSERT INTO members (team_id, display_name, role) VALUES ($1, $2, 'member') RETURNING id",
-        [memberTeamId, displayName]
-      );
-      finalMemberId = memberRes.rows[0].id;
-
-      await query(
-        `INSERT INTO team_members (team_id, member_id, role)
-         VALUES ($1, $2, 'member')
-         ON CONFLICT (team_id, member_id) DO NOTHING`,
-        [memberTeamId, finalMemberId],
-      );
+      finalMemberId = newUuid();
+      await setDocById('members', finalMemberId, { id: finalMemberId, team_id: memberTeamId, display_name: displayName, role: 'member', created_at: new Date().toISOString() });
+      await setDocById('team_members', `${memberTeamId}_${finalMemberId}`, { team_id: memberTeamId, member_id: finalMemberId, role: 'member', created_at: new Date().toISOString() }, true);
     }
 
     if (finalMemberId && finalMemberId !== 'new') {
       rawApiKey = generateApiKey();
-      apiKeyHash = hashApiKey(rawApiKey);
-      // Upsert a member_key row for this member
-      await query(
-        `INSERT INTO member_keys (member_id, key_hash, label)
-         VALUES ($1, $2, 'default')
-         ON CONFLICT (key_hash) DO NOTHING`,
-        [finalMemberId, apiKeyHash],
-      );
+      const keyId = newUuid();
+      await setDocById('member_keys', keyId, { id: keyId, member_id: finalMemberId, key_hash: hashApiKey(rawApiKey), label: 'default', created_at: new Date().toISOString(), revoked_at: null }, true);
 
-      // Link any selected teamIds into team_members
       for (const tId of teamIds) {
         if (tId && tId !== 'new') {
-          await query(
-            `INSERT INTO team_members (team_id, member_id, role)
-             VALUES ($1, $2, 'member')
-             ON CONFLICT (team_id, member_id) DO NOTHING`,
-            [tId, finalMemberId],
-          );
+          await setDocById('team_members', `${tId}_${finalMemberId}`, { team_id: tId, member_id: finalMemberId, role: 'member', created_at: new Date().toISOString() }, true);
         }
       }
 
-      // Ensure Independent team is always linked by default
-      const { rows: indepRows } = await query("SELECT id FROM teams WHERE name = 'Independent' LIMIT 1");
-      if (indepRows[0]?.id) {
-        await query(
-          `INSERT INTO team_members (team_id, member_id, role)
-           VALUES ($1, $2, 'member')
-           ON CONFLICT (team_id, member_id) DO NOTHING`,
-          [indepRows[0].id, finalMemberId],
-        );
+      // Ensure Independent team linked
+      const indepTeams = await queryCol<{ id: string }>('teams', [{ type: 'where', field: 'name', op: '==', value: 'Independent' }, { type: 'limit', n: 1 }]);
+      if (indepTeams[0]?.id) {
+        await setDocById('team_members', `${indepTeams[0].id}_${finalMemberId}`, { team_id: indepTeams[0].id, member_id: finalMemberId, role: 'member', created_at: new Date().toISOString() }, true);
       }
     }
 
-    const { rows } = await query(`
-      INSERT INTO users (username, password_hash, display_name, member_id, team_id, role, api_key)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-      RETURNING id, username, display_name, role, member_id, team_id, active, created_at
-    `, [username, passwordHash, displayName, finalMemberId, finalTeamId, role, rawApiKey]);
+    const userId = newUuid();
+    const userDoc = {
+      id: userId, username, password_hash: passwordHash, display_name: displayName,
+      member_id: finalMemberId, team_id: finalTeamId, role, api_key: rawApiKey,
+      active: true, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    };
+    await setDocById('users', userId, userDoc);
 
     const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || 'https://token-tracer-three.vercel.app';
-    let installCommandMac = null;
-    let installCommandWin = null;
+    let installCommandMac = null, installCommandWin = null;
     if (rawApiKey) {
       installCommandMac = `curl -fsSL ${serverUrl}/install.sh | bash -s -- --key ${rawApiKey}`;
       installCommandWin = `$ApiKey="${rawApiKey}"; iex (irm ${serverUrl}/install.ps1)`;
     }
 
-    await recordAuditEvent({
-      actorUserId: actorSession?.userId,
-      actorUsername: actorSession?.username,
-      action: 'user.create',
-      targetType: 'user',
-      targetId: rows[0].id,
-      metadata: { username, role, memberId: finalMemberId },
-    });
+    await recordAuditEvent({ actorUserId: actorSession?.userId, actorUsername: actorSession?.username, action: 'user.create', targetType: 'user', targetId: userId, metadata: { username, role, memberId: finalMemberId } });
 
-    return NextResponse.json({
-      user: rows[0],
-      apiKey: rawApiKey,
-      installCommandMac,
-      installCommandWin
-    }, { status: 201 });
+    return NextResponse.json({ user: userDoc, apiKey: rawApiKey, installCommandMac, installCommandWin }, { status: 201 });
   } catch (err: any) {
-    if (err?.code === '23505') {
-      return NextResponse.json({ error: 'Username is already taken. Please choose another one.' }, { status: 409 });
-    }
     console.error('[admin/users POST error]', err);
     return NextResponse.json({ error: String(err.message || err) }, { status: 500 });
   }
@@ -266,31 +212,19 @@ export async function PUT(req: NextRequest) {
     if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
 
     if (username) {
-      if (username.length < 2) {
-        return NextResponse.json({ error: 'Username must be at least 2 characters long' }, { status: 400 });
-      }
-      if (!/^[a-z0-9_.-]+$/.test(username)) {
-        return NextResponse.json({ error: 'Username can only contain letters, numbers, dots, hyphens, and underscores' }, { status: 400 });
-      }
+      if (username.length < 2) return NextResponse.json({ error: 'Username must be at least 2 characters long' }, { status: 400 });
+      if (!/^[a-z0-9_.-]+$/.test(username)) return NextResponse.json({ error: 'Username can only contain letters, numbers, dots, hyphens, and underscores' }, { status: 400 });
       const reservedUsernames = ['team', 'superadmin', 'admin', 'root', 'api', 'system', 'dashboard'];
-      if (reservedUsernames.includes(username)) {
-        return NextResponse.json({ error: 'This username is reserved' }, { status: 409 });
-      }
-      const { rows: existing } = await query('SELECT id FROM users WHERE LOWER(username) = $1 AND id != $2', [username, id]);
-      if (existing.length > 0) {
-        return NextResponse.json({ error: `Username '${username}' is already taken. Please choose another one.` }, { status: 409 });
-      }
+      if (reservedUsernames.includes(username)) return NextResponse.json({ error: 'This username is reserved' }, { status: 409 });
+      const existingUsers = await queryCol('users', [{ type: 'where', field: 'username', op: '==', value: username }, { type: 'limit', n: 1 }]);
+      if (existingUsers.length > 0 && existingUsers[0].id !== id) return NextResponse.json({ error: `Username '${username}' is already taken.` }, { status: 409 });
     }
 
     let finalTeamId = teamId;
     if (role === 'admin' && newTeamName) {
-      const { rows: teamRows } = await query(
-        'INSERT INTO teams (name) VALUES ($1) RETURNING id',
-        [newTeamName]
-      );
-      finalTeamId = teamRows[0].id;
+      finalTeamId = newUuid();
+      await setDocById('teams', finalTeamId, { name: newTeamName, created_at: new Date().toISOString() });
     } else if (role !== 'admin' && role !== undefined) {
-      // If changing role away from admin, remove team association
       finalTeamId = null;
     }
 
@@ -298,113 +232,67 @@ export async function PUT(req: NextRequest) {
     if (memberId === 'new') {
       let memberTeamId = finalTeamId;
       if (!memberTeamId) {
-        let teamRes = await query("SELECT id FROM teams WHERE name = 'Independent' LIMIT 1");
-        memberTeamId = teamRes.rows[0]?.id;
+        const indep = await queryCol<{ id: string }>('teams', [{ type: 'where', field: 'name', op: '==', value: 'Independent' }, { type: 'limit', n: 1 }]);
+        memberTeamId = indep[0]?.id;
         if (!memberTeamId) {
-          const newTeamRes = await query("INSERT INTO teams (name) VALUES ('Independent') RETURNING id");
-          memberTeamId = newTeamRes.rows[0].id;
+          memberTeamId = newUuid();
+          await setDocById('teams', memberTeamId, { name: 'Independent', created_at: new Date().toISOString() });
         }
       }
-
-      const memberRes = await query(
-        "INSERT INTO members (team_id, display_name, role) VALUES ($1, $2, 'member') RETURNING id",
-        [memberTeamId, displayName || 'Unnamed Member']
-      );
-      finalMemberId = memberRes.rows[0].id;
-
-      await query(
-        `INSERT INTO team_members (team_id, member_id, role)
-         VALUES ($1, $2, 'member')
-         ON CONFLICT (team_id, member_id) DO NOTHING`,
-        [memberTeamId, finalMemberId],
-      );
+      finalMemberId = newUuid();
+      await setDocById('members', finalMemberId, { id: finalMemberId, team_id: memberTeamId, display_name: displayName || 'Unnamed Member', role: 'member', created_at: new Date().toISOString() });
+      await setDocById('team_members', `${memberTeamId}_${finalMemberId}`, { team_id: memberTeamId, member_id: finalMemberId, role: 'member', created_at: new Date().toISOString() }, true);
     }
 
-    // Sync team_members if teamIds are provided
     if (finalMemberId && teamIds) {
-      // Re-link teams
       for (const tId of teamIds) {
         if (tId && tId !== 'new') {
-          await query(
-            `INSERT INTO team_members (team_id, member_id, role)
-             VALUES ($1, $2, 'member')
-             ON CONFLICT (team_id, member_id) DO NOTHING`,
-            [tId, finalMemberId],
-          );
+          await setDocById('team_members', `${tId}_${finalMemberId}`, { team_id: tId, member_id: finalMemberId, role: 'member', created_at: new Date().toISOString() }, true);
         }
       }
-
       // Remove unselected teams
-      if (teamIds.length > 0) {
-        await query(
-          `DELETE FROM team_members WHERE member_id = $1 AND NOT (team_id = ANY($2::uuid[]))`,
-          [finalMemberId, teamIds],
-        );
-      } else {
-        await query(
-          `DELETE FROM team_members WHERE member_id = $1`,
-          [finalMemberId],
-        );
-      }
+      const allTmDocs = await queryCol<{ team_id: string }>('team_members', [{ type: 'where', field: 'member_id', op: '==', value: finalMemberId }]);
+      const deleteOps = allTmDocs
+        .filter((tm) => teamIds.length > 0 && !teamIds.includes(tm.team_id))
+        .map((tm) => ({ type: 'delete' as const, col: 'team_members', id: tm.id }));
+      if (deleteOps.length) await batchWrite(deleteOps);
 
-      // Update primary team_id on the members table
       const primaryMemberTeamId = teamIds[0] || finalTeamId || null;
-      await query(
-        `UPDATE members SET team_id = $2 WHERE id = $1`,
-        [finalMemberId, primaryMemberTeamId],
-      );
+      if (primaryMemberTeamId) await setDocById('members', finalMemberId, { team_id: primaryMemberTeamId }, true);
     }
 
-    // Self-healing: generate API key if missing and member is linked
+    // Self-healing: generate API key if missing
+    const currentUser = await getDocById('users', id) as any;
+    if (!currentUser) return NextResponse.json({ error: 'user not found' }, { status: 404 });
+
     let rawApiKey: string | null = null;
-    let apiKeyHash: string | null = null;
-    const { rows: keyCheck } = await query(`SELECT api_key FROM users WHERE id = $1`, [id]);
-    const existingApiKey = keyCheck[0]?.api_key || null;
-
-    if (finalMemberId && finalMemberId !== 'new') {
-      if (!existingApiKey) {
-        rawApiKey = generateApiKey();
-        apiKeyHash = hashApiKey(rawApiKey);
-        await query(
-          `INSERT INTO member_keys (member_id, key_hash, label)
-           VALUES ($1, $2, 'default')
-           ON CONFLICT (key_hash) DO NOTHING`,
-          [finalMemberId, apiKeyHash],
-        );
-      }
+    const existingApiKey = currentUser.api_key || null;
+    if (finalMemberId && finalMemberId !== 'new' && !existingApiKey) {
+      rawApiKey = generateApiKey();
+      const keyId = newUuid();
+      await setDocById('member_keys', keyId, { id: keyId, member_id: finalMemberId, key_hash: hashApiKey(rawApiKey), label: 'default', created_at: new Date().toISOString(), revoked_at: null }, true);
     }
 
-    const { rows } = await query(`
-      UPDATE users SET
-        username     = COALESCE($2, username),
-        display_name = COALESCE($3, display_name),
-        role         = COALESCE($4, role),
-        active       = COALESCE($5, active),
-        member_id    = COALESCE($6, member_id),
-        team_id      = COALESCE($7, team_id),
-        api_key      = COALESCE($8, api_key),
-        updated_at   = now()
-      WHERE id = $1
-      RETURNING id, username, display_name, role, active, member_id, team_id, updated_at
-    `, [id, username ?? null, displayName ?? null, role ?? null, active ?? null, finalMemberId ?? null, finalTeamId ?? null, rawApiKey]);
+    const updateData: Record<string, any> = { updated_at: new Date().toISOString() };
+    if (username !== undefined) updateData.username = username;
+    if (displayName !== undefined) updateData.display_name = displayName;
+    if (role !== undefined) updateData.role = role;
+    if (active !== undefined) updateData.active = active;
+    if (finalMemberId !== undefined) updateData.member_id = finalMemberId;
+    if (finalTeamId !== undefined) updateData.team_id = finalTeamId;
+    if (rawApiKey) updateData.api_key = rawApiKey;
 
-    if (!rows[0]) return NextResponse.json({ error: 'user not found' }, { status: 404 });
+    await setDocById('users', id, updateData, true);
 
     const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || 'https://token-tracer-three.vercel.app';
     const effectiveApiKey = rawApiKey || existingApiKey || null;
-    let installCommandMac = null;
-    let installCommandWin = null;
+    let installCommandMac = null, installCommandWin = null;
     if (effectiveApiKey) {
       installCommandMac = `curl -fsSL ${serverUrl}/install.sh | bash -s -- --key ${effectiveApiKey}`;
       installCommandWin = `$ApiKey="${effectiveApiKey}"; iex (irm ${serverUrl}/install.ps1)`;
     }
 
-    return NextResponse.json({
-      user: rows[0],
-      apiKey: effectiveApiKey,
-      installCommandMac,
-      installCommandWin
-    });
+    return NextResponse.json({ user: { id, ...updateData }, apiKey: effectiveApiKey, installCommandMac, installCommandWin });
   } catch (err) {
     return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
   }
@@ -416,31 +304,25 @@ export async function DELETE(req: NextRequest) {
   const id = req.nextUrl.searchParams.get('id');
   if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
 
-  // BUG-15: Prevent superadmin from deleting their own account
   const actingSession = getSessionFromCookie(req.headers.get('cookie'));
   if (actingSession?.userId === id) {
     return NextResponse.json({ error: 'You cannot delete your own account' }, { status: 400 });
   }
 
   try {
-    const { rows: userRows } = await query('SELECT member_id FROM users WHERE id = $1', [id]);
-    const memberId = userRows[0]?.member_id || null;
+    const userDoc = await getDocById('users', id) as any;
+    const memberId = userDoc?.member_id || null;
 
-    const { rowCount } = await query('DELETE FROM users WHERE id = $1', [id]);
+    await deleteDocById('users', id);
 
-    // If this user was the ONLY user linked to that member, delete the member too.
-    // member_keys and team_members will cascade-delete automatically.
     if (memberId) {
-      const { rows: otherUsers } = await query(
-        'SELECT id FROM users WHERE member_id = $1 LIMIT 1',
-        [memberId],
-      );
+      const otherUsers = await queryCol('users', [{ type: 'where', field: 'member_id', op: '==', value: memberId }, { type: 'limit', n: 1 }]);
       if (otherUsers.length === 0) {
-        await query('DELETE FROM members WHERE id = $1', [memberId]);
+        await deleteDocById('members', memberId);
       }
     }
 
-    return NextResponse.json({ ok: true, deleted: (rowCount || 0) > 0 });
+    return NextResponse.json({ ok: true, deleted: true });
   } catch (err) {
     return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
   }

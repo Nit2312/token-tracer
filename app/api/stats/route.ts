@@ -4,42 +4,33 @@
  *
  * Returns the SAME rich data shape as the local buildStats() function so
  * app.js renders correctly for DB-backed users (identical to local-file mode).
- * All independent queries run in parallel via Promise.all for performance.
- *
- * Token approximation: sessions synced before real token capture had tokens_in=0.
- * We apply the same formula as ingest.ts inline in SQL so charts always show data:
- *   effective_in  = CASE WHEN tokens_in=0 AND (tool_calls+edits)>0
- *                        THEN GREATEST(500, (tool_calls+edits)*350 + changed_lines*10)
- *                        ELSE tokens_in END
- *   effective_out = CASE WHEN tokens_out=0 AND (tool_calls+edits)>0
- *                        THEN GREATEST(200, (tool_calls+edits)*150 + changed_lines*5)
- *                        ELSE tokens_out END
+ * All aggregation is done in JavaScript over Firestore reads.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { getDocById, queryCol } from '@/lib/team/db';
 import { normalizeDateParam } from '@/lib/analytics.mjs';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-// ── Inline SQL token approximation expressions ────────────────────────────────
-// Mirrors the logic in lib/team/ingest.ts: estimate tokens from tool+edit counts
-// when the actual token values were not captured at sync time.
-const EFF_IN = `
-  CASE
-    WHEN s.tokens_in = 0 AND (s.tool_calls + s.edits) > 0
-    THEN GREATEST(500, (s.tool_calls + s.edits) * 350 + s.changed_lines * 10)
-    ELSE s.tokens_in
-  END
-`.trim();
-const EFF_OUT = `
-  CASE
-    WHEN s.tokens_out = 0 AND (s.tool_calls + s.edits) > 0
-    THEN GREATEST(200, (s.tool_calls + s.edits) * 150 + s.changed_lines * 5)
-    ELSE s.tokens_out
-  END
-`.trim();
+function effIn(s: any): number {
+  const ti = Number(s.tokens_in || 0);
+  const tc = Number(s.tool_calls || 0);
+  const ed = Number(s.edits || 0);
+  const cl = Number(s.changed_lines || 0);
+  if (ti === 0 && (tc + ed) > 0) return Math.max(500, (tc + ed) * 350 + cl * 10);
+  return ti;
+}
+
+function effOut(s: any): number {
+  const to = Number(s.tokens_out || 0);
+  const tc = Number(s.tool_calls || 0);
+  const ed = Number(s.edits || 0);
+  const cl = Number(s.changed_lines || 0);
+  if (to === 0 && (tc + ed) > 0) return Math.max(200, (tc + ed) * 150 + cl * 5);
+  return to;
+}
 
 export async function GET(req: NextRequest) {
   const session = getSessionFromCookie(req.headers.get('cookie'));
@@ -53,10 +44,8 @@ export async function GET(req: NextRequest) {
 
   let memberId = session.memberId;
   try {
-    const { rows: userRows } = await query('SELECT member_id FROM users WHERE id = $1', [session.userId]);
-    if (userRows[0]?.member_id) {
-      memberId = userRows[0].member_id;
-    }
+    const userDoc = await getDocById('users', session.userId);
+    if (userDoc?.member_id) memberId = userDoc.member_id;
   } catch (err) {
     console.warn('[stats route member lookup failed]', err);
   }
@@ -75,9 +64,8 @@ export async function GET(req: NextRequest) {
     if (from && to && from > to) { const tmp = from; from = to; to = tmp; }
     const useAll = all || (!from && !to);
 
-    // ── Local file fallback (dev only, only if not database-backed) ──────────
-    if (process.env.VERCEL !== '1' && !process.env.DATABASE_URL && !process.env.NEON_CONNECTION_STRING) {
-
+    // ── Local file fallback (dev only, only if not Firebase-backed) ──────────
+    if (process.env.VERCEL !== '1' && !process.env.FIREBASE_PROJECT_ID) {
       try {
         const { scanSessions } = await import('@/lib/scan.mjs');
         const { buildStats } = await import('@/lib/analytics.mjs');
@@ -103,175 +91,171 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // ── Build parameterised WHERE clauses ────────────────────────────────────
-    const params: unknown[] = [memberId];
-    let dateFilter = '';
-    if (!useAll) {
-      if (from) { params.push(from); dateFilter += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date >= $${params.length}::date`; }
-      if (to)   { params.push(to);   dateFilter += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date <= $${params.length}::date`; }
-    }
-    if (src && src !== 'all') { params.push(src); dateFilter += ` AND s.source = $${params.length}`; }
+    // ── Fetch sessions for this member ────────────────────────────────────────
+    const allSessionConstraints: Parameters<typeof queryCol>[1] = [
+      { type: 'where', field: 'member_id', op: '==', value: memberId },
+    ];
+    if (src && src !== 'all') allSessionConstraints.push({ type: 'where', field: 'source', op: '==', value: src });
 
-    // ── Fire all independent queries in parallel ──────────────────────────────
-    const [
-      totalsRes,
-      perDayRes,
-      perSourceRes,
-      perModelRes,
-      topToolsRes,
-      perHourRes,
-      topFilesRes,
-    ] = await Promise.all([
-      // 1. Aggregate totals — use effective tokens (with approximation for zero-token sessions)
-      query(`
-        SELECT
-          count(*)::int AS sessions,
-          coalesce(sum(${EFF_IN}), 0)::bigint AS tokens_in,
-          coalesce(sum(${EFF_OUT}), 0)::bigint AS tokens_out,
-          coalesce(sum(s.tokens_cache_read), 0)::bigint AS cache_read,
-          coalesce(sum(s.tokens_cache_write), 0)::bigint AS cache_write,
-          coalesce(sum(s.api_cost), 0)::float AS api_cost,
-          coalesce(sum(s.edits), 0)::int AS edits,
-          coalesce(sum(s.additions), 0)::int AS additions,
-          coalesce(sum(s.deletions), 0)::int AS deletions,
-          coalesce(sum(s.changed_lines), 0)::int AS changed_lines,
-          coalesce(sum(s.files_touched), 0)::int AS files_touched,
-          coalesce(sum(s.tool_calls), 0)::int AS tool_calls,
-          coalesce(sum(s.tool_errors), 0)::int AS tool_errors,
-          coalesce(sum(s.rework_loops), 0)::int AS rework_loops,
-          coalesce(sum(s.corrections), 0)::int AS corrections,
-          coalesce(sum(CASE WHEN s.abandoned THEN 1 ELSE 0 END), 0)::int AS abandoned,
-          coalesce(sum(CASE WHEN s.priced THEN 1 ELSE 0 END), 0)::int AS priced_sessions,
-          -- Count zero-token sessions that have activity (these have approximated costs)
-          coalesce(sum(CASE WHEN s.tokens_in = 0 AND (s.tool_calls + s.edits) > 0 THEN 1 ELSE 0 END), 0)::int AS approx_sessions
-        FROM sync_sessions s
-        WHERE s.member_id = $1 ${dateFilter}
-      `, params),
+    const allSessions = await queryCol<any>('sync_sessions', allSessionConstraints);
 
-      // 2. Per-day breakdown — effective tokens for chart
-      query(`
-        SELECT
-          COALESCE(s.ended_at, s.started_at, s.synced_at)::date AS date,
-          count(*)::int AS sessions,
-          coalesce(sum(${EFF_IN}), 0)::bigint AS tokens_in,
-          coalesce(sum(${EFF_OUT}), 0)::bigint AS tokens_out,
-          coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache,
-          coalesce(sum(s.tokens_cache_write), 0)::bigint AS tokens_cache_write,
-          coalesce(sum(s.api_cost), 0)::float AS api_cost,
-          coalesce(sum(s.edits), 0)::int AS edits,
-          coalesce(sum(s.additions), 0)::int AS additions,
-          coalesce(sum(s.deletions), 0)::int AS deletions,
-          coalesce(sum(s.tool_calls), 0)::int AS tool_calls
-        FROM sync_sessions s
-        WHERE s.member_id = $1 ${dateFilter}
-        GROUP BY 1 ORDER BY 1
-      `, params),
+    // Apply date filter in JS
+    const sessions = useAll ? allSessions : allSessions.filter((s: any) => {
+      const ts = s.ended_at || s.started_at || s.synced_at;
+      if (!ts) return false;
+      const dateStr = String(ts).slice(0, 10);
+      if (from && dateStr < from) return false;
+      if (to && dateStr > to) return false;
+      return true;
+    });
 
-      // 3. Per-source breakdown (for scoreboard) — effective tokens
-      query(`
-        SELECT
-          s.source,
-          count(*)::int AS sessions,
-          coalesce(sum(${EFF_IN}), 0)::bigint AS tokens_in,
-          coalesce(sum(${EFF_OUT}), 0)::bigint AS tokens_out,
-          coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
-          coalesce(sum(s.api_cost), 0)::float AS api_cost,
-          coalesce(sum(s.edits), 0)::int AS edits,
-          coalesce(sum(s.changed_lines), 0)::int AS changed_lines,
-          coalesce(sum(s.tool_calls), 0)::int AS tool_calls,
-          coalesce(sum(s.tool_errors), 0)::int AS tool_errors,
-          coalesce(sum(s.rework_loops), 0)::int AS rework_loops,
-          coalesce(sum(CASE WHEN s.abandoned THEN 1 ELSE 0 END), 0)::int AS abandoned,
-          coalesce(sum(CASE WHEN s.priced THEN 1 ELSE 0 END), 0)::int AS priced_sessions
-        FROM sync_sessions s
-        WHERE s.member_id = $1 ${dateFilter}
-        GROUP BY s.source ORDER BY sessions DESC
-      `, params),
+    // ── 1. Aggregate totals ───────────────────────────────────────────────────
+    const totals = sessions.reduce((acc: any, s: any) => {
+      const eIn = effIn(s);
+      const eOut = effOut(s);
+      const isApprox = Number(s.tokens_in || 0) === 0 && (Number(s.tool_calls || 0) + Number(s.edits || 0)) > 0;
+      return {
+        sessions: acc.sessions + 1,
+        tokens_in: acc.tokens_in + eIn,
+        tokens_out: acc.tokens_out + eOut,
+        cache_read: acc.cache_read + Number(s.tokens_cache_read || 0),
+        cache_write: acc.cache_write + Number(s.tokens_cache_write || 0),
+        api_cost: acc.api_cost + Number(s.api_cost || 0),
+        edits: acc.edits + Number(s.edits || 0),
+        additions: acc.additions + Number(s.additions || 0),
+        deletions: acc.deletions + Number(s.deletions || 0),
+        changed_lines: acc.changed_lines + Number(s.changed_lines || 0),
+        files_touched: acc.files_touched + Number(s.files_touched || 0),
+        tool_calls: acc.tool_calls + Number(s.tool_calls || 0),
+        tool_errors: acc.tool_errors + Number(s.tool_errors || 0),
+        rework_loops: acc.rework_loops + Number(s.rework_loops || 0),
+        corrections: acc.corrections + Number(s.corrections || 0),
+        abandoned: acc.abandoned + (s.abandoned ? 1 : 0),
+        priced_sessions: acc.priced_sessions + (s.priced ? 1 : 0),
+        approx_sessions: acc.approx_sessions + (isApprox ? 1 : 0),
+      };
+    }, {
+      sessions: 0, tokens_in: 0, tokens_out: 0, cache_read: 0, cache_write: 0,
+      api_cost: 0, edits: 0, additions: 0, deletions: 0, changed_lines: 0,
+      files_touched: 0, tool_calls: 0, tool_errors: 0, rework_loops: 0,
+      corrections: 0, abandoned: 0, priced_sessions: 0, approx_sessions: 0,
+    });
 
-      // 4. Per-model breakdown — effective tokens
-      query(`
-        SELECT
-          s.model,
-          count(*)::int AS sessions,
-          coalesce(sum(${EFF_IN} + ${EFF_OUT}), 0)::bigint AS tokens,
-          coalesce(sum(s.api_cost), 0)::float AS api_cost
-        FROM sync_sessions s
-        WHERE s.member_id = $1 ${dateFilter} AND s.model IS NOT NULL
-        GROUP BY s.model ORDER BY tokens DESC LIMIT 20
-      `, params),
-
-      // 5. Top tools (aggregated from sync_session_tools)
-      query(`
-        SELECT t.tool_name AS name, sum(t.call_count)::int AS count
-        FROM sync_session_tools t
-        JOIN sync_sessions s ON s.id = t.sync_session_id
-        WHERE s.member_id = $1 ${dateFilter}
-        GROUP BY t.tool_name ORDER BY count DESC LIMIT 20
-      `, params),
-
-      // 6. Hourly activity punch-card (weekday 0-6, hour 0-23)
-      query(`
-        SELECT
-          EXTRACT(DOW FROM COALESCE(s.ended_at, s.started_at, s.synced_at))::int AS weekday,
-          EXTRACT(HOUR FROM COALESCE(s.ended_at, s.started_at, s.synced_at))::int AS hour,
-          count(*)::int AS n
-        FROM sync_sessions s
-        WHERE s.member_id = $1 ${dateFilter}
-        GROUP BY 1, 2
-      `, params),
-
-      // 7. Top files (for impact map)
-      query(`
-        SELECT
-          f.path,
-          sum(f.edits)::int AS edits,
-          sum(f.additions)::int AS additions,
-          sum(f.deletions)::int AS deletions,
-          sum(f.additions + f.deletions)::int AS changed_lines,
-          count(DISTINCT s.id)::int AS sessions
-        FROM sync_session_files f
-        JOIN sync_sessions s ON s.id = f.sync_session_id
-        WHERE s.member_id = $1 ${dateFilter}
-        GROUP BY f.path ORDER BY changed_lines DESC LIMIT 50
-      `, params),
-    ]);
-
-    const totals = totalsRes.rows[0];
-    const perDayRows = perDayRes.rows;
-    const perSourceRows = perSourceRes.rows;
-    const perModelRows = perModelRes.rows;
-    const topToolRows = topToolsRes.rows;
-    const perHourRows = perHourRes.rows;
-    const topFileRows = topFilesRes.rows;
-
-    // ── Build punch-card grid ────────────────────────────────────────────────
-    const punch: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
-    for (const r of perHourRows) {
-      const w = Number(r.weekday);
-      const h = Number(r.hour);
-      if (w >= 0 && w < 7 && h >= 0 && h < 24) punch[w][h] += Number(r.n);
-    }
-
-    // ── Build per-day series with date gap-filling ────────────────────────────
+    // ── 2. Per-day breakdown ──────────────────────────────────────────────────
     const dayMap = new Map<string, any>();
-    for (const r of perDayRows) {
-      const k = String(r.date).slice(0, 10);
-      dayMap.set(k, {
-        date: k,
-        sessions: Number(r.sessions),
-        tokensIn: Number(r.tokens_in),
-        tokensOut: Number(r.tokens_out),
-        tokensCache: Number(r.tokens_cache),
-        tokensCacheWrite: Number(r.tokens_cache_write),
-        apiCost: Number(r.api_cost),
-        edits: Number(r.edits),
-        additions: Number(r.additions),
-        deletions: Number(r.deletions),
-        toolCalls: Number(r.tool_calls),
-      });
+    for (const s of sessions) {
+      const ts = s.ended_at || s.started_at || s.synced_at;
+      if (!ts) continue;
+      const k = String(ts).slice(0, 10);
+      if (!dayMap.has(k)) dayMap.set(k, { date: k, sessions: 0, tokens_in: 0, tokens_out: 0, tokens_cache: 0, tokens_cache_write: 0, api_cost: 0, edits: 0, additions: 0, deletions: 0, tool_calls: 0 });
+      const d = dayMap.get(k);
+      d.sessions++;
+      d.tokens_in += effIn(s);
+      d.tokens_out += effOut(s);
+      d.tokens_cache += Number(s.tokens_cache_read || 0);
+      d.tokens_cache_write += Number(s.tokens_cache_write || 0);
+      d.api_cost += Number(s.api_cost || 0);
+      d.edits += Number(s.edits || 0);
+      d.additions += Number(s.additions || 0);
+      d.deletions += Number(s.deletions || 0);
+      d.tool_calls += Number(s.tool_calls || 0);
     }
 
-    // Build series with gap-fill between from/to (or first/last record)
+    // ── 3. Per-source breakdown ───────────────────────────────────────────────
+    const sourceMap = new Map<string, any>();
+    for (const s of sessions) {
+      const src2 = s.source || 'unknown';
+      if (!sourceMap.has(src2)) sourceMap.set(src2, { source: src2, sessions: 0, tokens_in: 0, tokens_out: 0, tokens_cache_read: 0, api_cost: 0, edits: 0, changed_lines: 0, tool_calls: 0, tool_errors: 0, rework_loops: 0, abandoned: 0, priced_sessions: 0 });
+      const ss = sourceMap.get(src2);
+      ss.sessions++;
+      ss.tokens_in += effIn(s);
+      ss.tokens_out += effOut(s);
+      ss.tokens_cache_read += Number(s.tokens_cache_read || 0);
+      ss.api_cost += Number(s.api_cost || 0);
+      ss.edits += Number(s.edits || 0);
+      ss.changed_lines += Number(s.changed_lines || 0);
+      ss.tool_calls += Number(s.tool_calls || 0);
+      ss.tool_errors += Number(s.tool_errors || 0);
+      ss.rework_loops += Number(s.rework_loops || 0);
+      ss.abandoned += s.abandoned ? 1 : 0;
+      ss.priced_sessions += s.priced ? 1 : 0;
+    }
+    const perSourceRows = Array.from(sourceMap.values()).sort((a, b) => b.sessions - a.sessions);
+
+    // ── 4. Per-model breakdown ────────────────────────────────────────────────
+    const modelMap = new Map<string, any>();
+    for (const s of sessions) {
+      const model = s.model;
+      if (!model) continue;
+      if (!modelMap.has(model)) modelMap.set(model, { model, sessions: 0, tokens: 0, api_cost: 0 });
+      const mm = modelMap.get(model);
+      mm.sessions++;
+      mm.tokens += effIn(s) + effOut(s);
+      mm.api_cost += Number(s.api_cost || 0);
+    }
+    const perModelRows = Array.from(modelMap.values()).sort((a, b) => b.tokens - a.tokens).slice(0, 20);
+
+    // ── 5. Top tools ──────────────────────────────────────────────────────────
+    const sessionIds = sessions.map((s: any) => s.id).filter(Boolean);
+    let allSessionTools: any[] = [];
+    if (sessionIds.length) {
+      for (let i = 0; i < sessionIds.length; i += 30) {
+        const chunk = sessionIds.slice(i, i + 30);
+        const tools = await queryCol('sync_session_tools', [
+          { type: 'where', field: 'sync_session_id', op: 'in', value: chunk },
+        ]);
+        allSessionTools.push(...tools);
+      }
+    }
+    const toolCountMap = new Map<string, number>();
+    for (const t of allSessionTools) {
+      const name = String(t.tool_name);
+      toolCountMap.set(name, (toolCountMap.get(name) || 0) + Number(t.call_count || 1));
+    }
+    const topToolRows = Array.from(toolCountMap.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 20);
+
+    // ── 6. Hourly punch-card ──────────────────────────────────────────────────
+    const punch: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
+    for (const s of sessions) {
+      const ts = s.ended_at || s.started_at || s.synced_at;
+      if (!ts) continue;
+      const d = new Date(ts);
+      if (isNaN(d.getTime())) continue;
+      punch[d.getUTCDay()][d.getUTCHours()]++;
+    }
+
+    // ── 7. Top files ──────────────────────────────────────────────────────────
+    const sessionIdSet = new Set(sessions.map((s: any) => s.id));
+    let allFiles: any[] = [];
+    if (sessionIds.length) {
+      for (let i = 0; i < sessionIds.length; i += 30) {
+        const chunk = sessionIds.slice(i, i + 30);
+        const files = await queryCol('sync_session_files', [
+          { type: 'where', field: 'sync_session_id', op: 'in', value: chunk },
+        ]);
+        allFiles.push(...files);
+      }
+    }
+    const fileMap = new Map<string, any>();
+    for (const f of allFiles) {
+      const k = f.path;
+      if (!fileMap.has(k)) fileMap.set(k, { path: k, edits: 0, additions: 0, deletions: 0, changed_lines: 0, sessions: new Set<string>() });
+      const fm = fileMap.get(k);
+      fm.edits += Number(f.edits || 0);
+      fm.additions += Number(f.additions || 0);
+      fm.deletions += Number(f.deletions || 0);
+      fm.changed_lines += Number(f.additions || 0) + Number(f.deletions || 0);
+      fm.sessions.add(f.sync_session_id);
+    }
+    const topFileRows = Array.from(fileMap.values())
+      .map((f) => ({ ...f, sessions: f.sessions.size }))
+      .sort((a, b) => b.changed_lines - a.changed_lines)
+      .slice(0, 50);
+
+    // ── Build per-day series with gap-filling ─────────────────────────────────
     const allKeys = [...dayMap.keys()].sort();
     const seriesFrom = from || (allKeys[0] ?? new Date().toISOString().slice(0, 10));
     const seriesTo = to || (allKeys[allKeys.length - 1] ?? new Date().toISOString().slice(0, 10));
@@ -281,7 +265,14 @@ export async function GET(req: NextRequest) {
       const end = new Date(`${seriesTo}T00:00:00`);
       while (cur <= end) {
         const k = cur.toISOString().slice(0, 10);
-        series.push(dayMap.get(k) ?? {
+        const r = dayMap.get(k);
+        series.push(r ? {
+          date: k, sessions: r.sessions,
+          tokensIn: r.tokens_in, tokensOut: r.tokens_out,
+          tokensCache: r.tokens_cache, tokensCacheWrite: r.tokens_cache_write,
+          apiCost: r.api_cost, edits: r.edits,
+          additions: r.additions, deletions: r.deletions, toolCalls: r.tool_calls,
+        } : {
           date: k, sessions: 0, tokensIn: 0, tokensOut: 0, tokensCache: 0,
           tokensCacheWrite: 0, apiCost: 0, edits: 0, additions: 0, deletions: 0, toolCalls: 0,
         });
@@ -289,7 +280,7 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // ── Records ──────────────────────────────────────────────────────────────
+    // ── Records ───────────────────────────────────────────────────────────────
     let peak = { weekday: 0, hour: 0, n: 0 };
     for (let w = 0; w < 7; w++) for (let h = 0; h < 24; h++) if (punch[w][h] > peak.n) peak = { weekday: w, hour: h, n: punch[w][h] };
     const activeDays = series.filter((d) => d.toolCalls > 0 || d.sessions > 0).length;
@@ -297,7 +288,7 @@ export async function GET(req: NextRequest) {
     for (let i = series.length - 1; i >= 0 && (series[i].toolCalls > 0 || series[i].sessions > 0); i--) streak++;
     const busiestDay = series.reduce((m: any, d) => (d.toolCalls > (m?.toolCalls || 0) ? d : m), null);
 
-    // ── Impact map ───────────────────────────────────────────────────────────
+    // ── Impact map ────────────────────────────────────────────────────────────
     function riskLevel(score: number): string { return score >= 65 ? 'high' : score >= 30 ? 'watch' : 'low'; }
     const fileRows = topFileRows.map((f: any) => {
       const s = Number(f.sessions);
@@ -316,7 +307,6 @@ export async function GET(req: NextRequest) {
       };
     }).sort((a: any, b: any) => b.riskScore - a.riskScore || b.changedLines - a.changedLines);
 
-    // Directory rollup
     const dirMap = new Map<string, any>();
     for (const f of fileRows) {
       const d = dirMap.get(f.directory) ?? { path: f.directory, edits: 0, additions: 0, deletions: 0, files: 0, sessions: 0 };
@@ -330,21 +320,18 @@ export async function GET(req: NextRequest) {
 
     const churnFiles = fileRows.filter((f: any) => f.sessions > 1 || f.churn > 1);
 
-    // ── Cost & scoreboard per source ─────────────────────────────────────────
+    // ── Cost & scoreboard per source ──────────────────────────────────────────
     const totalApiCost = perSourceRows.reduce((n: number, r: any) => n + Number(r.api_cost), 0);
     const totalPricedSessions = Number(totals?.priced_sessions ?? 0);
     const totalSessions = Number(totals?.sessions ?? 0);
-    // Approximate cost for sessions missing actual token-based pricing:
-    // use $3/M input + $15/M output as a conservative estimate (Claude Sonnet rates)
     const approxSessions = Number(totals?.approx_sessions ?? 0);
     const totalTokensIn = Number(totals?.tokens_in ?? 0);
     const totalTokensOut = Number(totals?.tokens_out ?? 0);
     const estimatedCost = totalApiCost > 0 ? totalApiCost
       : (totalTokensIn / 1_000_000) * 3.0 + (totalTokensOut / 1_000_000) * 15.0;
 
-    // Scoreboard (per-source metrics)
     const scoreboard = perSourceRows.map((r: any) => {
-      const sessions = Number(r.sessions);
+      const sessions2 = Number(r.sessions);
       const edits = Number(r.edits);
       const changedLines = Number(r.changed_lines);
       const tokensOut = Number(r.tokens_out);
@@ -356,15 +343,14 @@ export async function GET(req: NextRequest) {
       const pricedSessions = Number(r.priced_sessions);
       const abandoned = Number(r.abandoned);
       const reworkLoops = Number(r.rework_loops);
-
       return {
         source: r.source,
-        sessions,
+        sessions: sessions2,
         edits,
-        reworkPerSession: sessions ? reworkLoops / sessions : 0,
-        abandonedRate: sessions ? abandoned / sessions : 0,
+        reworkPerSession: sessions2 ? reworkLoops / sessions2 : 0,
+        abandonedRate: sessions2 ? abandoned / sessions2 : 0,
         medianTimeToFirstEditMs: null,
-        editsPerSession: sessions ? edits / sessions : null,
+        editsPerSession: sessions2 ? edits / sessions2 : null,
         outputTokensPerEdit: edits ? tokensOut / edits : null,
         toolErrorRate: toolCalls ? toolErrors / toolCalls : null,
         medianToolLatencyMs: null,
@@ -374,7 +360,6 @@ export async function GET(req: NextRequest) {
       };
     });
 
-    // Cost breakdown by source
     const costBySource = perSourceRows.map((r: any) => {
       const apiCost = Number(r.api_cost);
       const edits = Number(r.edits);
@@ -391,15 +376,10 @@ export async function GET(req: NextRequest) {
     });
 
     const coverage = totalSessions > 0 ? Math.min(1, (totalPricedSessions + approxSessions) / totalSessions) : 1;
-    const pricedEdits = perSourceRows
-      .filter((r: any) => Number(r.priced_sessions) > 0)
-      .reduce((n: number, r: any) => n + Number(r.edits), 0);
     const totalEdits = Number(totals?.edits ?? 0);
 
-    // ── Assemble final response matching buildStats() shape ──────────────────
     return NextResponse.json({
       window: { from: from ?? null, to: to ?? null, all: useAll },
-
       totals: {
         sessions: totalSessions,
         tokensIn: totalTokensIn,
@@ -421,7 +401,6 @@ export async function GET(req: NextRequest) {
         spawns: 0,
         errors: Number(totals?.tool_errors ?? 0),
       },
-
       cost: {
         total: estimatedCost,
         pricedSessions: totalPricedSessions + approxSessions,
@@ -436,7 +415,6 @@ export async function GET(req: NextRequest) {
         pricingUpdatedAt: null,
         currency: 'USD',
       },
-
       workflow: {
         reworkLoops: Number(totals?.rework_loops ?? 0),
         abandoned: Number(totals?.abandoned ?? 0),
@@ -445,19 +423,10 @@ export async function GET(req: NextRequest) {
         sessionsCorrected: 0,
         sessionsWithRework: 0,
       },
-
-      impact: {
-        files: fileRows,
-        directories: directoryRows,
-        churnFiles,
-      },
-
+      impact: { files: fileRows, directories: directoryRows, churnFiles },
       scoreboard,
-
       perDay: series,
-
       punch,
-
       sources: perSourceRows.map((r: any) => ({
         source: r.source,
         sessions: Number(r.sessions),
@@ -465,7 +434,6 @@ export async function GET(req: NextRequest) {
         apiCost: Number(r.api_cost),
         edits: Number(r.edits),
       })),
-
       models: perModelRows.map((r: any) => ({
         model: r.model,
         name: r.model,
@@ -474,13 +442,11 @@ export async function GET(req: NextRequest) {
         apiCost: Number(r.api_cost),
         rate: null,
       })),
-
       tools: topToolRows.map((r: any) => ({
         name: r.name,
         count: Number(r.count),
         errors: 0,
       })),
-
       records: {
         longestSession: null,
         busiestDay: busiestDay && busiestDay.toolCalls > 0 ? busiestDay : null,

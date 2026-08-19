@@ -6,7 +6,7 @@ import {
   verifyPassword,
   SessionPayload,
 } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { getDocById, queryCol, setDocById } from '@/lib/team/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,32 +16,25 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'not authenticated' }, { status: 401 });
   }
 
-  let user = null;
+  let user: any = null;
   let teams: Array<{ id: string; name: string; role: string }> = [];
 
   const isUuid = (val: string | null | undefined): boolean =>
     Boolean(val && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val));
 
   if (isUuid(session.userId)) {
-    const { rows } = await query(
-      `SELECT id, username, display_name, role, member_id, team_id, api_key, created_at
-       FROM users WHERE id = $1`,
-      [session.userId],
-    );
-    user = rows[0] || null;
+    user = await getDocById('users', session.userId);
   }
 
   const memberId = user?.member_id || session.memberId;
   if (isUuid(memberId)) {
-    const { rows: teamRows } = await query<{ id: string; name: string; role: string }>(
-      `SELECT t.id, t.name, tm.role
-       FROM team_members tm
-       JOIN teams t ON t.id = tm.team_id
-       WHERE tm.member_id = $1
-       ORDER BY t.name`,
-      [memberId],
+    const tmDocs = await queryCol<{ team_id: string; role: string }>('team_members', [
+      { type: 'where', field: 'member_id', op: '==', value: memberId },
+    ]);
+    const teamDocs = await Promise.all(
+      tmDocs.map((tm) => getDocById('teams', tm.team_id).then((t) => t ? { id: t.id, name: t.name, role: tm.role } : null)),
     );
-    teams = teamRows;
+    teams = (teamDocs.filter(Boolean) as any[]).sort((a, b) => String(a.name).localeCompare(String(b.name)));
   }
 
   return NextResponse.json({
@@ -81,13 +74,8 @@ export async function PUT(req: NextRequest) {
     }, { status: 400 });
   }
 
-  // Fetch current user from database
-  const { rows: userRows } = await query(
-    `SELECT id, username, password_hash, display_name, role, member_id, team_id, api_key
-     FROM users WHERE id = $1`,
-    [session.userId],
-  );
-  const currentUser = userRows[0];
+  // Fetch current user from Firestore
+  const currentUser = await getDocById('users', session.userId) as any;
   if (!currentUser) {
     return NextResponse.json({ error: 'User account not found' }, { status: 404 });
   }
@@ -109,7 +97,6 @@ export async function PUT(req: NextRequest) {
     if (newPassword.length < 6) {
       return NextResponse.json({ error: 'New password must be at least 6 characters long' }, { status: 400 });
     }
-
     if (currentUser.password_hash) {
       if (!currentPassword) {
         return NextResponse.json({ error: 'Current password is required to set a new password' }, { status: 400 });
@@ -119,18 +106,15 @@ export async function PUT(req: NextRequest) {
         return NextResponse.json({ error: 'Current password is incorrect' }, { status: 400 });
       }
     }
-
     const newHash = await hashPassword(newPassword);
-    await query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, session.userId]);
+    await setDocById('users', session.userId, { password_hash: newHash, updated_at: new Date().toISOString() }, true);
   }
 
-  // Update display_name in users table
+  // Update display_name
   if (updatedDisplayName !== currentUser.display_name) {
-    await query('UPDATE users SET display_name = $1 WHERE id = $2', [updatedDisplayName, session.userId]);
-
-    // If linked to a member, also sync members.display_name
+    await setDocById('users', session.userId, { display_name: updatedDisplayName, updated_at: new Date().toISOString() }, true);
     if (currentUser.member_id) {
-      await query('UPDATE members SET display_name = $1 WHERE id = $2', [updatedDisplayName, currentUser.member_id]);
+      await setDocById('members', currentUser.member_id, { display_name: updatedDisplayName, updated_at: new Date().toISOString() }, true);
     }
   }
 

@@ -3,12 +3,12 @@
  *
  * POST /api/admin/pricing/sync
  *
- * 1. Broadcasts background sync request to ALL members in the system (`sync_requested_at = now()`).
- * 2. Recalculates `api_cost` across all historical sessions for all teams and members with latest pricing rules.
+ * 1. Marks all members as requiring sync (sync_requested_at = now()).
+ * 2. Recalculates `api_cost` across all historical sessions with latest pricing rules.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { queryCol, setDocById } from '@/lib/team/db';
 import { recalculateAllCosts } from '@/lib/team/stats';
 
 export const dynamic = 'force-dynamic';
@@ -24,19 +24,21 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    // 1. Broadcast sync request to all members so local client daemons immediately sync
-    const memberRes = await query(`
-      UPDATE members
-      SET sync_requested_at = now()
-    `);
-    const membersNotified = memberRes.rowCount || 0;
+    // 1. Broadcast sync request to all members
+    const memberDocs = await queryCol<{ id: string }>('members');
+    await Promise.all(
+      memberDocs.map((m) =>
+        setDocById('members', m.id, { sync_requested_at: new Date().toISOString() }, true),
+      ),
+    );
+    const membersNotified = memberDocs.length;
 
-    // 2. Recalculate costs for all sessions across all teams and members
+    // 2. Recalculate costs for all sessions
     const { updatedCount, totalSessions } = await recalculateAllCosts(true);
 
-    // 3. Get team statistics
-    const { rows: teamRows } = await query(`SELECT count(*)::int as count FROM teams`);
-    const teamsCount = teamRows[0]?.count || 0;
+    // 3. Count teams
+    const teamDocs = await queryCol('teams');
+    const teamsCount = teamDocs.length;
 
     return NextResponse.json({
       ok: true,

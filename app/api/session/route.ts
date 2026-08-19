@@ -7,7 +7,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { getDocById, queryCol } from '@/lib/team/db';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -24,9 +24,9 @@ export async function GET(req: NextRequest) {
 
   let memberId = appSession.memberId;
   try {
-    const { rows: userRows } = await query('SELECT member_id FROM users WHERE id = $1', [appSession.userId]);
-    if (userRows[0]?.member_id) {
-      memberId = userRows[0].member_id;
+    const userDoc = await getDocById('users', appSession.userId);
+    if (userDoc?.member_id) {
+      memberId = userDoc.member_id;
     }
   } catch (err) {
     console.warn('[session route member lookup failed]', err);
@@ -43,8 +43,7 @@ export async function GET(req: NextRequest) {
     }
 
     // If running locally without a database, try to read from the local files first to get prompts and events!
-    if (process.env.VERCEL !== '1' && !process.env.DATABASE_URL && !process.env.NEON_CONNECTION_STRING) {
-
+    if (process.env.VERCEL !== '1' && !process.env.FIREBASE_PROJECT_ID) {
       try {
         const { scanSessions } = await import('@/lib/scan.mjs');
         const { sessionSummary } = await import('@/lib/analytics.mjs');
@@ -60,34 +59,37 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // Look up by session_id OR the UUID id column, scoped to this member
-    const { rows: [row] } = await query(`
-      SELECT s.*
-      FROM sync_sessions s
-      WHERE s.member_id = $1
-        AND (lower(s.session_id) = $2 OR lower(s.id::text) = $2)
-      LIMIT 1
-    `, [memberId, sessionId]);
+    // Look up by session_id OR document ID, scoped to this member
+    let sessionDocs = await queryCol<any>('sync_sessions', [
+      { type: 'where', field: 'member_id', op: '==', value: memberId },
+      { type: 'where', field: 'session_id', op: '==', value: sessionId },
+      { type: 'limit', n: 1 },
+    ]);
 
+    if (!sessionDocs.length) {
+      const docById = await getDocById('sync_sessions', sessionId);
+      if (docById && docById.member_id === memberId) {
+        sessionDocs = [docById];
+      }
+    }
+
+    const row = sessionDocs[0];
     if (!row) {
       return NextResponse.json({ error: 'session not found' }, { status: 404 });
     }
 
     // Fetch tool and file breakdowns in parallel
-    const [toolsRes, filesRes] = await Promise.all([
-      query(`
-        SELECT tool_name, call_count
-        FROM sync_session_tools
-        WHERE sync_session_id = $1
-        ORDER BY call_count DESC
-      `, [row.id]),
-      query(`
-        SELECT path, edits, additions, deletions
-        FROM sync_session_files
-        WHERE sync_session_id = $1
-        ORDER BY edits DESC
-      `, [row.id]),
+    const [tools, files] = await Promise.all([
+      queryCol<any>('sync_session_tools', [
+        { type: 'where', field: 'sync_session_id', op: '==', value: row.id },
+      ]),
+      queryCol<any>('sync_session_files', [
+        { type: 'where', field: 'sync_session_id', op: '==', value: row.id },
+      ]),
     ]);
+
+    tools.sort((a, b) => (b.call_count || 0) - (a.call_count || 0));
+    files.sort((a, b) => (b.edits || 0) - (a.edits || 0));
 
     return NextResponse.json({
       id: row.session_id || row.id,
@@ -98,7 +100,6 @@ export async function GET(req: NextRequest) {
       startedAt: row.started_at,
       endedAt: row.ended_at,
       syncedAt: row.synced_at,
-      // parent/children: not stored in DB schema — safe defaults for app.js renderTrajectory
       parent: null,
       children: [],
       intelligence: {
@@ -113,23 +114,23 @@ export async function GET(req: NextRequest) {
         corrections: row.corrections,
         abandoned: row.abandoned,
         apiCost: row.api_cost,
-        // Not available from DB — return null so app.js renders '—'
         timeToFirstEditMs: null,
         medianToolLatencyMs: null,
       },
       stats: {
-        tokensIn: Number(row.tokens_in),
-        tokensOut: Number(row.tokens_out),
-        tokensCacheRead: Number(row.tokens_cache_read),
-        tokensCacheWrite: Number(row.tokens_cache_write),
+        tokensIn: Number(row.tokens_in || 0),
+        tokensOut: Number(row.tokens_out || 0),
+        tokensCacheRead: Number(row.tokens_cache_read || 0),
+        tokensCacheWrite: Number(row.tokens_cache_write || 0),
         toolCounts: {},
         errors: row.tool_errors || 0,
       },
-      tools: toolsRes.rows,
-      files: filesRes.rows,
-      events: row.events || [], // Returned from the newly synced DB column
+      tools: tools.map(t => ({ tool_name: t.tool_name, call_count: t.call_count })),
+      files: files.map(f => ({ path: f.path, edits: f.edits, additions: f.additions, deletions: f.deletions })),
+      events: row.events || [],
     });
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    console.error('[session GET error]', err);
+    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
   }
 }

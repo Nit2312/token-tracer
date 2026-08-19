@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { queryCol, setDocById, deleteDocById, newUuid } from '@/lib/team/db';
 import { generateApiKey, hashApiKey } from '@/lib/team/auth';
 
 export const dynamic = 'force-dynamic';
@@ -19,58 +19,34 @@ export async function POST(req: NextRequest) {
     const teamId = body.teamId || body.team_id || null;
     const teamIds: string[] = Array.isArray(body.teamIds) ? body.teamIds : (teamId ? [teamId] : []);
 
-    if (!displayName) {
-      return NextResponse.json({ error: 'Display name is required' }, { status: 400 });
-    }
+    if (!displayName) return NextResponse.json({ error: 'Display name is required' }, { status: 400 });
 
-    // Default to 'Independent' team if no teamIds are selected
     let selectedTeamId = teamIds[0] || null;
     if (!selectedTeamId) {
-      let teamRes = await query("SELECT id FROM teams WHERE name = 'Independent' LIMIT 1");
-      selectedTeamId = teamRes.rows[0]?.id;
+      const indep = await queryCol<{ id: string }>('teams', [{ type: 'where', field: 'name', op: '==', value: 'Independent' }, { type: 'limit', n: 1 }]);
+      selectedTeamId = indep[0]?.id;
       if (!selectedTeamId) {
-        const newTeamRes = await query("INSERT INTO teams (name) VALUES ('Independent') RETURNING id");
-        selectedTeamId = newTeamRes.rows[0].id;
+        selectedTeamId = newUuid();
+        await setDocById('teams', selectedTeamId, { name: 'Independent', created_at: new Date().toISOString() });
       }
     }
 
-    // Insert into members table
-    const { rows } = await query(
-      `INSERT INTO members (display_name, team_id, role)
-       VALUES ($1, $2, 'member')
-       RETURNING id, display_name, team_id, role, created_at`,
-      [displayName, selectedTeamId]
-    );
+    const memberId = newUuid();
+    const memberDoc = { id: memberId, display_name: displayName, team_id: selectedTeamId, role: 'member', created_at: new Date().toISOString() };
+    await setDocById('members', memberId, memberDoc);
 
-    const newMember = rows[0];
-
-    // Link all selected teamIds into team_members table
     const effectiveTeamIds = teamIds.length > 0 ? teamIds : [selectedTeamId];
     for (const tId of effectiveTeamIds) {
       if (tId) {
-        await query(
-          `INSERT INTO team_members (team_id, member_id, role)
-           VALUES ($1, $2, 'member')
-           ON CONFLICT (team_id, member_id) DO NOTHING`,
-          [tId, newMember.id],
-        );
+        await setDocById('team_members', `${tId}_${memberId}`, { team_id: tId, member_id: memberId, role: 'member', created_at: new Date().toISOString() }, true);
       }
     }
 
-    // Generate API key for the new member
     const rawApiKey = generateApiKey();
-    const apiKeyHash = hashApiKey(rawApiKey);
-    await query(
-      `INSERT INTO member_keys (member_id, key_hash, label)
-       VALUES ($1, $2, 'default')
-       ON CONFLICT (key_hash) DO NOTHING`,
-      [newMember.id, apiKeyHash],
-    );
+    const keyId = newUuid();
+    await setDocById('member_keys', keyId, { id: keyId, member_id: memberId, key_hash: hashApiKey(rawApiKey), label: 'default', created_at: new Date().toISOString(), revoked_at: null }, true);
 
-    return NextResponse.json({
-      member: newMember,
-      apiKey: rawApiKey
-    }, { status: 201 });
+    return NextResponse.json({ member: memberDoc, apiKey: rawApiKey }, { status: 201 });
   } catch (err: any) {
     console.error('[admin/members POST error]', err);
     return NextResponse.json({ error: String(err.message || err) }, { status: 500 });
@@ -85,58 +61,39 @@ export async function PUT(req: NextRequest) {
     const { id, displayName, teamId } = body;
     const teamIds: string[] | undefined = Array.isArray(body.teamIds) ? body.teamIds : (teamId ? [teamId] : undefined);
 
-    if (!id || !displayName) {
-      return NextResponse.json({ error: 'id and displayName are required' }, { status: 400 });
-    }
+    if (!id || !displayName) return NextResponse.json({ error: 'id and displayName are required' }, { status: 400 });
 
     const primaryTeamId = (teamIds && teamIds.length > 0) ? teamIds[0] : (teamId || null);
+    await setDocById('members', id, { display_name: displayName, team_id: primaryTeamId, updated_at: new Date().toISOString() }, true);
 
-    const { rows } = await query(
-      `UPDATE members SET display_name = $2, team_id = $3 WHERE id = $1 RETURNING id, display_name, team_id`,
-      [id, displayName, primaryTeamId]
-    );
-
-    if (!rows[0]) {
-      return NextResponse.json({ error: 'member not found' }, { status: 404 });
-    }
-
-    // Sync team_members if teamIds provided
     if (teamIds) {
       let effectiveTeamIds = teamIds.filter(Boolean);
-
-      // BUG-06 fix: if all teams were deselected, fall back to the Independent team
-      // so the member always has a home team.
       if (effectiveTeamIds.length === 0) {
-        let independentTeamRes = await query("SELECT id FROM teams WHERE name = 'Independent' LIMIT 1");
-        let independentTeamId = independentTeamRes.rows[0]?.id;
+        const indep = await queryCol<{ id: string }>('teams', [{ type: 'where', field: 'name', op: '==', value: 'Independent' }, { type: 'limit', n: 1 }]);
+        let independentTeamId = indep[0]?.id;
         if (!independentTeamId) {
-          const newTeam = await query("INSERT INTO teams (name) VALUES ('Independent') RETURNING id");
-          independentTeamId = newTeam.rows[0].id;
+          independentTeamId = newUuid();
+          await setDocById('teams', independentTeamId, { name: 'Independent', created_at: new Date().toISOString() });
         }
         effectiveTeamIds = [independentTeamId];
       }
 
-      // Add newly selected teams
       for (const tId of effectiveTeamIds) {
-        await query(
-          `INSERT INTO team_members (team_id, member_id, role)
-           VALUES ($1, $2, 'member')
-           ON CONFLICT (team_id, member_id) DO NOTHING`,
-          [tId, id],
-        );
+        await setDocById('team_members', `${tId}_${id}`, { team_id: tId, member_id: id, role: 'member', created_at: new Date().toISOString() }, true);
       }
 
-      // Remove teams that are no longer selected
-      await query(
-        `DELETE FROM team_members WHERE member_id = $1 AND NOT (team_id = ANY($2::uuid[]))`,
-        [id, effectiveTeamIds],
-      );
+      // Remove unselected team memberships
+      const allTms = await queryCol<any>('team_members', [{ type: 'where', field: 'member_id', op: '==', value: id }]);
+      for (const tm of allTms) {
+        if (!effectiveTeamIds.includes(tm.team_id)) {
+          await deleteDocById('team_members', tm.id);
+        }
+      }
 
-      // Keep members.team_id in sync with the primary (first) team
-      await query(`UPDATE members SET team_id = $2 WHERE id = $1`, [id, effectiveTeamIds[0]]);
+      await setDocById('members', id, { team_id: effectiveTeamIds[0] }, true);
     }
 
-    return NextResponse.json({ member: rows[0] });
+    return NextResponse.json({ member: { id, display_name: displayName, team_id: primaryTeamId } });
   } catch (err: any) {
     console.error('[admin/members PUT error]', err);
     return NextResponse.json({ error: String(err.message || err) }, { status: 500 });
@@ -150,8 +107,8 @@ export async function DELETE(req: NextRequest) {
   if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
 
   try {
-    const { rowCount } = await query('DELETE FROM members WHERE id = $1', [id]);
-    return NextResponse.json({ ok: true, deleted: (rowCount || 0) > 0 });
+    await deleteDocById('members', id);
+    return NextResponse.json({ ok: true, deleted: true });
   } catch (err: any) {
     console.error('[admin/members DELETE error]', err);
     return NextResponse.json({ error: String(err.message || err) }, { status: 500 });
