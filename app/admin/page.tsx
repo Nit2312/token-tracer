@@ -76,6 +76,9 @@ export default async function AdminPage() {
             </button>
             <div className="sidebar-nav-divider" aria-hidden="true" />
 
+            <button type="button" id="tabbtn-infra" className="tab-btn" data-tab="tab-infra" role="tab" aria-selected="false" aria-controls="tab-infra" tabIndex={-1}>
+              <span className="nav-icon" aria-hidden="true">⚡</span> Infrastructure &amp; DB
+            </button>
             <button type="button" id="tabbtn-pipeline" className="tab-btn" data-tab="tab-pipeline" role="tab" aria-selected="false" aria-controls="tab-pipeline" tabIndex={-1}>
               <span className="nav-icon" aria-hidden="true">🩺</span> Pipeline Health
             </button>
@@ -199,7 +202,7 @@ export default async function AdminPage() {
                     <th>User</th>
                     <th>Teams</th>
                     <th>Sessions</th>
-                    <th>Last Login</th>
+                    <th>Daemon Version</th>
                     <th>Status</th>
                     <th>Actions</th>
                   </tr>
@@ -510,6 +513,147 @@ export default async function AdminPage() {
           {/* ═══════════════════════════════════════════════════
               SUPERADMIN ANALYTICS TABS
               ═══════════════════════════════════════════════════ */}
+
+          {/* ── Infrastructure & Compute Monitor tab ── */}
+          <div id="tab-infra" className="admin-tab" role="tabpanel" aria-labelledby="tabbtn-infra" hidden>
+            <div className="admin-tab-header">
+              <div>
+                <h2>Infrastructure &amp; Free-Tier Health</h2>
+                <span className="admin-tab-sub">Real-time Neon database storage, Vercel invocation limits &amp; compute telemetry</span>
+              </div>
+              <div className="admin-header-actions">
+                <button type="button" id="run-rollup-prune-btn" className="hbtn primary" title="Pre-compute rollups and execute rolling data pruning immediately">
+                  ⚡ Run Rollup &amp; Prune Now
+                </button>
+                <button type="button" id="infra-refresh-btn" className="hbtn" title="Refresh metrics">
+                  🔄 Refresh
+                </button>
+              </div>
+            </div>
+
+            {/* Free Tier Resource Limit KPI Cards */}
+            <div className="kpi-row" id="infra-stat-cards">
+              <div className="kpi-card" style={{ flex: 1 }}>
+                <div className="kpi-icon kpi-icon--blue">
+                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" width="18" height="18"><ellipse cx="10" cy="6" rx="7" ry="2.5"/><path d="M3 6v4c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V6"/><path d="M3 10v4c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-4"/></svg>
+                </div>
+                <div className="kpi-body" style={{ width: '100%' }}>
+                  <div className="kpi-label">Neon DB Storage (500 MB Limit)</div>
+                  <div className="kpi-value" id="infra-storage-val">—</div>
+                  <div style={{ background: 'var(--border, #333)', height: '6px', borderRadius: '3px', marginTop: '6px', overflow: 'hidden' }}>
+                    <div id="infra-storage-bar" style={{ background: '#3b82f6', height: '100%', width: '0%' }}></div>
+                  </div>
+                  <div style={{ fontSize: '11px', color: 'var(--muted)', marginTop: '4px' }} id="infra-storage-sub">Checking storage…</div>
+                </div>
+              </div>
+
+              <div className="kpi-card" style={{ flex: 1 }}>
+                <div className="kpi-icon kpi-icon--green">
+                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" width="18" height="18"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                </div>
+                <div className="kpi-body" style={{ width: '100%' }}>
+                  <div className="kpi-label">Vercel Invocations (100k/day Limit)</div>
+                  <div className="kpi-value" id="infra-invocations-val">—</div>
+                  <div style={{ background: 'var(--border, #333)', height: '6px', borderRadius: '3px', marginTop: '6px', overflow: 'hidden' }}>
+                    <div id="infra-invocations-bar" style={{ background: '#10b981', height: '100%', width: '0%' }}></div>
+                  </div>
+                  <div style={{ fontSize: '11px', color: 'var(--muted)', marginTop: '4px' }} id="infra-invocations-sub">Batches today: —</div>
+                </div>
+              </div>
+
+              <div className="kpi-card" style={{ flex: 1 }}>
+                <div className="kpi-icon kpi-icon--purple">
+                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" width="18" height="18"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l2.5 2.5"/></svg>
+                </div>
+                <div className="kpi-body">
+                  <div className="kpi-label">Cache Hit Ratio</div>
+                  <div className="kpi-value" id="infra-cache-val">—</div>
+                  <div style={{ fontSize: '11px', color: 'var(--muted)', marginTop: '4px' }} id="infra-cache-sub">Memory efficiency: —</div>
+                </div>
+              </div>
+
+              <div className="kpi-card" style={{ flex: 1 }}>
+                <div className="kpi-icon kpi-icon--amber">
+                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" width="18" height="18"><circle cx="5" cy="10" r="2"/><circle cx="15" cy="10" r="2"/><path d="M7 10h6"/></svg>
+                </div>
+                <div className="kpi-body">
+                  <div className="kpi-label">Active DB Connections</div>
+                  <div className="kpi-value" id="infra-conn-val">—</div>
+                  <div style={{ fontSize: '11px', color: 'var(--muted)', marginTop: '4px' }} id="infra-conn-sub">Neon pooler: Active</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Daemon Rollout Status Card */}
+            <div className="admin-card" style={{ marginTop: '20px' }}>
+              <div className="admin-card-header">
+                <h3>🔄 Daemon Migration Progress (v1.3.0 2-Hour Sync Rollout)</h3>
+                <span className="badge-pill" id="infra-v130-badge">—</span>
+              </div>
+              <div style={{ padding: '16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', marginBottom: '6px' }}>
+                  <span id="infra-rollout-label">Upgraded to v1.3.0 (2-Hour Interval)</span>
+                  <strong id="infra-rollout-pct">0%</strong>
+                </div>
+                <div style={{ background: 'var(--border, #333)', height: '10px', borderRadius: '5px', overflow: 'hidden' }}>
+                  <div id="infra-rollout-bar" style={{ background: 'linear-gradient(90deg, #3b82f6, #10b981)', height: '100%', width: '0%' }}></div>
+                </div>
+                <div id="infra-versions-list" style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', marginTop: '14px', fontSize: '12px', color: 'var(--muted)' }}>
+                  {/* Version breakdown pills */}
+                </div>
+              </div>
+            </div>
+
+            {/* Table Storage Breakdown */}
+            <div className="admin-card" style={{ marginTop: '20px' }}>
+              <div className="admin-card-header">
+                <h3>💾 Database Table Storage &amp; Row Count Breakdown</h3>
+                <span className="field-hint">Top tables by total disk space in Neon Postgres</span>
+              </div>
+              <div className="admin-table-wrap">
+                <table className="admin-table" id="infra-tables-table">
+                  <thead>
+                    <tr>
+                      <th>Table Name</th>
+                      <th>Total Size</th>
+                      <th>Table Data</th>
+                      <th>Index Size</th>
+                      <th>Estimated Rows</th>
+                      <th>Retention Policy</th>
+                    </tr>
+                  </thead>
+                  <tbody id="infra-tables-tbody">
+                    <tr><td colSpan={6} style={{ textAlign: 'center', padding: '24px' }}>Loading table storage telemetry…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Retention & Pruning Health */}
+            <div className="admin-card" style={{ marginTop: '20px' }}>
+              <div className="admin-card-header">
+                <h3>🧹 Automated Rolling Data Pruning Status</h3>
+                <span className="badge-pill green">Active</span>
+              </div>
+              <div style={{ padding: '16px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px' }}>
+                <div style={{ padding: '12px', background: 'var(--bg-subtle, rgba(255,255,255,0.03))', borderRadius: '8px' }}>
+                  <div style={{ fontSize: '11px', color: 'var(--muted)' }}>Raw Event JSON Retention</div>
+                  <div style={{ fontSize: '15px', fontWeight: 'bold', marginTop: '4px' }}>7-Day Auto-Nullify</div>
+                  <div style={{ fontSize: '12px', color: 'var(--muted)', marginTop: '2px' }} id="infra-unpruned-events">—</div>
+                </div>
+                <div style={{ padding: '12px', background: 'var(--bg-subtle, rgba(255,255,255,0.03))', borderRadius: '8px' }}>
+                  <div style={{ fontSize: '11px', color: 'var(--muted)' }}>Debug Turns &amp; Errors Retention</div>
+                  <div style={{ fontSize: '15px', fontWeight: 'bold', marginTop: '4px' }}>14-Day Rolling Prune</div>
+                  <div style={{ fontSize: '12px', color: 'var(--muted)', marginTop: '2px' }}>Runs nightly in cron</div>
+                </div>
+                <div style={{ padding: '12px', background: 'var(--bg-subtle, rgba(255,255,255,0.03))', borderRadius: '8px' }}>
+                  <div style={{ fontSize: '11px', color: 'var(--muted)' }}>Raw Sessions Retention</div>
+                  <div style={{ fontSize: '15px', fontWeight: 'bold', marginTop: '4px' }}>30-Day Rollup Prune</div>
+                  <div style={{ fontSize: '12px', color: 'var(--muted)', marginTop: '2px' }} id="infra-oldest-session">—</div>
+                </div>
+              </div>
+            </div>
+          </div>
 
           {/* ── Pipeline Health tab ── */}
           <div id="tab-pipeline" className="admin-tab" role="tabpanel" aria-labelledby="tabbtn-pipeline" hidden>

@@ -62,13 +62,15 @@ export async function GET(req: NextRequest) {
       return {
         ...u,
         member_name: member?.display_name || null,
+        daemon_version: member?.daemon_version || null,
+        daemon_last_seen_at: member?.daemon_last_seen_at || null,
         team_name: teamName,
         teams: memberTeams,
         has_api_key: Boolean(u.api_key),
         session_count: sessionCountByMember.get(u.member_id) || 0,
         last_session_at: lastSessionByMember.get(u.member_id) || null,
       };
-    }).sort((a: any, b: any) => String(a.created_at).localeCompare(String(b.created_at)));
+    }).sort((a: any, b: any) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
 
     // Members not linked to any user
     const linkedMemberIds = new Set(userDocs.map((u: any) => u.member_id).filter(Boolean));

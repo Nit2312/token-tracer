@@ -6,6 +6,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { initializeApp, getApps, cert, App } from 'firebase-admin/app';
 import {
   getFirestore,
@@ -199,8 +200,6 @@ export async function batchWrite(
 }
 
 // ── UUID generator helper ─────────────────────────────────────────────────────
-
-import crypto from 'node:crypto';
 
 export function newUuid(): string {
   return crypto.randomUUID();

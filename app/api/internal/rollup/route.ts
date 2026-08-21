@@ -1,15 +1,21 @@
 /**
  * Internal cron endpoint — nightly rollup.
- * Called by Vercel Cron (see vercel.json). Protected by CRON_SECRET.
+ * Called by Vercel Cron (see vercel.json) or superadmin one-click trigger.
+ * Protected by CRON_SECRET or superadmin session cookie.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { queryCol, setDocById, batchWrite } from '@/lib/team/db';
 import { cronSecret } from '@/lib/team/env';
 import { runResearchRollup } from '@/lib/team/research';
+import { getSessionFromCookie } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
 function isCronAuthorized(req: NextRequest): boolean {
+  const cookieHeader = req.headers.get('cookie') || '';
+  const session = getSessionFromCookie(cookieHeader);
+  if (session && session.role === 'superadmin') return true;
+
   const secret = cronSecret();
   if (!secret) return false;
   const auth = req.headers.get('authorization');
@@ -204,5 +210,8 @@ async function runRollup(): Promise<NextResponse> {
     }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, elapsed_ms: elapsed });
+  return NextResponse.json({
+    ok: true,
+    elapsed_ms: elapsed,
+  });
 }

@@ -1314,6 +1314,24 @@ addEventListener('resize', () => {
 
   renderRange();
   await loadState(true, { soft: false });
-  setInterval(() => loadState(false, { soft: false }), 10_000);
+
+  let lastLoadTime = Date.now();
+  const POLL_INTERVAL_MS = 60_000;
+
+  // Poll only when page is visible
+  setInterval(() => {
+    if (document.visibilityState === 'visible') {
+      lastLoadTime = Date.now();
+      loadState(false, { soft: false });
+    }
+  }, POLL_INTERVAL_MS);
+
+  // Refresh immediately on tab focus if data is older than poll interval
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && Date.now() - lastLoadTime >= POLL_INTERVAL_MS) {
+      lastLoadTime = Date.now();
+      loadState(false, { soft: false });
+    }
+  });
 })();
 

@@ -10,6 +10,7 @@ import {
 } from './db';
 import { generateApiKey, hashApiKey } from './auth';
 import { hashPassword } from '@/lib/auth';
+import { statsCache } from './cache';
 
 interface StatsOptions {
   from?: string | null;
@@ -622,6 +623,7 @@ export async function buildTeamStats(
     memberModels,
     totals,
   };
+  });
 }
 
 // ── Chunk helper (Firestore IN queries max 30) ────────────────────────────────

@@ -6,6 +6,7 @@
 import { queryCol, setDocById, addDocToCol, batchWrite, newUuid } from './db';
 import { recalculateTeamCosts, matchesModelPattern } from './stats';
 import { saveSessionTurns } from './research';
+import { statsCache } from './cache';
 
 interface SessionPayload {
   source: string;
@@ -185,11 +186,13 @@ export async function ingestSessions(
     const files: NonNullable<SessionPayload['files']> = s.files ?? [];
 
     // Delete existing tool/file sub-docs for this session
-    const existingTools = await queryCol('sync_session_tools', [
-      { type: 'where', field: 'sync_session_id', op: '==', value: docId },
-    ]);
-    const existingFiles = await queryCol('sync_session_files', [
-      { type: 'where', field: 'sync_session_id', op: '==', value: docId },
+    const [existingTools, existingFiles] = await Promise.all([
+      queryCol('sync_session_tools', [
+        { type: 'where', field: 'sync_session_id', op: '==', value: docId },
+      ]),
+      queryCol('sync_session_files', [
+        { type: 'where', field: 'sync_session_id', op: '==', value: docId },
+      ]),
     ]);
 
     const deleteOps = [
@@ -232,6 +235,10 @@ export async function ingestSessions(
     status: 'ok',
     created_at: new Date().toISOString(),
   });
+
+  if (accepted > 0) {
+    statsCache.clear();
+  }
 
   return { accepted, total: sessions.length };
 }
