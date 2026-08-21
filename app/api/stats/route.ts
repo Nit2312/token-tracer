@@ -1,8 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryCol, getDocById } from '@/lib/team/db';
-import { effIn, effOut } from '@/lib/team/ingest';
 
 export const dynamic = 'force-dynamic';
+
+function effIn(s: any): number {
+  const ti = Number(s.tokens_in || 0);
+  const tc = Number(s.tool_calls || 0);
+  const ed = Number(s.edits || 0);
+  const cl = Number(s.changed_lines || 0);
+  if (ti === 0 && tc + ed > 0) return Math.max(500, (tc + ed) * 350 + cl * 10);
+  return ti;
+}
+
+function effOut(s: any): number {
+  const to = Number(s.tokens_out || 0);
+  const tc = Number(s.tool_calls || 0);
+  const ed = Number(s.edits || 0);
+  const cl = Number(s.changed_lines || 0);
+  if (to === 0 && tc + ed > 0) return Math.max(200, (tc + ed) * 150 + cl * 5);
+  return to;
+}
 
 function parseDateInput(value: string | null): string | null {
   if (!value) return null;

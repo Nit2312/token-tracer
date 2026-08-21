@@ -97,11 +97,13 @@ export async function buildTeamStats(
     };
   }
 
-  // 1. Members list (via team_members junction)
-  const teamMemberDocs = await queryCol<{ member_id: string; role: string; created_at: string }>(
-    'team_members',
-    [{ type: 'where', field: 'team_id', op: '==', value: teamId }],
-  );
+  const cacheKey = `team_stats_${teamId}_${from || ''}_${to || ''}_${memberId || ''}_${minTokens || ''}_${maxTokens || ''}_${source || ''}`;
+  return statsCache.getOrSet(cacheKey, 60, async () => {
+    // 1. Members list (via team_members junction)
+    const teamMemberDocs = await queryCol<{ member_id: string; role: string; created_at: string }>(
+      'team_members',
+      [{ type: 'where', field: 'team_id', op: '==', value: teamId }],
+    );
 
   const memberIds = teamMemberDocs.map((tm) => tm.member_id);
 
@@ -135,10 +137,14 @@ export async function buildTeamStats(
     .filter(Boolean)
     .sort((a: any, b: any) => String(a.display_name).localeCompare(String(b.display_name)));
 
-  // 2. Fetch all sessions for this team
-  const allSessions = await queryCol<any>('sync_sessions', [
+  // 2. Fetch sessions for this team
+  const sessionConstraints: Parameters<typeof queryCol>[1] = [
     { type: 'where', field: 'team_id', op: '==', value: teamId },
-  ]);
+  ];
+  if (memberId) sessionConstraints.push({ type: 'where', field: 'member_id', op: '==', value: memberId });
+  if (source && source !== 'all') sessionConstraints.push({ type: 'where', field: 'source', op: '==', value: source });
+
+  const allSessions = await queryCol<any>('sync_sessions', sessionConstraints);
 
   // Apply date/filter
   const sessions = allSessions.filter((s) =>
