@@ -6,6 +6,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { getSessionFromCookie } from '@/lib/auth';
 import { queryCol } from '@/lib/team/db';
+import { statsCache } from '@/lib/team/cache';
 
 export const dynamic = 'force-dynamic';
 
@@ -25,15 +26,17 @@ export async function GET(req: NextRequest) {
   const days = parseDays(req.nextUrl.searchParams.get('range'));
   const groupBy = req.nextUrl.searchParams.get('groupBy') || 'tool';
 
-  const cutoff = new Date(Date.now() - days * 86400 * 1000).toISOString();
-  const cutoffDate = cutoff.slice(0, 10);
+  const cacheKey = `admin_usage_trends_${days}_${groupBy}`;
+  const responseData = await statsCache.getOrSet(cacheKey, 60, async () => {
+    const cutoff = new Date(Date.now() - days * 86400 * 1000).toISOString();
+    const cutoffDate = cutoff.slice(0, 10);
 
-  const [sessionDocs, memberDocs, eventDocs, teamDocs] = await Promise.all([
-    queryCol<any>('sync_sessions'),
-    queryCol<any>('members'),
-    queryCol<any>('ingest_events'),
-    queryCol<any>('teams'),
-  ]);
+    const [sessionDocs, memberDocs, eventDocs, teamDocs] = await Promise.all([
+      queryCol<any>('sync_sessions'),
+      queryCol<any>('members'),
+      queryCol<any>('ingest_events'),
+      queryCol<any>('teams'),
+    ]);
 
   const inRangeSessions = sessionDocs.filter((s) => {
     const ts = s.ended_at || s.started_at || s.synced_at;
@@ -138,14 +141,17 @@ export async function GET(req: NextRequest) {
     .map(r => ({ day: r.day, total_tokens: r.total_tokens, total_sessions: r.total_sessions, active_orgs: r.orgs.size }))
     .sort((a, b) => a.day.localeCompare(b.day));
 
-  return NextResponse.json({
-    range_days: days,
-    group_by: groupBy,
-    tokens_by_tool: tokensByTool,
-    model_mix: modelMix,
-    top_models: topModels,
-    daemon_activity: daemonActivity,
-    org_growth: orgGrowth,
-    daily_summary: dailySummary,
+    return {
+      range_days: days,
+      group_by: groupBy,
+      tokens_by_tool: tokensByTool,
+      model_mix: modelMix,
+      top_models: topModels,
+      daemon_activity: daemonActivity,
+      org_growth: orgGrowth,
+      daily_summary: dailySummary,
+    };
   });
+
+  return NextResponse.json(responseData);
 }

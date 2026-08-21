@@ -6,6 +6,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { getSessionFromCookie } from '@/lib/auth';
 import { queryCol } from '@/lib/team/db';
+import { statsCache } from '@/lib/team/cache';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,22 +24,24 @@ export async function GET(req: NextRequest) {
   }
 
   const days = parseDays(req.nextUrl.searchParams.get('range'));
-  const cutoff = new Date(Date.now() - days * 86400 * 1000).toISOString();
-  const cutoffDate = cutoff.slice(0, 10);
-  const now = Date.now();
-  const h24Ago = new Date(now - 24 * 3600 * 1000).toISOString();
+  const cacheKey = `admin_pipeline_health_${days}`;
+  const responseData = await statsCache.getOrSet(cacheKey, 60, async () => {
+    const cutoff = new Date(Date.now() - days * 86400 * 1000).toISOString();
+    const cutoffDate = cutoff.slice(0, 10);
+    const now = Date.now();
+    const h24Ago = new Date(now - 24 * 3600 * 1000).toISOString();
 
-  const [members, teams, events, sessions, releases] = await Promise.all([
-    queryCol<any>('members'),
-    queryCol<any>('teams'),
-    queryCol<any>('ingest_events'),
-    queryCol<any>('sync_sessions'),
-    queryCol<any>('daemon_releases', [
-      { type: 'where', field: 'active', op: '==', value: true },
-      { type: 'orderBy', field: 'released_at', direction: 'desc' },
-      { type: 'limit', n: 1 },
-    ]),
-  ]);
+    const [members, teams, events, sessions, releases] = await Promise.all([
+      queryCol<any>('members'),
+      queryCol<any>('teams'),
+      queryCol<any>('ingest_events'),
+      queryCol<any>('sync_sessions'),
+      queryCol<any>('daemon_releases', [
+        { type: 'where', field: 'active', op: '==', value: true },
+        { type: 'orderBy', field: 'released_at', direction: 'desc' },
+        { type: 'limit', n: 1 },
+      ]),
+    ]);
 
   const teamById = new Map(teams.map((t: any) => [t.id, t]));
 
@@ -167,17 +170,20 @@ export async function GET(req: NextRequest) {
 
   const latestReleaseVersion = releases[0]?.version || null;
 
-  return NextResponse.json({
-    range_days: days,
-    daemons: daemonRows,
-    lag_trend: lagTrend,
-    failure_rates: failureRows,
-    schema: {
-      table_count: 10,
-      last_analyzed: null,
-    },
-    active_24h: active24hSet.size,
-    total_known: members.length,
-    latest_version: latestReleaseVersion,
+    return {
+      range_days: days,
+      daemons: daemonRows,
+      lag_trend: lagTrend,
+      failure_rates: failureRows,
+      schema: {
+        table_count: 10,
+        last_analyzed: null,
+      },
+      active_24h: active24hSet.size,
+      total_known: members.length,
+      latest_version: latestReleaseVersion,
+    };
   });
+
+  return NextResponse.json(responseData);
 }

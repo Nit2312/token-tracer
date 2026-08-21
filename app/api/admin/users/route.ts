@@ -11,6 +11,7 @@ import { getSessionFromCookie, hashPassword } from '@/lib/auth';
 import { generateApiKey, hashApiKey } from '@/lib/team/auth';
 import { queryCol, getDocById, setDocById, deleteDocById, batchWrite, newUuid } from '@/lib/team/db';
 import { recordAuditEvent } from '@/lib/team/audit';
+import { statsCache } from '@/lib/team/cache';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,11 +24,12 @@ export async function GET(req: NextRequest) {
   if (!requireSuperadmin(req)) return NextResponse.json({ error: 'superadmin access required' }, { status: 403 });
 
   try {
-    const userDocs = await queryCol<any>('users');
-    const memberDocs = await queryCol<any>('members');
-    const teamMemberDocs = await queryCol<any>('team_members');
-    const teamDocs = await queryCol<any>('teams');
-    const sessionDocs = await queryCol<any>('sync_sessions');
+    const responseData = await statsCache.getOrSet('admin_users_list', 30, async () => {
+      const userDocs = await queryCol<any>('users');
+      const memberDocs = await queryCol<any>('members');
+      const teamMemberDocs = await queryCol<any>('team_members');
+      const teamDocs = await queryCol<any>('teams');
+      const sessionDocs = await queryCol<any>('sync_sessions');
 
     const memberById = new Map(memberDocs.map((m: any) => [m.id, m]));
     const teamById = new Map(teamDocs.map((t: any) => [t.id, t]));
@@ -98,7 +100,10 @@ export async function GET(req: NextRequest) {
       member_count: memberCountByTeam.get(t.id)?.size || 0,
     })).sort((a: any, b: any) => String(a.name).localeCompare(String(b.name)));
 
-    return NextResponse.json({ users, unlinkedMembers, teams });
+    return { users, unlinkedMembers, teams };
+    });
+
+    return NextResponse.json(responseData);
   } catch (err: any) {
     console.error('[admin/users GET error]', err);
     return NextResponse.json({ error: String(err?.message || err) }, { status: 500 });

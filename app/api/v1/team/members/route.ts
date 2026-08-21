@@ -36,12 +36,12 @@ export async function GET(req: NextRequest) {
 
     const memberRoleMap = new Map(teamMemberDocs.map((tm: any) => [tm.member_id, tm.role]));
 
-    // Fetch members, sync_sessions, ingest_events, member_keys in parallel
+    // Fetch members, sync_sessions, ingest_events, member_keys in parallel filtered by team_id
     const [memberDocs, sessionDocs, keyDocs, eventDocs] = await Promise.all([
       Promise.all(targetMemberIds.map((id: string) => getDocById('members', id))),
-      queryCol<any>('sync_sessions'),
-      queryCol<any>('member_keys'),
-      queryCol<any>('ingest_events'),
+      queryCol<any>('sync_sessions', [{ type: 'where', field: 'team_id', op: '==', value: teamId }]),
+      queryCol<any>('member_keys', [{ type: 'where', field: 'team_id', op: '==', value: teamId }]),
+      queryCol<any>('ingest_events', [{ type: 'where', field: 'team_id', op: '==', value: teamId }]),
     ]);
 
     const sessionsByMember = new Map<string, any[]>();

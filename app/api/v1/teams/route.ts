@@ -3,6 +3,8 @@ import { getSessionFromCookie } from '@/lib/auth';
 import { verifyAdminToken, adminTokenFromCookie } from '@/lib/team/auth';
 import { queryCol, setDocById, newUuid } from '@/lib/team/db';
 
+import { statsCache } from '@/lib/team/cache';
+
 export const dynamic = 'force-dynamic';
 
 function requireAdmin(req: NextRequest): boolean {
@@ -26,29 +28,34 @@ export async function GET(req: NextRequest) {
     const isUuid = (val: string | null | undefined): boolean =>
       Boolean(val && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val));
 
-    if (session && (session.role === 'admin' || session.role === 'user')) {
-      const teamDocs = await queryCol<any>('teams');
-      let filteredTeams: any[] = teamDocs;
+    const cacheKey = `teams_list_${session?.userId || 'anon'}_${session?.role || 'none'}`;
+    const result = await statsCache.getOrSet(cacheKey, 60, async () => {
+      if (session && (session.role === 'admin' || session.role === 'user')) {
+        const teamDocs = await queryCol<any>('teams');
+        let filteredTeams: any[] = teamDocs;
 
-      if (isUuid(session.teamId)) {
-        filteredTeams = teamDocs.filter((t: any) => t.id === session.teamId);
-      } else if (isUuid(session.userId)) {
-        // Find member's team_members
-        const userDocs = await queryCol<any>('users', [{ type: 'where', field: 'id', op: '==', value: session.userId }, { type: 'limit', n: 1 }]);
-        const memberId = userDocs[0]?.member_id;
-        if (memberId) {
-          const tmDocs = await queryCol<any>('team_members', [{ type: 'where', field: 'member_id', op: '==', value: memberId }]);
-          const teamIds = new Set(tmDocs.map((tm: any) => tm.team_id));
-          filteredTeams = teamDocs.filter((t: any) => teamIds.has(t.id));
+        if (isUuid(session.teamId)) {
+          filteredTeams = teamDocs.filter((t: any) => t.id === session.teamId);
+        } else if (isUuid(session.userId)) {
+          // Find member's team_members
+          const userDocs = await queryCol<any>('users', [{ type: 'where', field: 'id', op: '==', value: session.userId }, { type: 'limit', n: 1 }]);
+          const memberId = userDocs[0]?.member_id;
+          if (memberId) {
+            const tmDocs = await queryCol<any>('team_members', [{ type: 'where', field: 'member_id', op: '==', value: memberId }]);
+            const teamIds = new Set(tmDocs.map((tm: any) => tm.team_id));
+            filteredTeams = teamDocs.filter((t: any) => teamIds.has(t.id));
+          }
         }
+
+        filteredTeams.sort((a: any, b: any) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+        return { teams: filteredTeams };
       }
 
-      filteredTeams.sort((a: any, b: any) => String(b.created_at).localeCompare(String(a.created_at)));
-      return NextResponse.json({ teams: filteredTeams });
-    }
+      const allTeams = await queryCol<any>('teams');
+      return { teams: allTeams.sort((a: any, b: any) => String(b.created_at || '').localeCompare(String(a.created_at || ''))) };
+    });
 
-    const allTeams = await queryCol<any>('teams');
-    return NextResponse.json({ teams: allTeams.sort((a: any, b: any) => String(b.created_at).localeCompare(String(a.created_at))) });
+    return NextResponse.json(result);
   } catch (err) {
     console.error('[teams GET error]', err);
     return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
