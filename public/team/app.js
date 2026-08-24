@@ -17,6 +17,8 @@ let currentStatsData = null;
 let currentMembersList = [];
 let currentUser = null;
 let globalSelectedMemberIds = new Set(['all']);
+const deepDiveClientCache = new Map();
+let ddDebounceTimer = null;
 
 async function checkAuth() {
   try {
@@ -2060,15 +2062,13 @@ function updateDeepDiveChips() {
 async function loadDeepDiveTabData() {
   const loadingEl = document.getElementById('dd-tab-loading');
   const contentEl = document.getElementById('dd-tab-content');
-  if (loadingEl) loadingEl.hidden = false;
-  if (contentEl) contentEl.hidden = true;
 
-  const teamId = currentTeamId || document.getElementById('team-select')?.value;
-  const from = currentFrom;
-  const to = currentTo;
+  const activeTeamId = teamId || document.getElementById('team-select')?.value;
+  const from = !dateRange.all ? dateRange.from : null;
+  const to = !dateRange.all ? dateRange.to : null;
 
   const params = new URLSearchParams();
-  if (teamId) params.set('teamId', teamId);
+  if (activeTeamId) params.set('teamId', activeTeamId);
   if (from) params.set('from', from);
   if (to) params.set('to', to);
 
@@ -2081,10 +2081,14 @@ async function loadDeepDiveTabData() {
 
   const cacheKey = params.toString();
   const cached = deepDiveClientCache.get(cacheKey);
-  if (cached && (Date.now() - cached.ts < 60000)) {
+  // Immediate return if cached within 3 minutes (180,000ms)
+  if (cached && (Date.now() - cached.ts < 180000)) {
     renderDeepDiveTabContent(cached.data);
     return;
   }
+
+  if (loadingEl) loadingEl.hidden = false;
+  if (contentEl) contentEl.hidden = true;
 
   try {
     const res = await fetch(`/api/v1/team/usage-deep-dive?${cacheKey}`);
@@ -2313,19 +2317,19 @@ async function openTeamMemberDeepDive(memberId, memberName) {
     dialog.setAttribute('open', '');
   }
 
-  const teamId = currentTeamId || document.getElementById('team-select')?.value;
-  const from = currentFrom;
-  const to = currentTo;
+  const activeTeamId = teamId || document.getElementById('team-select')?.value;
+  const from = !dateRange.all ? dateRange.from : null;
+  const to = !dateRange.all ? dateRange.to : null;
 
   const params = new URLSearchParams();
-  if (teamId) params.set('teamId', teamId);
+  if (activeTeamId) params.set('teamId', activeTeamId);
   params.set('memberId', memberId);
   if (from) params.set('from', from);
   if (to) params.set('to', to);
 
   const cacheKey = params.toString();
   const cached = deepDiveClientCache.get(cacheKey);
-  if (cached && (Date.now() - cached.ts < 60000)) {
+  if (cached && (Date.now() - cached.ts < 180000)) {
     renderTeamMemberDeepDive(cached.data);
     return;
   }

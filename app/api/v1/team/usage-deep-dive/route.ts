@@ -43,7 +43,11 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: 'Members not found or no activity' }, { status: 404 });
     }
 
-    return NextResponse.json(deepDive);
+    return NextResponse.json(deepDive, {
+      headers: {
+        'Cache-Control': 'private, max-age=60, stale-while-revalidate=300',
+      },
+    });
   } catch (err: any) {
     console.error('[v1/team/usage-deep-dive error]', err);
     return NextResponse.json({ error: err?.message || 'Internal server error' }, { status: 500 });

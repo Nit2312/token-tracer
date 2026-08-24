@@ -335,7 +335,7 @@ export async function buildMemberUsageDeepDive(
   const sortedIdsKey = isAll ? 'all' : [...memberIds].sort().join('_');
   const cacheKey = `member_deep_dive_pg_${sortedIdsKey}_${teamId || 'any'}_${range}_${from || ''}_${to || ''}_${source || ''}_${model || ''}`;
 
-  return statsCache.getOrSet(cacheKey, 60, async () => {
+  return statsCache.getOrSet(cacheKey, 300, async () => {
     // 1. Fetch Member(s) & Team metadata
     let memberRes;
     let memberWhere = '';
@@ -516,19 +516,25 @@ export async function buildMemberUsageDeepDive(
        ORDER BY total_tokens DESC, api_cost DESC
        LIMIT 25`;
 
-    const filesQuery = `SELECT
+    const filesQuery = `
+      WITH heavy_sessions AS (
+        SELECT s.id
+        FROM sync_sessions s
+        WHERE ${memberWhere} ${filters}
+        ORDER BY (${EFF_IN} + ${EFF_OUT}) DESC
+        LIMIT 100
+      )
+      SELECT
         f.path,
         COALESCE(SUM(f.edits), 0)::int AS edits,
         COALESCE(SUM(f.additions), 0)::int AS additions,
         COALESCE(SUM(f.deletions), 0)::int AS deletions,
         COALESCE(SUM(f.additions + f.deletions), 0)::int AS changed_lines
-       FROM sync_session_files f
-       WHERE f.sync_session_id IN (
-         SELECT s.id FROM sync_sessions s WHERE ${memberWhere} ${filters}
-       )
-       GROUP BY f.path
-       ORDER BY changed_lines DESC, edits DESC
-       LIMIT 20`;
+      FROM sync_session_files f
+      JOIN heavy_sessions hs ON hs.id = f.sync_session_id
+      GROUP BY f.path
+      ORDER BY changed_lines DESC, edits DESC
+      LIMIT 20`;
 
     const timelineQuery = `SELECT
         COALESCE(s.ended_at, s.started_at, s.synced_at)::date::text AS day,
