@@ -707,6 +707,167 @@ export default async function TeamDashboardPage() {
         </form>
       </dialog>
 
+      {/* Team Member Token Deep-Dive Modal */}
+      <dialog id="team-whale-drilldown-dialog" className="tt-modal" style={{ maxWidth: '960px', width: '92vw', maxHeight: '90vh' }}>
+        <div className="dialog-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border)', paddingBottom: '12px' }}>
+          <div>
+            <h3 id="twdd-title" style={{ margin: 0, fontSize: '18px' }}>👤 Member Token Deep Dive</h3>
+            <span id="twdd-subtitle" className="muted" style={{ fontSize: '12px' }}>Where was this member&apos;s token usage spent?</span>
+          </div>
+          <button type="button" id="twdd-close-btn" className="hbtn" style={{ fontSize: '14px', padding: '4px 10px' }}>✕</button>
+        </div>
+
+        <div id="twdd-body" className="dialog-body" style={{ overflowY: 'auto', maxHeight: 'calc(90vh - 120px)', padding: '16px 0' }}>
+          <div id="twdd-loading" className="muted" style={{ textAlign: 'center', padding: '40px' }}>
+            Loading deep-dive token usage analytics…
+          </div>
+          <div id="twdd-content" hidden>
+            {/* Top Stat Cards */}
+            <div className="kpi-row" style={{ marginBottom: '16px' }}>
+              <div className="kpi-card kpi-card--accent-blue">
+                <div className="kpi-body">
+                  <div className="kpi-label">Total Burn</div>
+                  <div className="kpi-value" id="twdd-stat-tokens">—</div>
+                  <span className="kpi-sub" id="twdd-stat-cost">—</span>
+                </div>
+              </div>
+              <div className="kpi-card">
+                <div className="kpi-body">
+                  <div className="kpi-label">Input / Output</div>
+                  <div className="kpi-value" id="twdd-stat-in-out">—</div>
+                  <span className="kpi-sub" id="twdd-stat-cache">—</span>
+                </div>
+              </div>
+              <div className="kpi-card">
+                <div className="kpi-body">
+                  <div className="kpi-label">Sessions / Active Days</div>
+                  <div className="kpi-value" id="twdd-stat-sessions">—</div>
+                  <span className="kpi-sub" id="twdd-stat-avg">—</span>
+                </div>
+              </div>
+              <div className="kpi-card kpi-card--accent-purple">
+                <div className="kpi-body">
+                  <div className="kpi-label">Code Impact</div>
+                  <div className="kpi-value" id="twdd-stat-edits">—</div>
+                  <span className="kpi-sub" id="twdd-stat-lines">—</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Dimension 1: Projects & Repositories */}
+            <div className="panel" style={{ marginBottom: '16px' }}>
+              <div className="panel-head">
+                <div>
+                  <h3>📁 Workspaces &amp; Repositories</h3>
+                  <span className="muted">Which repositories absorbed this developer&apos;s tokens</span>
+                </div>
+              </div>
+              <div className="table-wrap">
+                <table id="twdd-projects-table">
+                  <thead>
+                    <tr>
+                      <th>Project / Workspace</th>
+                      <th>Tools Used</th>
+                      <th>Sessions</th>
+                      <th>Tokens In / Out</th>
+                      <th>Total Tokens</th>
+                      <th>Share (% Burn)</th>
+                      <th>Est. Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody id="twdd-projects-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Dimension 2: Models & Cache Hit Ratio */}
+            <div className="panel" style={{ marginBottom: '16px' }}>
+              <div className="panel-head">
+                <div>
+                  <h3>🤖 LLM Models &amp; Cache Efficiency</h3>
+                  <span className="muted">Model breakdown, caching efficiency &amp; API costs</span>
+                </div>
+              </div>
+              <div className="table-wrap">
+                <table id="twdd-models-table">
+                  <thead>
+                    <tr>
+                      <th>Model Pattern</th>
+                      <th>Agent Tool</th>
+                      <th>Sessions</th>
+                      <th>Tokens In / Out</th>
+                      <th>Cache Hit %</th>
+                      <th>Total Tokens</th>
+                      <th>API Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody id="twdd-models-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Dimension 3: Top Heavy Sessions */}
+            <div className="panel" style={{ marginBottom: '16px' }}>
+              <div className="panel-head">
+                <div>
+                  <h3>⚡ Top Heavy Sessions &amp; Anomalies</h3>
+                  <span className="muted">Sessions with highest context window or runaway loops</span>
+                </div>
+              </div>
+              <div className="table-wrap">
+                <table id="twdd-sessions-table">
+                  <thead>
+                    <tr>
+                      <th>Session ID / Timestamp</th>
+                      <th>Project</th>
+                      <th>Tool &amp; Model</th>
+                      <th>Tokens (In / Out / Cache)</th>
+                      <th>Cost</th>
+                      <th>Health / Loops</th>
+                      <th style={{ textAlign: 'right' }}>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="twdd-sessions-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Dimension 4: Hotspot Files */}
+            <div className="panel" style={{ marginBottom: '16px' }}>
+              <div className="panel-head">
+                <div>
+                  <h3>📄 Hotspot Code Files</h3>
+                  <span className="muted">Most-edited paths and diff volume</span>
+                </div>
+              </div>
+              <div className="table-wrap">
+                <table id="twdd-files-table">
+                  <thead>
+                    <tr>
+                      <th>File Path</th>
+                      <th>Edits Count</th>
+                      <th>Lines Changed</th>
+                    </tr>
+                  </thead>
+                  <tbody id="twdd-files-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Dimension 5: Daily Token Burn Timeline */}
+            <div className="panel">
+              <div className="panel-head">
+                <div>
+                  <h3>📈 Daily Token Burn Timeline</h3>
+                  <span className="muted">Daily spike and burst activity</span>
+                </div>
+              </div>
+              <div id="twdd-timeline-chart" style={{ padding: '12px 16px' }}></div>
+            </div>
+          </div>
+        </div>
+      </dialog>
+
       <Script src="/toast.js" strategy="afterInteractive" />
       <Script src="/loader.js" strategy="afterInteractive" />
       <Script src="/team/app.js" strategy="afterInteractive" />

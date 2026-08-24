@@ -88,6 +88,9 @@ export default async function AdminPage() {
             <button type="button" id="tabbtn-usage" className="tab-btn" data-tab="tab-usage" role="tab" aria-selected="false" aria-controls="tab-usage" tabIndex={-1}>
               <span className="nav-icon" aria-hidden="true">📈</span> Usage &amp; Growth
             </button>
+            <button type="button" id="tabbtn-top-usage" className="tab-btn" data-tab="tab-top-usage" role="tab" aria-selected="false" aria-controls="tab-top-usage" tabIndex={-1}>
+              <span className="nav-icon" aria-hidden="true">🐋</span> Top Usage &amp; Whales
+            </button>
             <a href="/admin/research" id="tabbtn-research" className="tab-btn">
               <span className="nav-icon" aria-hidden="true">🔍</span> Research Analytics
             </a>
@@ -919,6 +922,129 @@ export default async function AdminPage() {
             </div>
           </div>
 
+          {/* ── Top Usage & Whales Tab ── */}
+          <div id="tab-top-usage" className="admin-tab" role="tabpanel" aria-labelledby="tabbtn-top-usage" hidden>
+            <div className="admin-tab-header">
+              <div>
+                <h2>Top Usage &amp; Whales</h2>
+                <span className="admin-tab-sub">Heavy token consumers, project burn attribution, runaway sessions &amp; deep analytics</span>
+              </div>
+              <div className="admin-header-actions" style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                <select id="whale-range-select" className="range-select" aria-label="Date range" defaultValue="all">
+                  <option value="all">All Time</option>
+                  <option value="7d">Last 7 days</option>
+                  <option value="30d">Last 30 days</option>
+                  <option value="90d">Last 90 days</option>
+                </select>
+                <select id="whale-team-select" className="range-select" aria-label="Filter by team">
+                  <option value="all">All Teams</option>
+                </select>
+                <select id="whale-min-tokens-select" className="range-select" aria-label="Min token filter" defaultValue="0">
+                  <option value="0">Min Tokens: Any</option>
+                  <option value="100000000">&gt; 100M Tokens</option>
+                  <option value="500000000">&gt; 500M Tokens</option>
+                  <option value="1000000000">&gt; 1B Tokens</option>
+                  <option value="3000000000">&gt; 3B Tokens (Mega Whales)</option>
+                </select>
+                <input
+                  id="whale-search-input"
+                  type="text"
+                  placeholder="Search user, team, repo, model…"
+                  className="search-input"
+                  style={{ minWidth: '220px', padding: '6px 12px', fontSize: '13px' }}
+                />
+                <button type="button" id="whale-refresh-btn" className="hbtn">🔄 Refresh</button>
+              </div>
+            </div>
+
+            {/* Whale KPI Row */}
+            <div className="kpi-row" id="whale-kpi-row">
+              <div className="kpi-card kpi-card--accent-purple">
+                <div className="kpi-body">
+                  <div className="kpi-label">Top Single Consumer</div>
+                  <div className="kpi-value" id="whale-kpi-top-user">—</div>
+                  <span className="kpi-sub" id="whale-kpi-top-user-sub">—</span>
+                </div>
+              </div>
+              <div className="kpi-card kpi-card--accent-blue">
+                <div className="kpi-body">
+                  <div className="kpi-label">Total Platform Tokens</div>
+                  <div className="kpi-value" id="whale-kpi-total-tokens">—</div>
+                  <span className="kpi-sub" id="whale-kpi-total-cost">—</span>
+                </div>
+              </div>
+              <div className="kpi-card kpi-card--accent-green">
+                <div className="kpi-body">
+                  <div className="kpi-label">Top Burn Project</div>
+                  <div className="kpi-value" id="whale-kpi-top-project">—</div>
+                  <span className="kpi-sub" id="whale-kpi-top-project-sub">—</span>
+                </div>
+              </div>
+              <div className="kpi-card kpi-card--accent-yellow">
+                <div className="kpi-body">
+                  <div className="kpi-label">Heavy Spenders Active</div>
+                  <div className="kpi-value" id="whale-kpi-whale-count">—</div>
+                  <span className="kpi-sub">Ranked consumers</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Two-Column: Top Repositories Platform-Wide | Extreme Runaway Sessions */}
+            <div className="analytics-two-col" style={{ marginBottom: '20px' }}>
+              <div className="analytics-col-main">
+                <div className="panel-card">
+                  <div className="panel-card-header">
+                    <span className="panel-card-title">📁 Top Token-Burning Projects Platform-Wide</span>
+                    <span style={{ fontSize: '11px', color: 'var(--muted)' }}>Context &amp; generation volume</span>
+                  </div>
+                  <div id="whale-global-projects" className="whale-projects-list" style={{ padding: '8px 16px 16px' }}></div>
+                </div>
+              </div>
+              <div className="analytics-col-side">
+                <div className="panel-card">
+                  <div className="panel-card-header">
+                    <span className="panel-card-title">⚠️ Extreme Single Sessions Platform-Wide</span>
+                    <span style={{ fontSize: '11px', color: 'var(--muted)' }}>Highest token burn / loops</span>
+                  </div>
+                  <div id="whale-extreme-sessions" className="whale-extreme-sessions-list" style={{ padding: '8px 16px 16px' }}></div>
+                </div>
+              </div>
+            </div>
+
+            {/* Whale Leaderboard Table */}
+            <div className="panel-card">
+              <div className="panel-card-header">
+                <div>
+                  <span className="panel-card-title">👥 Top Token Spenders Leaderboard</span>
+                  <p style={{ margin: '4px 0 0', fontSize: '12px', color: 'var(--muted)' }}>
+                    Click any developer or <strong>&quot;Analyze Breakdown&quot;</strong> to see exact repositories, models, cache stats, files, and prompts.
+                  </p>
+                </div>
+              </div>
+              <div className="table-wrap">
+                <table className="data-table" id="whale-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: '40px' }}>#</th>
+                      <th>Developer / Member</th>
+                      <th>Organization / Team</th>
+                      <th>Total Tokens</th>
+                      <th>Cache Read</th>
+                      <th>Est. Cost</th>
+                      <th>Primary Project (% Burn)</th>
+                      <th>Primary Model</th>
+                      <th>Runaway Sessions</th>
+                      <th style={{ textAlign: 'right' }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="whale-table-body">
+                    <tr><td colSpan={10} className="muted" style={{ textAlign: 'center', padding: '30px' }}>Loading top usage analysis…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
           {/* Prompt Explorer Tab */}
           <div id="tab-prompts" className="admin-tab" role="tabpanel" aria-labelledby="tabbtn-prompts" hidden>
             <div className="admin-section-header">
@@ -1192,6 +1318,157 @@ export default async function AdminPage() {
             <button type="submit" id="save-admin-profile-btn" className="hbtn primary">Save Changes</button>
           </menu>
         </form>
+      </dialog>
+
+      {/* Whale Usage Deep-Dive Dialog / Modal */}
+      <dialog id="whale-drilldown-dialog" className="tt-modal" style={{ maxWidth: '960px', width: '92vw', maxHeight: '90vh' }}>
+        <div className="dialog-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border)', paddingBottom: '12px' }}>
+          <div>
+            <h3 id="wdd-title" style={{ margin: 0, fontSize: '18px' }}>👤 Member Token Breakdown</h3>
+            <span id="wdd-subtitle" className="muted" style={{ fontSize: '12px' }}>Where was the token volume spent?</span>
+          </div>
+          <button type="button" id="wdd-close-btn" className="hbtn" style={{ fontSize: '14px', padding: '4px 10px' }}>✕</button>
+        </div>
+
+        <div id="wdd-body" className="dialog-body" style={{ overflowY: 'auto', maxHeight: 'calc(90vh - 120px)', padding: '16px 0' }}>
+          <div id="wdd-loading" className="muted" style={{ textAlign: 'center', padding: '40px' }}>
+            Loading deep-dive usage analytics…
+          </div>
+          <div id="wdd-content" hidden>
+            {/* Top Stat Pills */}
+            <div className="kpi-row" id="wdd-kpi-row" style={{ marginBottom: '16px' }}>
+              <div className="kpi-card kpi-card--accent-blue">
+                <div className="kpi-body">
+                  <div className="kpi-label">Total Burn</div>
+                  <div className="kpi-value" id="wdd-stat-tokens">—</div>
+                  <span className="kpi-sub" id="wdd-stat-cost">—</span>
+                </div>
+              </div>
+              <div className="kpi-card">
+                <div className="kpi-body">
+                  <div className="kpi-label">Input / Output</div>
+                  <div className="kpi-value" id="wdd-stat-in-out">—</div>
+                  <span className="kpi-sub" id="wdd-stat-cache">—</span>
+                </div>
+              </div>
+              <div className="kpi-card">
+                <div className="kpi-body">
+                  <div className="kpi-label">Sessions / Active Days</div>
+                  <div className="kpi-value" id="wdd-stat-sessions">—</div>
+                  <span className="kpi-sub" id="wdd-stat-avg">—</span>
+                </div>
+              </div>
+              <div className="kpi-card kpi-card--accent-purple">
+                <div className="kpi-body">
+                  <div className="kpi-label">Code Impact</div>
+                  <div className="kpi-value" id="wdd-stat-edits">—</div>
+                  <span className="kpi-sub" id="wdd-stat-lines">—</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Dimension 1: Projects / Repositories */}
+            <div className="panel-card" style={{ marginBottom: '16px' }}>
+              <div className="panel-card-header">
+                <span className="panel-card-title">📁 Workspaces &amp; Repositories</span>
+                <span style={{ fontSize: '11px', color: 'var(--muted)' }}>Which repositories consumed the tokens</span>
+              </div>
+              <div className="table-wrap">
+                <table className="data-table" id="wdd-projects-table">
+                  <thead>
+                    <tr>
+                      <th>Project / Workspace</th>
+                      <th>Tools Used</th>
+                      <th>Sessions</th>
+                      <th>Tokens In / Out</th>
+                      <th>Total Tokens</th>
+                      <th>Share (% Burn)</th>
+                      <th>Est. Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody id="wdd-projects-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Dimension 2: LLM Models & Cache Hit Ratio */}
+            <div className="panel-card" style={{ marginBottom: '16px' }}>
+              <div className="panel-card-header">
+                <span className="panel-card-title">🤖 LLM Models &amp; Cache Efficiency</span>
+                <span style={{ fontSize: '11px', color: 'var(--muted)' }}>Model mix, caching performance &amp; API costs</span>
+              </div>
+              <div className="table-wrap">
+                <table className="data-table" id="wdd-models-table">
+                  <thead>
+                    <tr>
+                      <th>Model Pattern</th>
+                      <th>Agent Tool</th>
+                      <th>Sessions</th>
+                      <th>Tokens In / Out</th>
+                      <th>Cache Hit %</th>
+                      <th>Total Tokens</th>
+                      <th>API Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody id="wdd-models-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Dimension 3: Top Heavy Sessions & Runaway Loops */}
+            <div className="panel-card" style={{ marginBottom: '16px' }}>
+              <div className="panel-card-header">
+                <span className="panel-card-title">⚡ Top Heavy Sessions &amp; Runaway Detection</span>
+                <span style={{ fontSize: '11px', color: 'var(--muted)' }}>Sessions with largest context windows, loops or tool errors</span>
+              </div>
+              <div className="table-wrap">
+                <table className="data-table" id="wdd-sessions-table">
+                  <thead>
+                    <tr>
+                      <th>Session ID / Timestamp</th>
+                      <th>Project</th>
+                      <th>Tool &amp; Model</th>
+                      <th>Tokens (In / Out / Cache)</th>
+                      <th>Cost</th>
+                      <th>Health / Loops</th>
+                      <th style={{ textAlign: 'right' }}>Inspect</th>
+                    </tr>
+                  </thead>
+                  <tbody id="wdd-sessions-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Dimension 4: Hotspot Files Touched */}
+            <div className="panel-card" style={{ marginBottom: '16px' }}>
+              <div className="panel-card-header">
+                <span className="panel-card-title">📄 Hotspot Code Files</span>
+                <span style={{ fontSize: '11px', color: 'var(--muted)' }}>Most edited or repeatedly loaded into context</span>
+              </div>
+              <div className="table-wrap">
+                <table className="data-table" id="wdd-files-table">
+                  <thead>
+                    <tr>
+                      <th>File Path</th>
+                      <th>Edits Count</th>
+                      <th>Lines Changed</th>
+                    </tr>
+                  </thead>
+                  <tbody id="wdd-files-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Dimension 5: Daily Token Burn Timeline */}
+            <div className="panel-card">
+              <div className="panel-card-header">
+                <span className="panel-card-title">📈 Daily Token Burn Timeline</span>
+                <span style={{ fontSize: '11px', color: 'var(--muted)' }}>Spike detection &amp; burn bursts</span>
+              </div>
+              <div id="wdd-timeline-chart" style={{ padding: '12px 16px' }}></div>
+            </div>
+          </div>
+        </div>
       </dialog>
 
       <Script src="/toast.js" strategy="afterInteractive" />

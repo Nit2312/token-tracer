@@ -512,11 +512,11 @@ function renderTokenLeaderboard(rows) {
   const maxTokens = rows[0]?.total_tokens || 1;
 
   el.innerHTML = `<table><thead><tr>
-    <th>Rank</th><th>Member</th><th>Total Tokens</th><th>Team Share</th><th>Input Tokens</th><th>Output Tokens</th><th>Cache Read</th><th>Est. API Cost</th>
+    <th>Rank</th><th>Member</th><th>Total Tokens</th><th>Team Share</th><th>Input Tokens</th><th>Output Tokens</th><th>Cache Read</th><th>Est. API Cost</th><th style="text-align:right;">Deep Dive</th>
   </tr></thead><tbody>${rows.map((r, i) => `<tr>
     <td><strong>#${i + 1}</strong></td>
     <td><strong>👤 ${r.display_name}</strong></td>
-    <td><strong>${fmt(r.total_tokens)}</strong></td>
+    <td><strong style="color:var(--brand-hi);">${fmt(r.total_tokens)}</strong></td>
     <td>
       <div class="bar-row" style="margin:0">
         <div class="track" style="width:80px"><div class="fill" style="width:${Math.round((r.total_tokens / maxTokens) * 100)}%"></div></div>
@@ -527,6 +527,11 @@ function renderTokenLeaderboard(rows) {
     <td>${fmt(r.tokens_out)}</td>
     <td>${fmt(r.tokens_cache_read)}</td>
     <td><strong>${fmtCost(r.api_cost)}</strong></td>
+    <td style="text-align:right;">
+      <button type="button" class="hbtn" style="font-size:11px; padding:3px 8px; border-color:var(--brand); color:var(--brand-hi);" onclick="openTeamMemberDeepDive('${r.member_id}', '${encodeURIComponent(r.display_name)}')">
+        🔍 Analyze
+      </button>
+    </td>
   </tr>`).join('')}</tbody></table>`;
 }
 
@@ -618,8 +623,9 @@ function renderMemberDrilldown(membersData) {
             <span class="source-tag">${fmt(m.sessions)} sessions</span>
             <span class="source-tag">${fmt(Number(m.tokens_in || 0) + Number(m.tokens_out || 0))} tokens</span>
           </div>
-          <div style="display:flex; align-items:center; gap:10px;">
+          <div style="display:flex; align-items:center; gap:8px;">
             <strong>${fmtCost(m.api_cost)} total cost</strong>
+            <button type="button" class="hbtn primary" style="font-size:11px;padding:3px 8px;" onclick="event.stopPropagation(); openTeamMemberDeepDive('${m.member_id}', '${encodeURIComponent(m.display_name)}')">🔍 Full Token Breakdown</button>
             <button type="button" class="hbtn" style="border-color:var(--brand);color:var(--brand-hi);font-size:11px;padding:3px 8px;" onclick="event.stopPropagation(); triggerMemberSync('${m.member_id}', '${encodeURIComponent(m.display_name)}')">⚡ Trigger Sync</button>
             <span class="collapse-icon">▼</span>
           </div>
@@ -1778,4 +1784,240 @@ document.getElementById('publish-release-form')?.addEventListener('submit', asyn
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Publish Release'; }
   }
+});
+
+// ── Team Member Token Deep-Dive Modal Controller ────────────────────────────
+async function openTeamMemberDeepDive(memberId, memberName) {
+  const dialog = document.getElementById('team-whale-drilldown-dialog');
+  if (!dialog) return;
+
+  const titleEl = document.getElementById('twdd-title');
+  const subEl = document.getElementById('twdd-subtitle');
+  const decodedName = decodeURIComponent(memberName || 'Member');
+  if (titleEl) titleEl.textContent = `👤 ${decodedName} — Deep-Dive Token Analysis`;
+  if (subEl) subEl.textContent = `Analyzing where this member spent their tokens across repositories, models & sessions…`;
+
+  const loadingEl = document.getElementById('twdd-loading');
+  const contentEl = document.getElementById('twdd-content');
+  if (loadingEl) loadingEl.hidden = false;
+  if (contentEl) contentEl.hidden = true;
+
+  if (typeof dialog.showModal === 'function') {
+    dialog.showModal();
+  } else {
+    dialog.setAttribute('open', '');
+  }
+
+  const teamId = currentTeamId || document.getElementById('team-select')?.value;
+  const from = currentFrom;
+  const to = currentTo;
+
+  const params = new URLSearchParams();
+  if (teamId) params.set('teamId', teamId);
+  params.set('memberId', memberId);
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+
+  try {
+    const res = await fetch(`/api/v1/team/usage-deep-dive?${params.toString()}`);
+    if (!res.ok) {
+      throw new Error(`Failed to load member deep dive: ${res.statusText}`);
+    }
+    const data = await res.json();
+    renderTeamMemberDeepDive(data);
+  } catch (err) {
+    console.error('[openTeamMemberDeepDive error]', err);
+    if (loadingEl) {
+      loadingEl.innerHTML = `<span style="color:var(--error-text);">Error loading deep dive: ${esc(err.message)}</span>`;
+    }
+  }
+}
+
+function renderTeamMemberDeepDive(data) {
+  const loadingEl = document.getElementById('twdd-loading');
+  const contentEl = document.getElementById('twdd-content');
+  if (loadingEl) loadingEl.hidden = true;
+  if (contentEl) contentEl.hidden = false;
+
+  if (!data) return;
+
+  const m = data.member || {};
+  const totals = data.totals || {};
+
+  const subEl = document.getElementById('twdd-subtitle');
+  if (subEl) {
+    subEl.textContent = `Team: ${m.teamName || 'Independent'} • Total Volume: ${fmt(totals.totalTokens)} tokens (${fmtCost(totals.totalCost)}) across ${totals.sessionCount} sessions`;
+  }
+
+  // Stat cards
+  const statTok = document.getElementById('twdd-stat-tokens');
+  const statCost = document.getElementById('twdd-stat-cost');
+  if (statTok) statTok.textContent = fmt(totals.totalTokens);
+  if (statCost) statCost.textContent = `${fmtCost(totals.totalCost)} total API cost`;
+
+  const statInOut = document.getElementById('twdd-stat-in-out');
+  const statCache = document.getElementById('twdd-stat-cache');
+  if (statInOut) statInOut.textContent = `${fmt(totals.tokensIn)} in / ${fmt(totals.tokensOut)} out`;
+  if (statCache) statCache.textContent = `Cache read: ${fmt(totals.tokensCacheRead)} (${fmt(totals.tokensCacheWrite)} write)`;
+
+  const statSess = document.getElementById('twdd-stat-sessions');
+  const statAvg = document.getElementById('twdd-stat-avg');
+  if (statSess) statSess.textContent = `${totals.sessionCount} sessions (${totals.activeDays} active days)`;
+  if (statAvg) statAvg.textContent = `Avg: ${fmt(totals.avgTokensPerSession)} / session`;
+
+  const statEdits = document.getElementById('twdd-stat-edits');
+  const statLines = document.getElementById('twdd-stat-lines');
+  if (statEdits) statEdits.textContent = `${totals.edits || 0} code edits`;
+  if (statLines) statLines.textContent = `${totals.changedLines || 0} lines changed • ${totals.toolCalls || 0} tool calls`;
+
+  // Dimension 1: Projects Table
+  const projTbody = document.getElementById('twdd-projects-tbody');
+  if (projTbody) {
+    if (!data.projects?.length) {
+      projTbody.innerHTML = `<tr><td colSpan="7" class="muted" style="text-align:center; padding:16px;">No project records logged.</td></tr>`;
+    } else {
+      projTbody.innerHTML = data.projects.map(p => `
+        <tr>
+          <td><strong>📁 ${cleanProjectName(p.project)}</strong></td>
+          <td>${(p.sources || []).map(s => `<span class="source-tag">${esc(s)}</span>`).join(' ')}</td>
+          <td>${p.sessions}</td>
+          <td>${fmt(p.tokensIn)} / ${fmt(p.tokensOut)}</td>
+          <td><strong style="color:var(--brand-hi);">${fmt(p.totalTokens)}</strong></td>
+          <td>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-weight:600; width:36px;">${Math.round(p.percentage)}%</span>
+              <div style="flex:1; max-width:80px; height:6px; background:rgba(255,255,255,0.06); border-radius:3px; overflow:hidden;">
+                <div style="width:${Math.min(100, Math.round(p.percentage))}%; height:100%; background:var(--brand); border-radius:3px;"></div>
+              </div>
+            </div>
+          </td>
+          <td><strong>${fmtCost(p.apiCost)}</strong></td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  // Dimension 2: Models Table
+  const modTbody = document.getElementById('twdd-models-tbody');
+  if (modTbody) {
+    if (!data.models?.length) {
+      modTbody.innerHTML = `<tr><td colSpan="7" class="muted" style="text-align:center; padding:16px;">No model records logged.</td></tr>`;
+    } else {
+      modTbody.innerHTML = data.models.map(mod => `
+        <tr>
+          <td><strong>🤖 <code>${esc(mod.model)}</code></strong></td>
+          <td><span class="source-tag">${esc(mod.source)}</span></td>
+          <td>${mod.sessions}</td>
+          <td>${fmt(mod.tokensIn)} / ${fmt(mod.tokensOut)}</td>
+          <td><span style="color:#a78bfa; font-weight:600;">${Math.round(mod.cacheHitRate)}%</span></td>
+          <td><strong>${fmt(mod.totalTokens)}</strong></td>
+          <td><strong>${fmtCost(mod.apiCost)}</strong></td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  // Dimension 3: Top Sessions Table
+  const sessTbody = document.getElementById('twdd-sessions-tbody');
+  if (sessTbody) {
+    if (!data.topSessions?.length) {
+      sessTbody.innerHTML = `<tr><td colSpan="7" class="muted" style="text-align:center; padding:16px;">No session logs found.</td></tr>`;
+    } else {
+      sessTbody.innerHTML = data.topSessions.map(s => {
+        const runawayBadge = s.isRunaway
+          ? `<span class="source-tag" style="background:rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.3); font-size:10px;">⚠️ Loop / Runaway</span>`
+          : `<span class="muted" style="font-size:10.5px;">✓ Normal</span>`;
+        const timeStr = s.startedAt ? String(s.startedAt).slice(0, 16).replace('T', ' ') : '—';
+
+        return `
+          <tr>
+            <td>
+              <div style="font-weight:600; font-size:12px; font-family:monospace;">${esc(s.sessionId)}</div>
+              <div class="muted" style="font-size:10.5px;">${timeStr}</div>
+            </td>
+            <td>📁 ${cleanProjectName(s.project)}</td>
+            <td>
+              <div><span class="source-tag">${esc(s.source)}</span></div>
+              <code style="font-size:10px;">${esc(s.model)}</code>
+            </td>
+            <td>
+              <div style="font-weight:700; color:var(--brand-hi);">${fmt(s.totalTokens)}</div>
+              <div class="muted" style="font-size:10px;">${fmt(s.tokensIn)} in • ${fmt(s.tokensCacheRead)} cache</div>
+            </td>
+            <td><strong>${fmtCost(s.apiCost)}</strong></td>
+            <td>
+              ${runawayBadge}
+              <div class="muted" style="font-size:10px;">${s.toolErrors || 0} errs • ${s.reworkLoops || 0} loops</div>
+            </td>
+            <td style="text-align:right;">
+              <button type="button" class="hbtn" style="font-size:11px; padding:3px 8px;" onclick="inspectTeamPrompt('${esc(s.sessionId)}')">
+                Prompts ↗
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+  }
+
+  // Dimension 4: Files Table
+  const filesTbody = document.getElementById('twdd-files-tbody');
+  if (filesTbody) {
+    if (!data.topFiles?.length) {
+      filesTbody.innerHTML = `<tr><td colSpan="3" class="muted" style="text-align:center; padding:16px;">No code diff records logged.</td></tr>`;
+    } else {
+      filesTbody.innerHTML = data.topFiles.map(f => `
+        <tr>
+          <td><code style="font-size:11.5px;">${esc(f.path)}</code></td>
+          <td>${f.edits} edits</td>
+          <td><span style="color:#4ade80;">+${f.additions || 0}</span> <span style="color:#f87171;">−${f.deletions || 0}</span> (${f.changedLines} changed)</td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  // Dimension 5: Daily Timeline
+  const timelineEl = document.getElementById('twdd-timeline-chart');
+  if (timelineEl) {
+    if (!data.dailyTimeline?.length) {
+      timelineEl.innerHTML = `<p class="muted" style="font-size:12px; margin:0;">No daily timeline data available.</p>`;
+    } else {
+      const maxDaily = Math.max(...data.dailyTimeline.map(d => d.totalTokens), 1);
+      timelineEl.innerHTML = `
+        <div style="display:flex; gap:6px; align-items:flex-end; height:120px; padding-top:20px; overflow-x:auto;">
+          ${data.dailyTimeline.map(d => {
+            const h = Math.max(4, Math.round((d.totalTokens / maxDaily) * 90));
+            return `
+              <div style="display:flex; flex-direction:column; align-items:center; flex:1; min-width:24px;" title="${d.day}: ${fmt(d.totalTokens)} tokens (${fmtCost(d.apiCost)}) across ${d.sessions} sessions">
+                <span style="font-size:9px; color:var(--muted); margin-bottom:4px;">${fmt(d.totalTokens)}</span>
+                <div style="width:100%; height:${h}px; background:var(--brand); border-radius:3px 3px 0 0; opacity:0.85;"></div>
+                <span style="font-size:9px; color:var(--muted); margin-top:4px; transform:rotate(-45deg); transform-origin:left top; white-space:nowrap;">${d.day.slice(5)}</span>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+  }
+}
+
+function inspectTeamPrompt(sessionId) {
+  const dialog = document.getElementById('team-whale-drilldown-dialog');
+  if (dialog) dialog.close?.();
+
+  const tabBtn = document.getElementById('tabbtn-prompts');
+  if (tabBtn) tabBtn.click();
+
+  setTimeout(() => {
+    const searchInput = document.getElementById('prompt-search') || document.getElementById('prompt-search-input');
+    if (searchInput) {
+      searchInput.value = sessionId;
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      searchInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }, 100);
+}
+
+document.getElementById('twdd-close-btn')?.addEventListener('click', () => {
+  document.getElementById('team-whale-drilldown-dialog')?.close?.();
 });
