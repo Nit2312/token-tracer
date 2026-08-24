@@ -791,6 +791,7 @@ window.deletePricingRule = async function (id) {
 
 function renderMembersTable(rows) {
   currentMembersList = rows || [];
+  populateDeepDiveMemberCheckboxes();
   const select = document.getElementById('global-member-filter');
   if (select) {
     const currentVal = select.value;
@@ -928,6 +929,7 @@ async function loadStats({ soft = true } = {}) {
     renderSessionLogs(stats.recentLogs);
     renderModelPricingTable(stats.modelPricing);
     renderMemberModelsTable(stats.memberModels);
+    populateDeepDiveMemberCheckboxes();
     loadPrompts().catch(console.error);
   } finally {
     if (useSoft) softLoading(false);
@@ -1018,6 +1020,7 @@ async function loadMembers() {
   if (!teamId) return;
   const { members } = await api(`/api/v1/team/members?teamId=${teamId}`);
   renderMembersTable(members);
+  populateDeepDiveMemberCheckboxes();
 }
 
 async function loadTeams() {
@@ -1129,6 +1132,10 @@ function setupTabs() {
       if (targetEl) {
         targetEl.hidden = false;
         targetEl.classList.add('active');
+      }
+      if (targetId === 'tab-deep-dive') {
+        populateDeepDiveMemberCheckboxes();
+        loadDeepDiveTabData();
       }
       if (titleEl) {
         // Prefer explicit title; fall back to button label without leading emoji/icon.
@@ -1803,10 +1810,18 @@ function initDeepDiveTab() {
   const refreshBtn = document.getElementById('dd-refresh-btn');
 
   // Toggle popover
-  pickerBtn?.addEventListener('click', (e) => {
+  pickerBtn?.addEventListener('click', async (e) => {
     e.stopPropagation();
     if (!popover) return;
     const isHidden = popover.hidden;
+    if (isHidden) {
+      populateDeepDiveMemberCheckboxes();
+      if (getAvailableTeamMembers().length === 0 && teamId) {
+        try {
+          await loadMembers();
+        } catch (_) {}
+      }
+    }
     popover.hidden = !isHidden;
     pickerBtn.setAttribute('aria-expanded', String(!isHidden));
     if (!popover.hidden && searchInput) {
@@ -1871,29 +1886,54 @@ function getAvailableTeamMembers() {
   const members = [];
   const seen = new Set();
 
+  const add = (id, name) => {
+    if (!id || seen.has(String(id))) return;
+    seen.add(String(id));
+    members.push({ id: String(id), name: String(name || 'Member').trim() });
+  };
+
+  // 1. From loaded members list
   if (Array.isArray(currentMembersList)) {
     currentMembersList.forEach(m => {
-      const id = m.id || m.member_id;
-      const name = m.display_name || m.name || 'Member';
-      if (id && !seen.has(id)) {
-        seen.add(id);
-        members.push({ id, name });
+      add(m.id || m.member_id, m.display_name || m.name);
+    });
+  }
+
+  // 2. From currentStatsData (leaderboard, tokenLeaderboard, scoreboard)
+  if (typeof currentStatsData === 'object' && currentStatsData !== null) {
+    if (Array.isArray(currentStatsData.leaderboard)) {
+      currentStatsData.leaderboard.forEach(m => {
+        add(m.member_id || m.id, m.display_name || m.name);
+      });
+    }
+    if (Array.isArray(currentStatsData.tokenLeaderboard)) {
+      currentStatsData.tokenLeaderboard.forEach(m => {
+        add(m.member_id || m.id, m.display_name || m.name);
+      });
+    }
+    if (Array.isArray(currentStatsData.scoreboard)) {
+      currentStatsData.scoreboard.forEach(m => {
+        add(m.member_id || m.id, m.display_name || m.name);
+      });
+    }
+  }
+
+  // 3. From global member filter select dropdown options
+  const globalSel = document.getElementById('global-member-filter');
+  if (globalSel && globalSel.options) {
+    Array.from(globalSel.options).forEach(opt => {
+      if (opt.value && opt.value !== 'all') {
+        add(opt.value, opt.text.replace(/^[^\w\s]+\s*/, ''));
       }
     });
   }
 
-  if (currentData && Array.isArray(currentData.members)) {
-    currentData.members.forEach(m => {
-      const id = m.member_id || m.id;
-      const name = m.display_name || m.name || 'Member';
-      if (id && !seen.has(id)) {
-        seen.add(id);
-        members.push({ id, name });
-      }
-    });
+  // 4. From current user session if member
+  if (typeof currentUser === 'object' && currentUser !== null && currentUser.memberId) {
+    add(currentUser.memberId, currentUser.displayName || currentUser.username || 'You');
   }
 
-  return members;
+  return members.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function populateDeepDiveMemberCheckboxes() {
@@ -1902,6 +1942,16 @@ function populateDeepDiveMemberCheckboxes() {
 
   const members = getAvailableTeamMembers();
   const isAll = ddSelectedMemberIds.has('all') || ddSelectedMemberIds.size === 0;
+
+  if (members.length === 0) {
+    container.innerHTML = `
+      <div style="padding: 12px; text-align: center; color: var(--muted); font-size: 12px;">
+        No team members found yet.
+      </div>
+    `;
+    updateDeepDiveChips();
+    return;
+  }
 
   let html = `
     <label class="member-checkbox-item" style="font-weight:600; border-bottom:1px solid var(--border); margin-bottom:4px; padding-bottom:6px;">
