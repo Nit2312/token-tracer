@@ -1,4 +1,6 @@
 /* Team admin UI — deep analytics for members, projects, tokens, model pricing, and files */
+const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
 const RANGE_PRESETS = [
   { id: 'today', label: 'Today' },
   { id: '7d', label: '7d' },
