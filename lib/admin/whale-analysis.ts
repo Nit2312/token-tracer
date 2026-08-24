@@ -183,7 +183,7 @@ export async function getPlatformWhales(options: WhaleFilterOptions = {}) {
       );
     }
 
-    // 3. Platform totals & top global projects / models
+    // 3. Platform totals & top global projects / models & extreme sessions in parallel
     const totalsQuery = `
       SELECT
         COALESCE(SUM(${EFF_IN}), 0)::bigint AS tokens_in,
@@ -194,10 +194,6 @@ export async function getPlatformWhales(options: WhaleFilterOptions = {}) {
       FROM sync_sessions s
       WHERE 1=1 ${dateWhere} ${teamWhere}
     `;
-    const { rows: totalRows } = await query(totalsQuery, params);
-    const totalsRow = totalRows[0] || {};
-    const globalTokIn = Number(totalsRow.tokens_in || 0);
-    const globalTokOut = Number(totalsRow.tokens_out || 0);
 
     const topProjGlobalQuery = `
       SELECT
@@ -211,7 +207,6 @@ export async function getPlatformWhales(options: WhaleFilterOptions = {}) {
       ORDER BY tokens DESC
       LIMIT 10
     `;
-    const { rows: topProjectsGlobal } = await query(topProjGlobalQuery, params);
 
     const topModelsGlobalQuery = `
       SELECT
@@ -225,7 +220,6 @@ export async function getPlatformWhales(options: WhaleFilterOptions = {}) {
       ORDER BY tokens DESC
       LIMIT 10
     `;
-    const { rows: topModelsGlobal } = await query(topModelsGlobalQuery, params);
 
     // 4. Extreme Runaway Sessions
     const extremeSessionsQuery = `
@@ -256,7 +250,20 @@ export async function getPlatformWhales(options: WhaleFilterOptions = {}) {
       ORDER BY total_tokens DESC, api_cost DESC
       LIMIT 10
     `;
-    const { rows: extremeSessions } = await query(extremeSessionsQuery, params);
+
+    const [totalRes, topProjRes, topModRes, extremeRes] = await Promise.all([
+      query(totalsQuery, params),
+      query(topProjGlobalQuery, params),
+      query(topModelsGlobalQuery, params),
+      query(extremeSessionsQuery, params),
+    ]);
+
+    const totalsRow = totalRes.rows[0] || {};
+    const globalTokIn = Number(totalsRow.tokens_in || 0);
+    const globalTokOut = Number(totalsRow.tokens_out || 0);
+    const topProjectsGlobal = topProjRes.rows;
+    const topModelsGlobal = topModRes.rows;
+    const extremeSessions = extremeRes.rows;
 
     return {
       whales: whales.slice(0, limit),
@@ -317,7 +324,7 @@ export async function buildMemberUsageDeepDive(
   const { range = 'all', from = null, to = null, source = null, model = null } = options;
   const cacheKey = `member_deep_dive_pg_${memberId}_${range}_${from || ''}_${to || ''}_${source || ''}_${model || ''}`;
 
-  return statsCache.getOrSet(cacheKey, 30, async () => {
+  return statsCache.getOrSet(cacheKey, 60, async () => {
     // 1. Fetch Member & Team
     const memberRes = await query(
       `SELECT m.id, m.display_name, m.created_at, m.team_id, t.name AS team_name
@@ -342,11 +349,13 @@ export async function buildMemberUsageDeepDive(
     }
     if (from) {
       params.push(from);
-      filters += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date >= $${params.length}::date`;
+      // Use index-friendly timestamp range comparison on idx_sync_sessions_member_activity
+      filters += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at) >= ($${params.length}::date)::timestamptz`;
     }
     if (to) {
       params.push(to);
-      filters += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date <= $${params.length}::date`;
+      // Use index-friendly timestamp range comparison (< next day) instead of casting table column to ::date
+      filters += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at) < (($${params.length}::date) + INTERVAL '1 day')`;
     }
     if (source && source !== 'all') {
       params.push(source);
@@ -357,9 +366,8 @@ export async function buildMemberUsageDeepDive(
       filters += ` AND s.model = $${params.length}`;
     }
 
-    // 2. Member Totals
-    const totalsRes = await query(
-      `SELECT
+    // 2. Execute all independent aggregation queries in parallel
+    const totalsQuery = `SELECT
         COALESCE(SUM(${EFF_IN}), 0)::bigint AS tokens_in,
         COALESCE(SUM(${EFF_OUT}), 0)::bigint AS tokens_out,
         COALESCE(SUM(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
@@ -375,15 +383,9 @@ export async function buildMemberUsageDeepDive(
         COALESCE(SUM(s.rework_loops), 0)::int AS rework_loops,
         COUNT(CASE WHEN (${EFF_IN} + ${EFF_OUT}) > 5000000 OR s.tool_errors > 15 OR s.rework_loops > 5 THEN 1 END)::int AS runaway_count
        FROM sync_sessions s
-       WHERE s.member_id = $1 ${filters}`,
-      params
-    );
-    const totals = totalsRes.rows[0] || {};
-    const totalMemberTokens = Number(totals.total_tokens || 0);
+       WHERE s.member_id = $1 ${filters}`;
 
-    // 3. Projects Breakdown
-    const projectsRes = await query(
-      `SELECT
+    const projectsQuery = `SELECT
         COALESCE(s.agent, 'default') AS project,
         array_agg(DISTINCT s.source) AS sources,
         array_agg(DISTINCT s.model) AS models,
@@ -399,13 +401,9 @@ export async function buildMemberUsageDeepDive(
        FROM sync_sessions s
        WHERE s.member_id = $1 ${filters}
        GROUP BY s.agent
-       ORDER BY total_tokens DESC`,
-      params
-    );
+       ORDER BY total_tokens DESC`;
 
-    // 4. Tools Breakdown
-    const toolsRes = await query(
-      `SELECT
+    const toolsQuery = `SELECT
         COALESCE(s.source, 'cursor') AS source,
         COUNT(s.id)::int AS sessions,
         COALESCE(SUM(${EFF_IN}), 0)::bigint AS tokens_in,
@@ -416,13 +414,9 @@ export async function buildMemberUsageDeepDive(
        FROM sync_sessions s
        WHERE s.member_id = $1 ${filters}
        GROUP BY s.source
-       ORDER BY total_tokens DESC`,
-      params
-    );
+       ORDER BY total_tokens DESC`;
 
-    // 5. Models Breakdown
-    const modelsRes = await query(
-      `SELECT
+    const modelsQuery = `SELECT
         COALESCE(s.model, 'default') AS model,
         COALESCE(s.source, 'cursor') AS source,
         COUNT(s.id)::int AS sessions,
@@ -434,13 +428,9 @@ export async function buildMemberUsageDeepDive(
        FROM sync_sessions s
        WHERE s.member_id = $1 ${filters}
        GROUP BY s.model, s.source
-       ORDER BY total_tokens DESC`,
-      params
-    );
+       ORDER BY total_tokens DESC`;
 
-    // 6. Top 20 Heavy Sessions
-    const sessionsRes = await query(
-      `SELECT
+    const sessionsQuery = `SELECT
         s.id AS doc_id,
         s.session_id,
         COALESCE(s.agent, 'default') AS project,
@@ -464,30 +454,23 @@ export async function buildMemberUsageDeepDive(
        FROM sync_sessions s
        WHERE s.member_id = $1 ${filters}
        ORDER BY total_tokens DESC, api_cost DESC
-       LIMIT 20`,
-      params
-    );
+       LIMIT 20`;
 
-    // 7. Hotspot Files
-    const filesRes = await query(
-      `SELECT
+    const filesQuery = `SELECT
         f.path,
         COALESCE(SUM(f.edits), 0)::int AS edits,
         COALESCE(SUM(f.additions), 0)::int AS additions,
         COALESCE(SUM(f.deletions), 0)::int AS deletions,
         COALESCE(SUM(f.additions + f.deletions), 0)::int AS changed_lines
        FROM sync_session_files f
-       JOIN sync_sessions s ON s.id = f.sync_session_id
-       WHERE s.member_id = $1 ${filters}
+       WHERE f.sync_session_id IN (
+         SELECT s.id FROM sync_sessions s WHERE s.member_id = $1 ${filters}
+       )
        GROUP BY f.path
        ORDER BY changed_lines DESC, edits DESC
-       LIMIT 20`,
-      params
-    );
+       LIMIT 20`;
 
-    // 8. Daily Timeline
-    const timelineRes = await query(
-      `SELECT
+    const timelineQuery = `SELECT
         COALESCE(s.ended_at, s.started_at, s.synced_at)::date::text AS day,
         COUNT(s.id)::int AS sessions,
         COALESCE(SUM(${EFF_IN}), 0)::bigint AS tokens_in,
@@ -499,9 +482,28 @@ export async function buildMemberUsageDeepDive(
        FROM sync_sessions s
        WHERE s.member_id = $1 ${filters}
        GROUP BY day
-       ORDER BY day ASC`,
-      params
-    );
+       ORDER BY day ASC`;
+
+    const [
+      totalsRes,
+      projectsRes,
+      toolsRes,
+      modelsRes,
+      sessionsRes,
+      filesRes,
+      timelineRes,
+    ] = await Promise.all([
+      query(totalsQuery, params),
+      query(projectsQuery, params),
+      query(toolsQuery, params),
+      query(modelsQuery, params),
+      query(sessionsQuery, params),
+      query(filesQuery, params),
+      query(timelineQuery, params),
+    ]);
+
+    const totals = totalsRes.rows[0] || {};
+    const totalMemberTokens = Number(totals.total_tokens || 0);
 
     return {
       member: {
@@ -614,3 +616,4 @@ export async function buildMemberUsageDeepDive(
     };
   });
 }
+

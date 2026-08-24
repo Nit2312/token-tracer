@@ -1787,6 +1787,8 @@ document.getElementById('publish-release-form')?.addEventListener('submit', asyn
 });
 
 // ── Team Member Token Deep-Dive Modal Controller ────────────────────────────
+const deepDiveClientCache = new Map();
+
 async function openTeamMemberDeepDive(memberId, memberName) {
   const dialog = document.getElementById('team-whale-drilldown-dialog');
   if (!dialog) return;
@@ -1799,8 +1801,6 @@ async function openTeamMemberDeepDive(memberId, memberName) {
 
   const loadingEl = document.getElementById('twdd-loading');
   const contentEl = document.getElementById('twdd-content');
-  if (loadingEl) loadingEl.hidden = false;
-  if (contentEl) contentEl.hidden = true;
 
   if (typeof dialog.showModal === 'function') {
     dialog.showModal();
@@ -1818,12 +1818,23 @@ async function openTeamMemberDeepDive(memberId, memberName) {
   if (from) params.set('from', from);
   if (to) params.set('to', to);
 
+  const cacheKey = params.toString();
+  const cached = deepDiveClientCache.get(cacheKey);
+  if (cached && (Date.now() - cached.ts < 60000)) {
+    renderTeamMemberDeepDive(cached.data);
+    return;
+  }
+
+  if (loadingEl) loadingEl.hidden = false;
+  if (contentEl) contentEl.hidden = true;
+
   try {
-    const res = await fetch(`/api/v1/team/usage-deep-dive?${params.toString()}`);
+    const res = await fetch(`/api/v1/team/usage-deep-dive?${cacheKey}`);
     if (!res.ok) {
       throw new Error(`Failed to load member deep dive: ${res.statusText}`);
     }
     const data = await res.json();
+    deepDiveClientCache.set(cacheKey, { ts: Date.now(), data });
     renderTeamMemberDeepDive(data);
   } catch (err) {
     console.error('[openTeamMemberDeepDive error]', err);
