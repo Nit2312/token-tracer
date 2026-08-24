@@ -464,12 +464,38 @@ export default async function LoginPage() {
                   <label className="filter-label">From <input id="range-from" type="date" /></label>
                   <label className="filter-label">To <input id="range-to" type="date" /></label>
 
-                  {/* Member Filter */}
-                  <label className="filter-label">Member
-                    <select id="global-member-filter">
-                      <option value="all">All Members</option>
-                    </select>
-                  </label>
+                  {/* Member Filter (Multi-Select) */}
+                  <div className="filter-label-group" id="global-member-filter-group">
+                    <span className="filter-group-title">Member</span>
+                    <div className="multi-member-picker" id="global-member-picker-wrap">
+                      <button
+                        type="button"
+                        id="global-member-picker-btn"
+                        className="filter-picker-btn"
+                        aria-expanded="false"
+                      >
+                        <span id="global-member-picker-label">👥 All Members</span>
+                        <span style={{ fontSize: '9px', opacity: 0.7 }}>▼</span>
+                      </button>
+
+                      <div id="global-member-dropdown" className="member-dropdown-popover" style={{ left: 0, right: 'auto' }} hidden>
+                        <div className="member-dropdown-header">
+                          <input
+                            type="text"
+                            id="global-member-search"
+                            placeholder="Search members…"
+                            className="search-input"
+                            style={{ width: '100%', fontSize: '12px', padding: '5px 8px', boxSizing: 'border-box' }}
+                          />
+                          <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+                            <button type="button" id="global-select-all-btn" className="hbtn" style={{ fontSize: '11px', padding: '3px 8px', flex: 1 }}>Select All</button>
+                            <button type="button" id="global-clear-all-btn" className="hbtn" style={{ fontSize: '11px', padding: '3px 8px', flex: 1 }}>Clear</button>
+                          </div>
+                        </div>
+                        <div id="global-member-checkbox-list" className="member-checkbox-list" style={{ maxHeight: '220px', overflowY: 'auto', padding: '6px 0' }}></div>
+                      </div>
+                    </div>
+                  </div>
 
                   {/* Source Filter */}
                   <label className="filter-label">AI Tool

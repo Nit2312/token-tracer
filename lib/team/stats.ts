@@ -12,7 +12,7 @@ import { statsCache } from './cache';
 interface StatsOptions {
   from?: string | null;
   to?: string | null;
-  memberId?: string | null;
+  memberId?: string | string[] | null;
   minTokens?: number | null;
   maxTokens?: number | null;
   source?: string | null;
@@ -44,23 +44,30 @@ export async function buildTeamStats(
       tokenLeaderboard: [],
       scoreboard: [],
       atRisk: [],
+      projects: [],
       bySource: [],
       byDay: [],
-      punch: Array.from({ length: 7 }, () => Array(24).fill(0)),
-      activity: { activeDays: 0, streak: 0, peakHour: { weekday: 0, hour: 0, n: 0 }, busiestDay: null },
       topTools: [],
+      punch: {},
+      activity: { peakHour: null, activeDays: 0, streak: 0 },
       topFiles: [],
       recentLogs: [],
-      memberSources: [],
-      memberProjects: [],
-      memberFiles: [],
-      memberModels: [],
-      projectRollup: [],
       modelPricing: [],
+      memberModels: [],
+      window: { from: from ?? null, to: to ?? null, memberId: memberId ? String(memberId) : null, minTokens: minTokens ?? null, maxTokens: maxTokens ?? null, source: source ?? null },
     };
   }
 
-  const cacheKey = `team_stats_${teamId}_${from || ''}_${to || ''}_${memberId || ''}_${minTokens || ''}_${maxTokens || ''}_${source || ''}`;
+  let memberIdsArr: string[] = [];
+  if (Array.isArray(memberId)) {
+    memberIdsArr = memberId.map((id) => String(id).trim()).filter(Boolean);
+  } else if (typeof memberId === 'string' && memberId.trim()) {
+    memberIdsArr = memberId.split(',').map((id) => id.trim()).filter((id) => Boolean(id) && id !== 'all');
+  }
+  const isAllMembers = memberIdsArr.length === 0;
+
+  const sortedIdsKey = isAllMembers ? 'all' : [...memberIdsArr].sort().join('_');
+  const cacheKey = `team_stats_${teamId}_${from || ''}_${to || ''}_${sortedIdsKey}_${minTokens || ''}_${maxTokens || ''}_${source || ''}`;
   return statsCache.getOrSet(cacheKey, 60, async () => {
     const params: unknown[] = [teamId];
   let dateFilter = '';
@@ -73,9 +80,14 @@ export async function buildTeamStats(
     params.push(to);
     dateFilter += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date <= $${params.length}::date`;
   }
-  if (memberId && memberId !== 'all') {
-    params.push(memberId);
-    dateFilter += ` AND s.member_id = $${params.length}`;
+  if (!isAllMembers) {
+    if (memberIdsArr.length === 1) {
+      params.push(memberIdsArr[0]);
+      dateFilter += ` AND s.member_id = $${params.length}`;
+    } else {
+      params.push(memberIdsArr);
+      dateFilter += ` AND s.member_id = ANY($${params.length}::text[])`;
+    }
   }
   if (source && source !== 'all') {
     params.push(source);
@@ -101,6 +113,18 @@ export async function buildTeamStats(
     [teamId],
   );
 
+  let memberFilterCondition = '';
+  const memberStatsParams = [...params];
+  if (!isAllMembers) {
+    if (memberIdsArr.length === 1) {
+      memberStatsParams.push(memberIdsArr[0]);
+      memberFilterCondition = `AND m.id = $${memberStatsParams.length}`;
+    } else {
+      memberStatsParams.push(memberIdsArr);
+      memberFilterCondition = `AND m.id = ANY($${memberStatsParams.length}::text[])`;
+    }
+  }
+
   // 2. Member leaderboard & aggregate token totals
   const { rows: memberStats } = await query(
     `SELECT m.id AS member_id, m.display_name,
@@ -124,10 +148,10 @@ export async function buildTeamStats(
      FROM team_members tm
      JOIN members m ON m.id = tm.member_id
      LEFT JOIN sync_sessions s ON s.member_id = m.id AND s.team_id = tm.team_id ${dateFilter}
-     WHERE tm.team_id = $1 ${memberId && memberId !== 'all' ? `AND m.id = $${params.length + 1}` : ''}
+     WHERE tm.team_id = $1 ${memberFilterCondition}
      GROUP BY m.id, m.display_name
      ORDER BY api_cost DESC, edits DESC, sessions DESC`,
-    memberId && memberId !== 'all' ? [...params, memberId] : params,
+    memberStatsParams,
   );
 
   // 3. Per-member breakdown by agent source

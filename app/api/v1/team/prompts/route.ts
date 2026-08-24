@@ -19,7 +19,7 @@ export async function GET(req: NextRequest) {
     const offset = (page - 1) * limit;
 
     // Filter by memberId if role === 'user', or optional global-member-filter parameter if admin
-    let memberId = searchParams.get('memberId') || 'all';
+    let memberId = searchParams.get('memberIds') || searchParams.get('memberId') || 'all';
     if (session?.role === 'user') {
       memberId = session.memberId || 'all';
     }
@@ -33,9 +33,18 @@ export async function GET(req: NextRequest) {
     const params: any[] = [teamId];
     let paramIdx = 2;
 
+    let memberIdsArr: string[] = [];
     if (memberId && memberId !== 'all') {
+      memberIdsArr = memberId.split(',').map((id) => id.trim()).filter((id) => Boolean(id) && id !== 'all');
+    }
+
+    if (memberIdsArr.length === 1) {
       conditions.push(`ss.member_id = $${paramIdx}`);
-      params.push(memberId);
+      params.push(memberIdsArr[0]);
+      paramIdx++;
+    } else if (memberIdsArr.length > 1) {
+      conditions.push(`ss.member_id = ANY($${paramIdx}::text[])`);
+      params.push(memberIdsArr);
       paramIdx++;
     }
     if (from) {

@@ -16,6 +16,7 @@ let adminToken = sessionStorage.getItem('team-admin-token') || '';
 let currentStatsData = null;
 let currentMembersList = [];
 let currentUser = null;
+let globalSelectedMemberIds = new Set(['all']);
 
 async function checkAuth() {
   try {
@@ -431,8 +432,9 @@ function statsQuery() {
   if (!dateRange.all && dateRange.from) params.set('from', dateRange.from);
   if (!dateRange.all && dateRange.to) params.set('to', dateRange.to);
 
-  const memberId = document.getElementById('global-member-filter')?.value;
-  if (memberId && memberId !== 'all') params.set('memberId', memberId);
+  if (!globalSelectedMemberIds.has('all') && globalSelectedMemberIds.size > 0) {
+    params.set('memberId', Array.from(globalSelectedMemberIds).join(','));
+  }
 
   const source = document.getElementById('global-source-filter')?.value;
   if (source && source !== 'all') params.set('source', source);
@@ -793,6 +795,7 @@ window.deletePricingRule = async function (id) {
 
 function renderMembersTable(rows) {
   currentMembersList = rows || [];
+  populateGlobalMemberCheckboxes();
   populateDeepDiveMemberCheckboxes();
   const select = document.getElementById('global-member-filter');
   if (select) {
@@ -931,6 +934,7 @@ async function loadStats({ soft = true } = {}) {
     renderSessionLogs(stats.recentLogs);
     renderModelPricingTable(stats.modelPricing);
     renderMemberModelsTable(stats.memberModels);
+    populateGlobalMemberCheckboxes();
     populateDeepDiveMemberCheckboxes();
     loadPrompts().catch(console.error);
   } finally {
@@ -1076,6 +1080,8 @@ async function showApp() {
       if (teamSelectDiv) teamSelectDiv.style.display = 'none';
 
       // Hide member filter select & label
+      const memberFilterGroup = document.getElementById('global-member-filter-group');
+      if (memberFilterGroup) memberFilterGroup.style.display = 'none';
       const memberFilterSelect = document.getElementById('global-member-filter');
       const memberFilterLabel = memberFilterSelect?.closest('label');
       if (memberFilterLabel) memberFilterLabel.style.display = 'none';
@@ -1193,7 +1199,7 @@ function updateFiltersBadge() {
   if (!badge) return;
   let count = 0;
   if (!dateRange.all) count++;
-  if (document.getElementById('global-member-filter')?.value !== 'all') count++;
+  if (!globalSelectedMemberIds.has('all') && globalSelectedMemberIds.size > 0) count++;
   if (document.getElementById('global-source-filter')?.value !== 'all') count++;
   if (Number(document.getElementById('global-min-tokens-filter')?.value) > 0) count++;
   badge.textContent = String(count);
@@ -1226,6 +1232,8 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 document.getElementById('team-select').addEventListener('change', (e) => {
   teamId = e.target.value;
   localStorage.setItem('team-id', teamId);
+  globalSelectedMemberIds = new Set(['all']);
+  populateGlobalMemberCheckboxes();
   const mf = document.getElementById('global-member-filter');
   if (mf) mf.value = 'all';
   const mds = document.getElementById('member-filter-select');
@@ -2530,11 +2538,156 @@ document.getElementById('twdd-close-btn')?.addEventListener('click', () => {
   document.getElementById('team-whale-drilldown-dialog')?.close?.();
 });
 
-// Auto-initialize deep dive tab
+// ── Global Multi-Member Picker Functions ──────────────────────────────────
+function initGlobalMemberPicker() {
+  const pickerBtn = document.getElementById('global-member-picker-btn');
+  const popover = document.getElementById('global-member-dropdown');
+  const searchInput = document.getElementById('global-member-search');
+  const selectAllBtn = document.getElementById('global-select-all-btn');
+  const clearAllBtn = document.getElementById('global-clear-all-btn');
+
+  // Toggle popover
+  pickerBtn?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!popover) return;
+    const isHidden = popover.hidden;
+    if (isHidden) {
+      populateGlobalMemberCheckboxes();
+      if (getAvailableTeamMembers().length === 0 && teamId) {
+        try {
+          await loadMembers();
+          populateGlobalMemberCheckboxes();
+        } catch (_) {}
+      }
+    }
+    popover.hidden = !isHidden;
+    pickerBtn.setAttribute('aria-expanded', String(!isHidden));
+    if (!popover.hidden && searchInput) {
+      searchInput.value = '';
+      filterGlobalMemberCheckboxes('');
+      searchInput.focus();
+    }
+  });
+
+  // Close popover when clicking outside
+  document.addEventListener('click', (e) => {
+    if (popover && !popover.hidden && !e.target.closest('#global-member-picker-wrap')) {
+      popover.hidden = true;
+      pickerBtn?.setAttribute('aria-expanded', 'false');
+    }
+  });
+
+  // Search input filter
+  searchInput?.addEventListener('input', (e) => {
+    filterGlobalMemberCheckboxes((e.target.value || '').trim().toLowerCase());
+  });
+
+  // Select all members
+  selectAllBtn?.addEventListener('click', () => {
+    globalSelectedMemberIds = new Set(['all']);
+    populateGlobalMemberCheckboxes();
+    updateFiltersBadge();
+    loadStats().catch((err) => setAppError(formatError(err.message)));
+  });
+
+  // Clear all selections
+  clearAllBtn?.addEventListener('click', () => {
+    globalSelectedMemberIds = new Set();
+    populateGlobalMemberCheckboxes();
+    updateFiltersBadge();
+    loadStats().catch((err) => setAppError(formatError(err.message)));
+  });
+}
+
+function filterGlobalMemberCheckboxes(query) {
+  const items = document.querySelectorAll('#global-member-checkbox-list .member-checkbox-item[data-name]');
+  items.forEach(item => {
+    const name = item.dataset.name || '';
+    item.style.display = !query || name.includes(query) ? 'flex' : 'none';
+  });
+}
+
+window.handleGlobalMemberCheck = function(id, isChecked) {
+  if (id === 'all') {
+    if (isChecked) {
+      globalSelectedMemberIds = new Set(['all']);
+    } else {
+      globalSelectedMemberIds = new Set();
+    }
+  } else {
+    globalSelectedMemberIds.delete('all');
+    if (isChecked) {
+      globalSelectedMemberIds.add(id);
+    } else {
+      globalSelectedMemberIds.delete(id);
+    }
+    if (globalSelectedMemberIds.size === 0) {
+      globalSelectedMemberIds = new Set(['all']);
+    }
+  }
+
+  populateGlobalMemberCheckboxes();
+  updateFiltersBadge();
+  loadStats().catch((err) => setAppError(formatError(err.message)));
+};
+
+function populateGlobalMemberCheckboxes() {
+  const container = document.getElementById('global-member-checkbox-list');
+  const labelEl = document.getElementById('global-member-picker-label');
+  if (!container) return;
+
+  const members = getAvailableTeamMembers();
+  const isAll = globalSelectedMemberIds.has('all') || globalSelectedMemberIds.size === 0;
+
+  // Update label
+  if (labelEl) {
+    if (isAll) {
+      labelEl.textContent = `👥 All Members (${members.length})`;
+    } else if (globalSelectedMemberIds.size === 1) {
+      const selectedId = Array.from(globalSelectedMemberIds)[0];
+      const m = members.find(x => x.id === selectedId);
+      labelEl.textContent = m ? `👤 ${m.name}` : `👤 1 Member`;
+    } else {
+      labelEl.textContent = `👥 ${globalSelectedMemberIds.size} Members`;
+    }
+  }
+
+  if (members.length === 0) {
+    container.innerHTML = `
+      <div style="padding: 12px; text-align: center; color: var(--muted); font-size: 12px;">
+        No team members found yet.
+      </div>
+    `;
+    return;
+  }
+
+  let html = `
+    <label class="member-checkbox-item" style="font-weight:600; border-bottom:1px solid var(--border); margin-bottom:4px; padding-bottom:6px;">
+      <input type="checkbox" value="all" ${isAll ? 'checked' : ''} onchange="handleGlobalMemberCheck('all', this.checked)">
+      <span>🌐 All Members (${members.length})</span>
+    </label>
+  `;
+
+  html += members.map(m => {
+    const isChecked = !isAll && globalSelectedMemberIds.has(m.id);
+    return `
+      <label class="member-checkbox-item" data-name="${esc(m.name.toLowerCase())}">
+        <input type="checkbox" value="${m.id}" ${isChecked ? 'checked' : ''} onchange="handleGlobalMemberCheck('${m.id}', this.checked)">
+        <span>👤 ${esc(m.name)}</span>
+      </label>
+    `;
+  }).join('');
+
+  container.innerHTML = html;
+}
+
+// Auto-initialize pickers
 document.addEventListener('DOMContentLoaded', () => {
+  initGlobalMemberPicker();
   initDeepDiveTab();
 });
 setTimeout(() => {
+  initGlobalMemberPicker();
   initDeepDiveTab();
 }, 200);
 

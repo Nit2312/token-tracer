@@ -11,7 +11,7 @@ export async function GET(req: NextRequest) {
     if (!teamId) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
 
     const session = getSessionFromCookie(req.headers.get('cookie'));
-    let memberId = req.nextUrl.searchParams.get('memberId');
+    let memberId = req.nextUrl.searchParams.get('memberIds') || req.nextUrl.searchParams.get('memberId');
     if (session?.role === 'user') {
       memberId = session.memberId;
     }
