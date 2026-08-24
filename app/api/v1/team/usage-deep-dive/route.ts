@@ -13,15 +13,15 @@ export async function GET(req: NextRequest) {
     }
 
     const session = getSessionFromCookie(req.headers.get('cookie'));
-    let memberId = req.nextUrl.searchParams.get('memberId');
+    let memberIds = req.nextUrl.searchParams.get('memberIds') || req.nextUrl.searchParams.get('memberId');
 
     // If user role, restrict to their own memberId
     if (session?.role === 'user') {
-      memberId = session.memberId || memberId;
+      memberIds = session.memberId || memberIds;
     }
 
-    if (!memberId) {
-      return NextResponse.json({ error: 'memberId parameter is required' }, { status: 400 });
+    if (!memberIds) {
+      return NextResponse.json({ error: 'memberId or memberIds parameter is required' }, { status: 400 });
     }
 
     const range = req.nextUrl.searchParams.get('range') || 'all';
@@ -30,16 +30,17 @@ export async function GET(req: NextRequest) {
     const source = req.nextUrl.searchParams.get('source') || null;
     const model = req.nextUrl.searchParams.get('model') || null;
 
-    const deepDive = await buildMemberUsageDeepDive(memberId, {
+    const deepDive = await buildMemberUsageDeepDive(memberIds, {
       range,
       from,
       to,
       source,
       model,
+      teamId,
     });
 
     if (!deepDive) {
-      return NextResponse.json({ error: 'Member not found or no activity' }, { status: 404 });
+      return NextResponse.json({ error: 'Members not found or no activity' }, { status: 404 });
     }
 
     return NextResponse.json(deepDive);

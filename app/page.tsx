@@ -407,6 +407,9 @@ export default async function LoginPage() {
             <button type="button" id="tabbtn-members" className="tab-btn" data-tab="tab-members" data-title="Member Token Logs" role="tab" aria-selected="false" aria-controls="tab-members" tabIndex={-1}>
               <span className="nav-icon" aria-hidden="true">👥</span> Member Token Logs
             </button>
+            <button type="button" id="tabbtn-deep-dive" className="tab-btn" data-tab="tab-deep-dive" data-title="Deep-Dive Token Analysis" role="tab" aria-selected="false" aria-controls="tab-deep-dive" tabIndex={-1}>
+              <span className="nav-icon" aria-hidden="true">🔬</span> Deep-Dive Analysis
+            </button>
             <button type="button" id="tabbtn-projects" className="tab-btn" data-tab="tab-projects" data-title="Projects & Repos" role="tab" aria-selected="false" aria-controls="tab-projects" tabIndex={-1}>
               <span className="nav-icon" aria-hidden="true">📁</span> Projects & Repos
             </button>
@@ -610,6 +613,231 @@ export default async function LoginPage() {
                   </div>
                 </div>
                 <div id="member-drilldown-cards"></div>
+              </section>
+
+              {/* TAB: DEEP-DIVE TOKEN ANALYSIS */}
+              <section id="tab-deep-dive" className="tab-content" role="tabpanel" aria-labelledby="tabbtn-deep-dive" hidden>
+                <div className="panel" style={{ padding: '24px' }}>
+                  <div className="panel-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '16px', borderBottom: '1px solid var(--border)', paddingBottom: '16px', marginBottom: '16px' }}>
+                    <div>
+                      <h2 style={{ fontSize: '20px', margin: '0 0 4px 0' }}>🔬 Deep-Dive Token Analysis</h2>
+                      <span className="muted" style={{ fontSize: '12.5px' }}>
+                        Multi-dimensional breakdown across selected developers, repositories, models, cache efficiencies, files &amp; runaway sessions.
+                      </span>
+                    </div>
+
+                    {/* Multi-Member Selector Toolbar */}
+                    <div className="deep-dive-toolbar" style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                      <div className="multi-member-picker" id="dd-member-picker-wrap">
+                        <button type="button" id="dd-member-picker-btn" className="hbtn" aria-expanded="false" style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: '220px', justifyContent: 'space-between' }}>
+                          <span id="dd-member-picker-label">👥 Select Members (All)</span>
+                          <span style={{ fontSize: '10px' }}>▼</span>
+                        </button>
+
+                        <div id="dd-member-dropdown" className="member-dropdown-popover" hidden>
+                          <div className="member-dropdown-header">
+                            <input type="text" id="dd-member-search" placeholder="Search members…" className="search-input" style={{ width: '100%', fontSize: '12px', padding: '5px 8px', boxSizing: 'border-box' }} />
+                            <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+                              <button type="button" id="dd-select-all-btn" className="hbtn" style={{ fontSize: '11px', padding: '3px 8px', flex: 1 }}>Select All</button>
+                              <button type="button" id="dd-clear-all-btn" className="hbtn" style={{ fontSize: '11px', padding: '3px 8px', flex: 1 }}>Clear</button>
+                            </div>
+                          </div>
+                          <div id="dd-member-checkbox-list" className="member-checkbox-list" style={{ maxHeight: '220px', overflowY: 'auto', padding: '6px 0' }}></div>
+                        </div>
+                      </div>
+
+                      <button type="button" id="dd-apply-btn" className="hbtn primary">Analyze Selection</button>
+                      <button type="button" id="dd-refresh-btn" className="hbtn" title="Refresh data">🔄</button>
+                    </div>
+                  </div>
+
+                  {/* Selected member chips bar */}
+                  <div id="dd-selected-chips-bar" style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '16px', alignItems: 'center' }}>
+                    <span className="muted" style={{ fontSize: '11.5px', fontWeight: 600 }}>Active Selection:</span>
+                    <div id="dd-selected-chips-list" style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}></div>
+                  </div>
+
+                  {/* Loading State */}
+                  <div id="dd-tab-loading" className="data-loading" hidden aria-busy="true" style={{ padding: '40px', textAlign: 'center' }}>
+                    <p className="muted">Analyzing token usage across selected members &amp; repositories…</p>
+                  </div>
+
+                  {/* Main Content View */}
+                  <div id="dd-tab-content">
+                    {/* Stat Cards KPI Row */}
+                    <div className="kpi-row" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: '14px', marginBottom: '24px' }}>
+                      <div className="kpi-card kpi-card--accent-purple">
+                        <div className="kpi-body">
+                          <div className="kpi-label">Total Volume &amp; Spend</div>
+                          <div className="kpi-value" id="dd-kpi-tokens">—</div>
+                          <span className="kpi-sub" id="dd-kpi-cost">—</span>
+                        </div>
+                      </div>
+                      <div className="kpi-card kpi-card--accent-blue">
+                        <div className="kpi-body">
+                          <div className="kpi-label">Context vs Output</div>
+                          <div className="kpi-value" id="dd-kpi-in-out">—</div>
+                          <span className="kpi-sub" id="dd-kpi-cache">—</span>
+                        </div>
+                      </div>
+                      <div className="kpi-card kpi-card--accent-green">
+                        <div className="kpi-body">
+                          <div className="kpi-label">Activity &amp; Sessions</div>
+                          <div className="kpi-value" id="dd-kpi-sessions">—</div>
+                          <span className="kpi-sub" id="dd-kpi-avg">—</span>
+                        </div>
+                      </div>
+                      <div className="kpi-card kpi-card--accent-yellow">
+                        <div className="kpi-body">
+                          <div className="kpi-label">Code Impact &amp; Loops</div>
+                          <div className="kpi-value" id="dd-kpi-edits">—</div>
+                          <span className="kpi-sub" id="dd-kpi-tools">—</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Multi-Member Comparison Table */}
+                    <div id="dd-member-comparison-section" className="panel-card" style={{ marginBottom: '24px', background: 'var(--surface-overlay, #151928)', border: '1px solid var(--border)' }} hidden>
+                      <div className="panel-card-header" style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
+                        <span className="panel-card-title" style={{ fontWeight: 600, fontSize: '14px' }}>👥 Selected Members Usage Comparison</span>
+                        <span style={{ fontSize: '11.5px', color: 'var(--muted)', display: 'block', marginTop: '2px' }}>
+                          Side-by-side volume, cost, code impact, and loop comparison across selected members
+                        </span>
+                      </div>
+                      <div className="table-wrap">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Member</th>
+                              <th>Sessions</th>
+                              <th>In / Out Tokens</th>
+                              <th>Total Tokens</th>
+                              <th>Share</th>
+                              <th>API Cost</th>
+                              <th>Edits / Lines</th>
+                              <th>Loops / Errs</th>
+                            </tr>
+                          </thead>
+                          <tbody id="dd-member-comparison-tbody"></tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* Two-Column: Projects & Models */}
+                    <div className="analytics-two-col" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: '20px', marginBottom: '24px' }}>
+                      <div className="panel-card" style={{ background: 'var(--surface-overlay, #151928)', border: '1px solid var(--border)' }}>
+                        <div className="panel-card-header" style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
+                          <span className="panel-card-title" style={{ fontWeight: 600, fontSize: '14px' }}>📁 Projects &amp; Repositories Burn</span>
+                          <span style={{ fontSize: '11px', color: 'var(--muted)', display: 'block' }}>Where tokens were spent</span>
+                        </div>
+                        <div className="table-wrap">
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>Project</th>
+                                <th>Tools</th>
+                                <th>Sessions</th>
+                                <th>Volume</th>
+                                <th>Share</th>
+                                <th>Cost</th>
+                              </tr>
+                            </thead>
+                            <tbody id="dd-projects-tbody"></tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      <div className="panel-card" style={{ background: 'var(--surface-overlay, #151928)', border: '1px solid var(--border)' }}>
+                        <div className="panel-card-header" style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
+                          <span className="panel-card-title" style={{ fontWeight: 600, fontSize: '14px' }}>🤖 Models &amp; Cache Efficiency</span>
+                          <span style={{ fontSize: '11px', color: 'var(--muted)', display: 'block' }}>Model context &amp; cache hit rates</span>
+                        </div>
+                        <div className="table-wrap">
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>Model</th>
+                                <th>Source</th>
+                                <th>Sessions</th>
+                                <th>Cache Hit %</th>
+                                <th>Tokens</th>
+                                <th>Cost</th>
+                              </tr>
+                            </thead>
+                            <tbody id="dd-models-tbody"></tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Top 25 Heavy & Runaway Sessions */}
+                    <div className="panel-card" style={{ marginBottom: '24px', background: 'var(--surface-overlay, #151928)', border: '1px solid var(--border)' }}>
+                      <div className="panel-card-header" style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
+                        <span className="panel-card-title" style={{ fontWeight: 600, fontSize: '14px' }}>🔥 Top Heavy &amp; Runaway Sessions</span>
+                        <span style={{ fontSize: '11px', color: 'var(--muted)', display: 'block' }}>Highest volume single coding sessions</span>
+                      </div>
+                      <div className="table-wrap">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Session &amp; Time</th>
+                              <th>Member</th>
+                              <th>Project &amp; Model</th>
+                              <th>Total Tokens</th>
+                              <th>Cost</th>
+                              <th>Status / Loops</th>
+                            </tr>
+                          </thead>
+                          <tbody id="dd-sessions-tbody"></tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* Two-Column: Hotspot Files & Daily Timeline */}
+                    <div className="analytics-two-col" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: '20px' }}>
+                      <div className="panel-card" style={{ background: 'var(--surface-overlay, #151928)', border: '1px solid var(--border)' }}>
+                        <div className="panel-card-header" style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
+                          <span className="panel-card-title" style={{ fontWeight: 600, fontSize: '14px' }}>📄 Hotspot Files Touched</span>
+                          <span style={{ fontSize: '11px', color: 'var(--muted)', display: 'block' }}>Most edited code files</span>
+                        </div>
+                        <div className="table-wrap">
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>File Path</th>
+                                <th>Edits</th>
+                                <th>Add / Del</th>
+                                <th>Changed Lines</th>
+                              </tr>
+                            </thead>
+                            <tbody id="dd-files-tbody"></tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      <div className="panel-card" style={{ background: 'var(--surface-overlay, #151928)', border: '1px solid var(--border)' }}>
+                        <div className="panel-card-header" style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
+                          <span className="panel-card-title" style={{ fontWeight: 600, fontSize: '14px' }}>📅 Daily Activity Timeline</span>
+                          <span style={{ fontSize: '11px', color: 'var(--muted)', display: 'block' }}>Day-by-day burn velocity</span>
+                        </div>
+                        <div className="table-wrap">
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>Date</th>
+                                <th>Sessions</th>
+                                <th>Tokens</th>
+                                <th>Cost</th>
+                                <th>Edits</th>
+                              </tr>
+                            </thead>
+                            <tbody id="dd-timeline-tbody"></tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </section>
 
               {/* TAB 5: PROJECTS & WORKSPACES */}

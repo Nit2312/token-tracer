@@ -1786,10 +1786,455 @@ document.getElementById('publish-release-form')?.addEventListener('submit', asyn
   }
 });
 
-// ── Team Member Token Deep-Dive Modal Controller ────────────────────────────
-const deepDiveClientCache = new Map();
+// ── Deep-Dive Token Analysis Tab & Multi-Member Controller ──────────────────
+let ddSelectedMemberIds = new Set(['all']);
+let ddTabInitialized = false;
 
+function initDeepDiveTab() {
+  if (ddTabInitialized) return;
+  ddTabInitialized = true;
+
+  const pickerBtn = document.getElementById('dd-member-picker-btn');
+  const popover = document.getElementById('dd-member-dropdown');
+  const searchInput = document.getElementById('dd-member-search');
+  const selectAllBtn = document.getElementById('dd-select-all-btn');
+  const clearAllBtn = document.getElementById('dd-clear-all-btn');
+  const applyBtn = document.getElementById('dd-apply-btn');
+  const refreshBtn = document.getElementById('dd-refresh-btn');
+
+  // Toggle popover
+  pickerBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!popover) return;
+    const isHidden = popover.hidden;
+    popover.hidden = !isHidden;
+    pickerBtn.setAttribute('aria-expanded', String(!isHidden));
+    if (!popover.hidden && searchInput) {
+      searchInput.value = '';
+      filterDeepDiveMemberCheckboxes('');
+      searchInput.focus();
+    }
+  });
+
+  // Close popover when clicking outside
+  document.addEventListener('click', (e) => {
+    if (popover && !popover.hidden && !e.target.closest('#dd-member-picker-wrap')) {
+      popover.hidden = true;
+      pickerBtn?.setAttribute('aria-expanded', 'false');
+    }
+  });
+
+  // Search input filter
+  searchInput?.addEventListener('input', (e) => {
+    filterDeepDiveMemberCheckboxes((e.target.value || '').trim().toLowerCase());
+  });
+
+  // Select all members
+  selectAllBtn?.addEventListener('click', () => {
+    ddSelectedMemberIds = new Set(['all']);
+    populateDeepDiveMemberCheckboxes();
+    updateDeepDiveChips();
+  });
+
+  // Clear all selections
+  clearAllBtn?.addEventListener('click', () => {
+    ddSelectedMemberIds = new Set();
+    populateDeepDiveMemberCheckboxes();
+    updateDeepDiveChips();
+  });
+
+  // Apply button
+  applyBtn?.addEventListener('click', () => {
+    if (popover) popover.hidden = true;
+    pickerBtn?.setAttribute('aria-expanded', 'false');
+    loadDeepDiveTabData();
+  });
+
+  // Refresh button
+  refreshBtn?.addEventListener('click', () => {
+    loadDeepDiveTabData();
+  });
+
+  // Tab activation hook
+  const tabBtn = document.getElementById('tabbtn-deep-dive');
+  if (tabBtn) {
+    const origOnClick = tabBtn.onclick;
+    tabBtn.onclick = (e) => {
+      if (typeof origOnClick === 'function') origOnClick(e);
+      populateDeepDiveMemberCheckboxes();
+      loadDeepDiveTabData();
+    };
+  }
+}
+
+function getAvailableTeamMembers() {
+  const members = [];
+  const seen = new Set();
+
+  if (Array.isArray(currentMembersList)) {
+    currentMembersList.forEach(m => {
+      const id = m.id || m.member_id;
+      const name = m.display_name || m.name || 'Member';
+      if (id && !seen.has(id)) {
+        seen.add(id);
+        members.push({ id, name });
+      }
+    });
+  }
+
+  if (currentData && Array.isArray(currentData.members)) {
+    currentData.members.forEach(m => {
+      const id = m.member_id || m.id;
+      const name = m.display_name || m.name || 'Member';
+      if (id && !seen.has(id)) {
+        seen.add(id);
+        members.push({ id, name });
+      }
+    });
+  }
+
+  return members;
+}
+
+function populateDeepDiveMemberCheckboxes() {
+  const container = document.getElementById('dd-member-checkbox-list');
+  if (!container) return;
+
+  const members = getAvailableTeamMembers();
+  const isAll = ddSelectedMemberIds.has('all') || ddSelectedMemberIds.size === 0;
+
+  let html = `
+    <label class="member-checkbox-item" style="font-weight:600; border-bottom:1px solid var(--border); margin-bottom:4px; padding-bottom:6px;">
+      <input type="checkbox" value="all" ${isAll ? 'checked' : ''} onchange="handleDeepDiveMemberCheck('all', this.checked)">
+      <span>🌐 All Team Members (${members.length})</span>
+    </label>
+  `;
+
+  html += members.map(m => {
+    const isChecked = !isAll && ddSelectedMemberIds.has(m.id);
+    return `
+      <label class="member-checkbox-item" data-name="${esc(m.name.toLowerCase())}">
+        <input type="checkbox" value="${m.id}" ${isChecked ? 'checked' : ''} onchange="handleDeepDiveMemberCheck('${m.id}', this.checked)">
+        <span>👤 ${esc(m.name)}</span>
+      </label>
+    `;
+  }).join('');
+
+  container.innerHTML = html;
+  updateDeepDiveChips();
+}
+
+function filterDeepDiveMemberCheckboxes(query) {
+  const items = document.querySelectorAll('#dd-member-checkbox-list .member-checkbox-item[data-name]');
+  items.forEach(item => {
+    const name = item.dataset.name || '';
+    item.style.display = !query || name.includes(query) ? 'flex' : 'none';
+  });
+}
+
+window.handleDeepDiveMemberCheck = function(id, isChecked) {
+  if (id === 'all') {
+    if (isChecked) {
+      ddSelectedMemberIds = new Set(['all']);
+    } else {
+      ddSelectedMemberIds = new Set();
+    }
+  } else {
+    ddSelectedMemberIds.delete('all');
+    if (isChecked) {
+      ddSelectedMemberIds.add(id);
+    } else {
+      ddSelectedMemberIds.delete(id);
+    }
+    if (ddSelectedMemberIds.size === 0) {
+      ddSelectedMemberIds = new Set(['all']);
+    }
+  }
+
+  populateDeepDiveMemberCheckboxes();
+};
+
+window.removeDeepDiveMemberChip = function(id) {
+  if (id === 'all') return;
+  ddSelectedMemberIds.delete(id);
+  if (ddSelectedMemberIds.size === 0) {
+    ddSelectedMemberIds = new Set(['all']);
+  }
+  populateDeepDiveMemberCheckboxes();
+  loadDeepDiveTabData();
+};
+
+function updateDeepDiveChips() {
+  const chipsList = document.getElementById('dd-selected-chips-list');
+  const labelEl = document.getElementById('dd-member-picker-label');
+  if (!chipsList) return;
+
+  const members = getAvailableTeamMembers();
+  const memberMap = new Map(members.map(m => [m.id, m.name]));
+  const isAll = ddSelectedMemberIds.has('all') || ddSelectedMemberIds.size === 0;
+
+  if (isAll) {
+    if (labelEl) labelEl.textContent = `👥 All Members (${members.length})`;
+    chipsList.innerHTML = `<span class="dd-member-chip">🌐 All Team Members (${members.length})</span>`;
+    return;
+  }
+
+  const selectedCount = ddSelectedMemberIds.size;
+  if (labelEl) {
+    labelEl.textContent = selectedCount === 1
+      ? `👤 ${memberMap.get(Array.from(ddSelectedMemberIds)[0]) || '1 Member'}`
+      : `👥 ${selectedCount} Members Selected`;
+  }
+
+  chipsList.innerHTML = Array.from(ddSelectedMemberIds).map(id => {
+    const name = memberMap.get(id) || id;
+    return `
+      <span class="dd-member-chip">
+        👤 ${esc(name)}
+        <button type="button" class="dd-chip-remove" onclick="removeDeepDiveMemberChip('${id}')" title="Remove filter">✕</button>
+      </span>
+    `;
+  }).join('');
+}
+
+async function loadDeepDiveTabData() {
+  const loadingEl = document.getElementById('dd-tab-loading');
+  const contentEl = document.getElementById('dd-tab-content');
+  if (loadingEl) loadingEl.hidden = false;
+  if (contentEl) contentEl.hidden = true;
+
+  const teamId = currentTeamId || document.getElementById('team-select')?.value;
+  const from = currentFrom;
+  const to = currentTo;
+
+  const params = new URLSearchParams();
+  if (teamId) params.set('teamId', teamId);
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+
+  const isAll = ddSelectedMemberIds.has('all') || ddSelectedMemberIds.size === 0;
+  if (isAll) {
+    params.set('memberIds', 'all');
+  } else {
+    params.set('memberIds', Array.from(ddSelectedMemberIds).join(','));
+  }
+
+  const cacheKey = params.toString();
+  const cached = deepDiveClientCache.get(cacheKey);
+  if (cached && (Date.now() - cached.ts < 60000)) {
+    renderDeepDiveTabContent(cached.data);
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/v1/team/usage-deep-dive?${cacheKey}`);
+    if (!res.ok) {
+      throw new Error(`Failed to fetch deep dive analytics: ${res.statusText}`);
+    }
+    const data = await res.json();
+    deepDiveClientCache.set(cacheKey, { ts: Date.now(), data });
+    renderDeepDiveTabContent(data);
+  } catch (err) {
+    console.error('[loadDeepDiveTabData error]', err);
+    if (loadingEl) {
+      loadingEl.innerHTML = `<span style="color:var(--error-text);">Error loading deep dive: ${esc(err.message)}</span>`;
+    }
+  }
+}
+
+function renderDeepDiveTabContent(data) {
+  const loadingEl = document.getElementById('dd-tab-loading');
+  const contentEl = document.getElementById('dd-tab-content');
+  if (loadingEl) loadingEl.hidden = true;
+  if (contentEl) contentEl.hidden = false;
+
+  if (!data) return;
+
+  const totals = data.totals || {};
+  const isMulti = data.member?.isMulti || (data.memberComparisons && data.memberComparisons.length > 1);
+
+  // Stat cards
+  const statTok = document.getElementById('dd-kpi-tokens');
+  const statCost = document.getElementById('dd-kpi-cost');
+  if (statTok) statTok.textContent = fmt(totals.totalTokens);
+  if (statCost) statCost.textContent = `${fmtCost(totals.totalCost)} total API cost`;
+
+  const statInOut = document.getElementById('dd-kpi-in-out');
+  const statCache = document.getElementById('dd-kpi-cache');
+  if (statInOut) statInOut.textContent = `${fmt(totals.tokensIn)} in / ${fmt(totals.tokensOut)} out`;
+  if (statCache) statCache.textContent = `Cache read: ${fmt(totals.tokensCacheRead)} (${fmt(totals.tokensCacheWrite)} write)`;
+
+  const statSess = document.getElementById('dd-kpi-sessions');
+  const statAvg = document.getElementById('dd-kpi-avg');
+  if (statSess) statSess.textContent = `${totals.sessionCount} sessions (${totals.activeDays} active days)`;
+  if (statAvg) statAvg.textContent = `Avg: ${fmt(totals.avgTokensPerSession)} / session`;
+
+  const statEdits = document.getElementById('dd-kpi-edits');
+  const statTools = document.getElementById('dd-kpi-tools');
+  if (statEdits) statEdits.textContent = `${totals.edits || 0} code edits`;
+  if (statTools) statTools.textContent = `${totals.changedLines || 0} lines changed • ${totals.toolCalls || 0} tool calls • ${totals.runawaySessionsCount || 0} loops`;
+
+  // Multi-Member Comparison Section
+  const compSection = document.getElementById('dd-member-comparison-section');
+  const compTbody = document.getElementById('dd-member-comparison-tbody');
+  if (compSection && compTbody) {
+    if (isMulti && data.memberComparisons && data.memberComparisons.length > 0) {
+      compSection.hidden = false;
+      compTbody.innerHTML = data.memberComparisons.map(mb => `
+        <tr>
+          <td>
+            <strong>👤 ${esc(mb.displayName)}</strong>
+          </td>
+          <td>${mb.sessions}</td>
+          <td>${fmt(mb.tokensIn)} / ${fmt(mb.tokensOut)}</td>
+          <td><strong style="color:var(--brand-hi);">${fmt(mb.totalTokens)}</strong></td>
+          <td>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-weight:600; width:36px;">${Math.round(mb.percentage)}%</span>
+              <div style="flex:1; max-width:80px; height:6px; background:rgba(255,255,255,0.06); border-radius:3px; overflow:hidden;">
+                <div style="width:${Math.min(100, Math.round(mb.percentage))}%; height:100%; background:var(--brand); border-radius:3px;"></div>
+              </div>
+            </div>
+          </td>
+          <td><strong>${fmtCost(mb.apiCost)}</strong></td>
+          <td>${mb.edits} edits <span class="muted">(${mb.changedLines} lines)</span></td>
+          <td>${mb.reworkLoops} loops <span class="muted">(${mb.toolErrors} errs)</span></td>
+        </tr>
+      `).join('');
+    } else {
+      compSection.hidden = true;
+    }
+  }
+
+  // Dimension 1: Projects Table
+  const projTbody = document.getElementById('dd-projects-tbody');
+  if (projTbody) {
+    if (!data.projects?.length) {
+      projTbody.innerHTML = `<tr><td colSpan="6" class="muted" style="text-align:center; padding:16px;">No project records logged.</td></tr>`;
+    } else {
+      projTbody.innerHTML = data.projects.map(p => `
+        <tr>
+          <td><strong>📁 ${cleanProjectName(p.project)}</strong></td>
+          <td>${(p.sources || []).map(s => `<span class="source-tag">${esc(s)}</span>`).join(' ')}</td>
+          <td>${p.sessions}</td>
+          <td><strong style="color:var(--brand-hi);">${fmt(p.totalTokens)}</strong></td>
+          <td>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-weight:600; width:36px;">${Math.round(p.percentage)}%</span>
+              <div style="flex:1; max-width:60px; height:6px; background:rgba(255,255,255,0.06); border-radius:3px; overflow:hidden;">
+                <div style="width:${Math.min(100, Math.round(p.percentage))}%; height:100%; background:var(--brand); border-radius:3px;"></div>
+              </div>
+            </div>
+          </td>
+          <td><strong>${fmtCost(p.apiCost)}</strong></td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  // Dimension 2: Models Table
+  const modTbody = document.getElementById('dd-models-tbody');
+  if (modTbody) {
+    if (!data.models?.length) {
+      modTbody.innerHTML = `<tr><td colSpan="6" class="muted" style="text-align:center; padding:16px;">No model records logged.</td></tr>`;
+    } else {
+      modTbody.innerHTML = data.models.map(mod => `
+        <tr>
+          <td><strong>🤖 <code>${esc(mod.model)}</code></strong></td>
+          <td><span class="source-tag">${esc(mod.source)}</span></td>
+          <td>${mod.sessions}</td>
+          <td><span style="color:#a78bfa; font-weight:600;">${Math.round(mod.cacheHitRate)}%</span></td>
+          <td><strong>${fmt(mod.totalTokens)}</strong></td>
+          <td><strong>${fmtCost(mod.apiCost)}</strong></td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  // Dimension 3: Top Sessions Table
+  const sessTbody = document.getElementById('dd-sessions-tbody');
+  if (sessTbody) {
+    if (!data.topSessions?.length) {
+      sessTbody.innerHTML = `<tr><td colSpan="6" class="muted" style="text-align:center; padding:16px;">No session logs found.</td></tr>`;
+    } else {
+      sessTbody.innerHTML = data.topSessions.map(s => {
+        const runawayBadge = s.isRunaway
+          ? `<span class="source-tag" style="background:rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.3); font-size:10px;">⚠️ Loop / Runaway</span>`
+          : `<span class="muted" style="font-size:10.5px;">✓ Normal</span>`;
+        const timeStr = s.startedAt ? String(s.startedAt).slice(0, 16).replace('T', ' ') : '—';
+
+        return `
+          <tr>
+            <td>
+              <div style="font-weight:600; font-size:12px; font-family:monospace;">${esc(s.sessionId)}</div>
+              <div class="muted" style="font-size:10.5px;">${timeStr}</div>
+            </td>
+            <td>
+              <span class="badge-pill" style="font-size:11px;">👤 ${esc(s.memberName || 'Member')}</span>
+            </td>
+            <td>
+              <div>📁 ${cleanProjectName(s.project)}</div>
+              <code style="font-size:10px;">${esc(s.model)}</code>
+            </td>
+            <td>
+              <div style="font-weight:700; color:var(--brand-hi);">${fmt(s.totalTokens)}</div>
+              <div class="muted" style="font-size:10px;">${fmt(s.tokensIn)} in • ${fmt(s.tokensCacheRead)} cache</div>
+            </td>
+            <td><strong>${fmtCost(s.apiCost)}</strong></td>
+            <td>
+              ${runawayBadge}
+              <div class="muted" style="font-size:10px;">${s.toolErrors || 0} errs • ${s.reworkLoops || 0} loops</div>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+  }
+
+  // Dimension 4: Files Table
+  const filesTbody = document.getElementById('dd-files-tbody');
+  if (filesTbody) {
+    if (!data.topFiles?.length) {
+      filesTbody.innerHTML = `<tr><td colSpan="4" class="muted" style="text-align:center; padding:16px;">No code diff records logged.</td></tr>`;
+    } else {
+      filesTbody.innerHTML = data.topFiles.map(f => `
+        <tr>
+          <td><code style="font-size:11.5px;">${esc(f.path)}</code></td>
+          <td>${f.edits} edits</td>
+          <td><span style="color:#4ade80;">+${f.additions || 0}</span> <span style="color:#f87171;">−${f.deletions || 0}</span></td>
+          <td><strong>${f.changedLines}</strong></td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  // Dimension 5: Daily Timeline
+  const timelineTbody = document.getElementById('dd-timeline-tbody');
+  if (timelineTbody) {
+    if (!data.dailyTimeline?.length) {
+      timelineTbody.innerHTML = `<tr><td colSpan="5" class="muted" style="text-align:center; padding:16px;">No daily timeline data available.</td></tr>`;
+    } else {
+      timelineTbody.innerHTML = data.dailyTimeline.slice().reverse().map(d => `
+        <tr>
+          <td><strong>${esc(d.day)}</strong></td>
+          <td>${d.sessions}</td>
+          <td><strong style="color:var(--brand-hi);">${fmt(d.totalTokens)}</strong></td>
+          <td>${fmtCost(d.apiCost)}</td>
+          <td>${d.edits} edits</td>
+        </tr>
+      `).join('');
+    }
+  }
+}
+
+// ── Team Member Token Deep-Dive Modal Controller ────────────────────────────
 async function openTeamMemberDeepDive(memberId, memberName) {
+  // Select this member in the Deep-Dive Tab filter as well
+  if (memberId) {
+    ddSelectedMemberIds = new Set([memberId]);
+    populateDeepDiveMemberCheckboxes();
+  }
+
   const dialog = document.getElementById('team-whale-drilldown-dialog');
   if (!dialog) return;
 
@@ -2032,3 +2477,12 @@ function inspectTeamPrompt(sessionId) {
 document.getElementById('twdd-close-btn')?.addEventListener('click', () => {
   document.getElementById('team-whale-drilldown-dialog')?.close?.();
 });
+
+// Auto-initialize deep dive tab
+document.addEventListener('DOMContentLoaded', () => {
+  initDeepDiveTab();
+});
+setTimeout(() => {
+  initDeepDiveTab();
+}, 200);
+

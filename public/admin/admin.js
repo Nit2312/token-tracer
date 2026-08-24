@@ -2804,6 +2804,8 @@ function renderTopUsage(data) {
 }
 
 // Whale Drilldown Modal
+const adminDrilldownCache = new Map();
+
 async function openWhaleDrilldown(memberId, memberName) {
   const dialog = $('#whale-drilldown-dialog');
   if (!dialog) return;
@@ -2815,8 +2817,6 @@ async function openWhaleDrilldown(memberId, memberName) {
 
   const loadingEl = $('#wdd-loading');
   const contentEl = $('#wdd-content');
-  if (loadingEl) loadingEl.hidden = false;
-  if (contentEl) contentEl.hidden = true;
 
   if (typeof dialog.showModal === 'function') {
     dialog.showModal();
@@ -2825,6 +2825,15 @@ async function openWhaleDrilldown(memberId, memberName) {
   }
 
   const range = $('#whale-range-select')?.value || 'all';
+  const cacheKey = `${memberId}_${range}`;
+  const cached = adminDrilldownCache.get(cacheKey);
+  if (cached && (Date.now() - cached.ts < 60000)) {
+    renderWhaleDrilldown(cached.data);
+    return;
+  }
+
+  if (loadingEl) loadingEl.hidden = false;
+  if (contentEl) contentEl.hidden = true;
 
   try {
     const res = await fetch(`/api/admin/top-usage?memberId=${encodeURIComponent(memberId)}&range=${encodeURIComponent(range)}`);
@@ -2832,6 +2841,7 @@ async function openWhaleDrilldown(memberId, memberName) {
       throw new Error(`Failed to load member deep dive: ${res.statusText}`);
     }
     const data = await res.json();
+    adminDrilldownCache.set(cacheKey, { ts: Date.now(), data });
     renderWhaleDrilldown(data);
   } catch (err) {
     console.error('[openWhaleDrilldown error]', err);

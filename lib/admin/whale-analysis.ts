@@ -20,6 +20,7 @@ export interface MemberDeepDiveOptions {
   to?: string | null;
   source?: string | null;
   model?: string | null;
+  teamId?: string | null;
 }
 
 const EFF_IN = `CASE WHEN s.tokens_in = 0 AND (s.tool_calls + s.edits) > 0 THEN GREATEST(500, (s.tool_calls + s.edits) * 350 + s.changed_lines * 10) ELSE s.tokens_in END`;
@@ -314,31 +315,89 @@ export async function getPlatformWhales(options: WhaleFilterOptions = {}) {
 }
 
 /**
- * Deep-dive analysis for a single member:
- * Returns the 6 core breakdown dimensions (Projects, Tools, Models, Top Heavy Sessions, Files, Daily Timeline).
+ * Deep-dive analysis for single or multiple team members (or entire team):
+ * Returns the multi-dimensional breakdown (Projects, Tools, Models, Top Heavy Sessions, Files, Daily Timeline, Member Comparisons).
  */
 export async function buildMemberUsageDeepDive(
-  memberId: string,
+  memberInput: string | string[],
   options: MemberDeepDiveOptions = {}
 ) {
-  const { range = 'all', from = null, to = null, source = null, model = null } = options;
-  const cacheKey = `member_deep_dive_pg_${memberId}_${range}_${from || ''}_${to || ''}_${source || ''}_${model || ''}`;
+  const { range = 'all', from = null, to = null, source = null, model = null, teamId = null } = options;
+
+  let memberIds: string[] = [];
+  if (Array.isArray(memberInput)) {
+    memberIds = memberInput.map((id) => String(id).trim()).filter(Boolean);
+  } else if (typeof memberInput === 'string') {
+    memberIds = memberInput.split(',').map((id) => id.trim()).filter(Boolean);
+  }
+
+  const isAll = memberIds.includes('all') || memberIds.length === 0;
+  const sortedIdsKey = isAll ? 'all' : [...memberIds].sort().join('_');
+  const cacheKey = `member_deep_dive_pg_${sortedIdsKey}_${teamId || 'any'}_${range}_${from || ''}_${to || ''}_${source || ''}_${model || ''}`;
 
   return statsCache.getOrSet(cacheKey, 60, async () => {
-    // 1. Fetch Member & Team
-    const memberRes = await query(
-      `SELECT m.id, m.display_name, m.created_at, m.team_id, t.name AS team_name
-       FROM members m
-       LEFT JOIN teams t ON t.id = m.team_id
-       WHERE m.id = $1`,
-      [memberId]
-    );
-    if (!memberRes.rows.length) {
+    // 1. Fetch Member(s) & Team metadata
+    let memberRes;
+    let memberWhere = '';
+    const params: unknown[] = [];
+
+    if (isAll && teamId) {
+      params.push(teamId);
+      memberWhere = `s.team_id = $1`;
+      memberRes = await query(
+        `SELECT m.id, m.display_name, m.created_at, m.team_id, t.name AS team_name
+         FROM members m
+         LEFT JOIN teams t ON t.id = m.team_id
+         WHERE m.team_id = $1
+         ORDER BY m.display_name ASC`,
+        [teamId]
+      );
+    } else if (memberIds.length === 1 && !isAll) {
+      params.push(memberIds[0]);
+      memberWhere = `s.member_id = $1`;
+      memberRes = await query(
+        `SELECT m.id, m.display_name, m.created_at, m.team_id, t.name AS team_name
+         FROM members m
+         LEFT JOIN teams t ON t.id = m.team_id
+         WHERE m.id = $1`,
+        [memberIds[0]]
+      );
+    } else {
+      params.push(memberIds);
+      memberWhere = `s.member_id = ANY($1::uuid[])`;
+      memberRes = await query(
+        `SELECT m.id, m.display_name, m.created_at, m.team_id, t.name AS team_name
+         FROM members m
+         LEFT JOIN teams t ON t.id = m.team_id
+         WHERE m.id = ANY($1::uuid[])
+         ORDER BY m.display_name ASC`,
+        [memberIds]
+      );
+    }
+
+    if (!memberRes.rows.length && !isAll) {
       return null;
     }
-    const member = memberRes.rows[0];
 
-    const params: unknown[] = [memberId];
+    const memberRows = memberRes.rows;
+    const isMulti = memberRows.length > 1 || isAll;
+    const firstRow = memberRows[0] || {};
+
+    const member = {
+      id: isAll ? 'all' : memberRows.map((r) => r.id).join(','),
+      displayName: isAll
+        ? `All Team Members (${memberRows.length})`
+        : memberRows.length === 1
+        ? firstRow.display_name
+        : `${memberRows.length} Members (${memberRows.slice(0, 3).map((r) => r.display_name).join(', ')}${memberRows.length > 3 ? '…' : ''})`,
+      teamId: firstRow.team_id || teamId,
+      teamName: firstRow.team_name || 'Independent',
+      createdAt: firstRow.created_at,
+      isMulti,
+      count: memberRows.length,
+      selectedMembers: memberRows.map((r) => ({ id: r.id, displayName: r.display_name })),
+    };
+
     let filters = '';
 
     if (range && range !== 'all') {
@@ -349,12 +408,10 @@ export async function buildMemberUsageDeepDive(
     }
     if (from) {
       params.push(from);
-      // Use index-friendly timestamp range comparison on idx_sync_sessions_member_activity
       filters += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at) >= ($${params.length}::date)::timestamptz`;
     }
     if (to) {
       params.push(to);
-      // Use index-friendly timestamp range comparison (< next day) instead of casting table column to ::date
       filters += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at) < (($${params.length}::date) + INTERVAL '1 day')`;
     }
     if (source && source !== 'all') {
@@ -383,7 +440,7 @@ export async function buildMemberUsageDeepDive(
         COALESCE(SUM(s.rework_loops), 0)::int AS rework_loops,
         COUNT(CASE WHEN (${EFF_IN} + ${EFF_OUT}) > 5000000 OR s.tool_errors > 15 OR s.rework_loops > 5 THEN 1 END)::int AS runaway_count
        FROM sync_sessions s
-       WHERE s.member_id = $1 ${filters}`;
+       WHERE ${memberWhere} ${filters}`;
 
     const projectsQuery = `SELECT
         COALESCE(s.agent, 'default') AS project,
@@ -399,7 +456,7 @@ export async function buildMemberUsageDeepDive(
         COALESCE(SUM(s.changed_lines), 0)::int AS changed_lines,
         MAX(COALESCE(s.ended_at, s.started_at, s.synced_at)) AS last_active
        FROM sync_sessions s
-       WHERE s.member_id = $1 ${filters}
+       WHERE ${memberWhere} ${filters}
        GROUP BY s.agent
        ORDER BY total_tokens DESC`;
 
@@ -412,7 +469,7 @@ export async function buildMemberUsageDeepDive(
         COALESCE(SUM(${EFF_IN} + ${EFF_OUT}), 0)::bigint AS total_tokens,
         COALESCE(SUM(s.api_cost), 0)::double precision AS api_cost
        FROM sync_sessions s
-       WHERE s.member_id = $1 ${filters}
+       WHERE ${memberWhere} ${filters}
        GROUP BY s.source
        ORDER BY total_tokens DESC`;
 
@@ -426,13 +483,15 @@ export async function buildMemberUsageDeepDive(
         COALESCE(SUM(${EFF_IN} + ${EFF_OUT}), 0)::bigint AS total_tokens,
         COALESCE(SUM(s.api_cost), 0)::double precision AS api_cost
        FROM sync_sessions s
-       WHERE s.member_id = $1 ${filters}
+       WHERE ${memberWhere} ${filters}
        GROUP BY s.model, s.source
        ORDER BY total_tokens DESC`;
 
     const sessionsQuery = `SELECT
         s.id AS doc_id,
         s.session_id,
+        s.member_id,
+        COALESCE(m.display_name, 'Unknown Member') AS member_name,
         COALESCE(s.agent, 'default') AS project,
         COALESCE(s.source, 'cursor') AS source,
         COALESCE(s.model, 'default') AS model,
@@ -452,9 +511,10 @@ export async function buildMemberUsageDeepDive(
         s.ended_at,
         s.synced_at
        FROM sync_sessions s
-       WHERE s.member_id = $1 ${filters}
+       LEFT JOIN members m ON m.id = s.member_id
+       WHERE ${memberWhere} ${filters}
        ORDER BY total_tokens DESC, api_cost DESC
-       LIMIT 20`;
+       LIMIT 25`;
 
     const filesQuery = `SELECT
         f.path,
@@ -464,7 +524,7 @@ export async function buildMemberUsageDeepDive(
         COALESCE(SUM(f.additions + f.deletions), 0)::int AS changed_lines
        FROM sync_session_files f
        WHERE f.sync_session_id IN (
-         SELECT s.id FROM sync_sessions s WHERE s.member_id = $1 ${filters}
+         SELECT s.id FROM sync_sessions s WHERE ${memberWhere} ${filters}
        )
        GROUP BY f.path
        ORDER BY changed_lines DESC, edits DESC
@@ -480,9 +540,31 @@ export async function buildMemberUsageDeepDive(
         COALESCE(SUM(s.api_cost), 0)::double precision AS api_cost,
         COALESCE(SUM(s.edits), 0)::int AS edits
        FROM sync_sessions s
-       WHERE s.member_id = $1 ${filters}
+       WHERE ${memberWhere} ${filters}
        GROUP BY day
        ORDER BY day ASC`;
+
+    const memberBreakdownQuery = isMulti
+      ? `SELECT
+          s.member_id,
+          COALESCE(m.display_name, 'Unknown Member') AS display_name,
+          COUNT(s.id)::int AS sessions,
+          COALESCE(SUM(${EFF_IN}), 0)::bigint AS tokens_in,
+          COALESCE(SUM(${EFF_OUT}), 0)::bigint AS tokens_out,
+          COALESCE(SUM(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
+          COALESCE(SUM(${EFF_IN} + ${EFF_OUT}), 0)::bigint AS total_tokens,
+          COALESCE(SUM(s.api_cost), 0)::double precision AS api_cost,
+          COALESCE(SUM(s.edits), 0)::int AS edits,
+          COALESCE(SUM(s.changed_lines), 0)::int AS changed_lines,
+          COALESCE(SUM(s.tool_calls), 0)::int AS tool_calls,
+          COALESCE(SUM(s.tool_errors), 0)::int AS tool_errors,
+          COALESCE(SUM(s.rework_loops), 0)::int AS rework_loops
+         FROM sync_sessions s
+         LEFT JOIN members m ON m.id = s.member_id
+         WHERE ${memberWhere} ${filters}
+         GROUP BY s.member_id, m.display_name
+         ORDER BY total_tokens DESC`
+      : null;
 
     const [
       totalsRes,
@@ -492,6 +574,7 @@ export async function buildMemberUsageDeepDive(
       sessionsRes,
       filesRes,
       timelineRes,
+      memberBreakdownRes,
     ] = await Promise.all([
       query(totalsQuery, params),
       query(projectsQuery, params),
@@ -500,19 +583,14 @@ export async function buildMemberUsageDeepDive(
       query(sessionsQuery, params),
       query(filesQuery, params),
       query(timelineQuery, params),
+      memberBreakdownQuery ? query(memberBreakdownQuery, params) : Promise.resolve({ rows: [] }),
     ]);
 
     const totals = totalsRes.rows[0] || {};
     const totalMemberTokens = Number(totals.total_tokens || 0);
 
     return {
-      member: {
-        id: member.id,
-        displayName: member.display_name,
-        teamId: member.team_id,
-        teamName: member.team_name || 'Independent',
-        createdAt: member.created_at,
-      },
+      member,
       totals: {
         totalTokens: totalMemberTokens,
         tokensIn: Number(totals.tokens_in || 0),
@@ -531,6 +609,22 @@ export async function buildMemberUsageDeepDive(
         avgTokensPerSession: Number(totals.session_count) > 0 ? Math.round(totalMemberTokens / Number(totals.session_count)) : 0,
         avgCostPerSession: Number(totals.session_count) > 0 ? Number(totals.total_cost || 0) / Number(totals.session_count) : 0,
       },
+      memberComparisons: memberBreakdownRes.rows.map((mb: any) => ({
+        memberId: mb.member_id,
+        displayName: mb.display_name,
+        sessions: Number(mb.sessions),
+        tokensIn: Number(mb.tokens_in),
+        tokensOut: Number(mb.tokens_out),
+        tokensCacheRead: Number(mb.tokens_cache_read),
+        totalTokens: Number(mb.total_tokens),
+        apiCost: Number(mb.api_cost),
+        edits: Number(mb.edits),
+        changedLines: Number(mb.changed_lines),
+        toolCalls: Number(mb.tool_calls),
+        toolErrors: Number(mb.tool_errors),
+        reworkLoops: Number(mb.rework_loops),
+        percentage: totalMemberTokens > 0 ? (Number(mb.total_tokens) / totalMemberTokens) * 100 : 0,
+      })),
       projects: projectsRes.rows.map((p: any) => ({
         project: p.project,
         sources: p.sources || [],
@@ -577,6 +671,8 @@ export async function buildMemberUsageDeepDive(
       topSessions: sessionsRes.rows.map((s: any) => ({
         docId: s.doc_id,
         sessionId: s.session_id,
+        memberId: s.member_id,
+        memberName: s.member_name,
         project: s.project,
         source: s.source,
         model: s.model,
@@ -616,4 +712,5 @@ export async function buildMemberUsageDeepDive(
     };
   });
 }
+
 

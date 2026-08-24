@@ -26,7 +26,7 @@ export async function GET(req: NextRequest) {
   }
 
   const { searchParams } = new URL(req.url);
-  const memberId = searchParams.get('memberId');
+  const memberId = searchParams.get('memberIds') || searchParams.get('memberId');
   const range = searchParams.get('range') || 'all';
   const teamId = searchParams.get('teamId') || null;
   const minTokens = searchParams.get('minTokens') ? Number(searchParams.get('minTokens')) : null;
@@ -35,16 +35,17 @@ export async function GET(req: NextRequest) {
   const model = searchParams.get('model') || null;
 
   try {
-    // If specific member requested, return full deep dive
+    // If specific member(s) requested, return full deep dive
     if (memberId) {
       const deepDive = await buildMemberUsageDeepDive(memberId, {
         range,
         source,
         model,
+        teamId,
       });
 
       if (!deepDive) {
-        return NextResponse.json({ error: 'Member not found or no activity' }, { status: 404 });
+        return NextResponse.json({ error: 'Member(s) not found or no activity' }, { status: 404 });
       }
 
       return NextResponse.json(deepDive);
