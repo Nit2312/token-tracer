@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { initializeApp, getApps, cert, App } from 'firebase-admin/app';
+import { initializeApp, getApps, cert, deleteApp, App } from 'firebase-admin/app';
 import {
   getFirestore,
   Firestore,
@@ -26,15 +26,11 @@ const globalForDb = globalThis as unknown as { _firestoreApp: App | undefined };
 
 function getApp(): App {
   if (globalForDb._firestoreApp) return globalForDb._firestoreApp;
-  if (getApps().length) {
-    globalForDb._firestoreApp = getApps()[0];
-    return globalForDb._firestoreApp!;
-  }
 
   const projectId = firebaseProjectId() || 'token-tracer-97d50';
   const serviceAccountStr = firebaseServiceAccount();
 
-  let serviceAccount: object | null = null;
+  let serviceAccount: any = null;
   if (serviceAccountStr && !serviceAccountStr.startsWith('<') && serviceAccountStr.trim().startsWith('{')) {
     try {
       serviceAccount = JSON.parse(serviceAccountStr);
@@ -43,28 +39,74 @@ function getApp(): App {
     }
   }
 
-  if (!serviceAccount) {
-    try {
-      const files = fs.readdirSync(process.cwd());
-      for (const file of files) {
-        if (file.endsWith('.json') && (file.includes('firebase-adminsdk') || file.includes('serviceAccountKey') || file.includes('token-tracer-'))) {
-          const fullPath = path.join(process.cwd(), file);
-          try {
-            const parsed = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
-            if (parsed.type === 'service_account' && parsed.private_key) {
-              serviceAccount = parsed;
-              break;
-            }
-          } catch {}
+  if (!serviceAccount && process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    const credPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    if (fs.existsSync(credPath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(credPath, 'utf8'));
+        if (parsed.type === 'service_account' && parsed.private_key) {
+          serviceAccount = parsed;
         }
+      } catch {}
+    }
+  }
+
+  if (!serviceAccount) {
+    const searchDirs = [
+      process.cwd(),
+      path.resolve(process.cwd(), '..'),
+      path.resolve(__dirname, '..'),
+      path.resolve(__dirname, '../..'),
+    ];
+
+    for (const dir of searchDirs) {
+      if (!fs.existsSync(dir)) continue;
+      try {
+        const files = fs.readdirSync(dir);
+        for (const file of files) {
+          if (file.endsWith('.json') && (file.includes('firebase-adminsdk') || file.includes('serviceAccountKey') || file.includes('token-tracer-'))) {
+            const fullPath = path.join(dir, file);
+            try {
+              const parsed = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+              if (parsed.type === 'service_account' && parsed.private_key) {
+                serviceAccount = parsed;
+                if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+                  process.env.GOOGLE_APPLICATION_CREDENTIALS = fullPath;
+                }
+                break;
+              }
+            } catch {}
+          }
+        }
+        if (serviceAccount) break;
+      } catch {}
+    }
+  }
+
+  if (serviceAccount && typeof serviceAccount.private_key === 'string') {
+    serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+  }
+
+  // Clean up any previously uncredentialed default apps (e.g. from hot reload)
+  const existingApps = getApps();
+  if (existingApps.length > 0) {
+    if (serviceAccount) {
+      // If we have credentials, delete any existing app that was created without credentials
+      for (const app of existingApps) {
+        try {
+          deleteApp(app);
+        } catch {}
       }
-    } catch {}
+    } else {
+      globalForDb._firestoreApp = existingApps[0];
+      return globalForDb._firestoreApp!;
+    }
   }
 
   if (serviceAccount) {
     globalForDb._firestoreApp = initializeApp({
-      credential: cert(serviceAccount as any),
-      projectId: (serviceAccount as any).project_id || projectId,
+      credential: cert(serviceAccount),
+      projectId: serviceAccount.project_id || projectId,
     });
   } else {
     globalForDb._firestoreApp = initializeApp({

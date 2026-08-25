@@ -1,9 +1,9 @@
 /**
- * Platform-wide Token Whale and Deep-Dive Usage Analysis (PostgreSQL / Neon backend).
+ * Platform-wide Token Whale and Deep-Dive Usage Analysis (Firestore backend).
  * Computes multi-dimensional breakdowns (Projects, Tools, Models, Sessions, Files, Timelines)
  * for both Team Admin and Superadmin scopes.
  */
-import { query } from '@/lib/team/db';
+import { queryCol, getDocById } from '@/lib/team/db';
 import { statsCache } from '@/lib/team/cache';
 
 export interface WhaleFilterOptions {
@@ -23,8 +23,52 @@ export interface MemberDeepDiveOptions {
   teamId?: string | null;
 }
 
-const EFF_IN = `CASE WHEN s.tokens_in = 0 AND (s.tool_calls + s.edits) > 0 THEN GREATEST(500, (s.tool_calls + s.edits) * 350 + s.changed_lines * 10) ELSE s.tokens_in END`;
-const EFF_OUT = `CASE WHEN s.tokens_out = 0 AND (s.tool_calls + s.edits) > 0 THEN GREATEST(200, (s.tool_calls + s.edits) * 150 + s.changed_lines * 5) ELSE s.tokens_out END`;
+function effIn(s: any): number {
+  const ti = Number(s.tokens_in || 0);
+  const tc = Number(s.tool_calls || 0);
+  const ed = Number(s.edits || 0);
+  const cl = Number(s.changed_lines || 0);
+  if (ti === 0 && (tc + ed) > 0) return Math.max(500, (tc + ed) * 350 + cl * 10);
+  return ti;
+}
+
+function effOut(s: any): number {
+  const to = Number(s.tokens_out || 0);
+  const tc = Number(s.tool_calls || 0);
+  const ed = Number(s.edits || 0);
+  const cl = Number(s.changed_lines || 0);
+  if (to === 0 && (tc + ed) > 0) return Math.max(200, (tc + ed) * 150 + cl * 5);
+  return to;
+}
+
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) result.push(arr.slice(i, i + size));
+  return result;
+}
+
+function getSessionTimestamp(s: any): string | null {
+  return s.ended_at || s.started_at || s.synced_at || null;
+}
+
+function isWithinRange(ts: string | null, range: string | null, from: string | null, to: string | null): boolean {
+  if (!ts) return false;
+  const dateStr = String(ts).slice(0, 10);
+  const time = new Date(ts).getTime();
+  if (isNaN(time)) return false;
+
+  if (range && range !== 'all') {
+    const match = range.match(/^(\d+)d$/);
+    const days = match ? Number(match[1]) : 30;
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    if (time < cutoff) return false;
+  }
+
+  if (from && dateStr < from.slice(0, 10)) return false;
+  if (to && dateStr > to.slice(0, 10)) return false;
+
+  return true;
+}
 
 /**
  * Fetch platform-wide token spenders (Whales) across all teams or filtered by team.
@@ -36,141 +80,216 @@ export async function getPlatformWhales(options: WhaleFilterOptions = {}) {
   const search = (options.search || '').trim().toLowerCase();
   const limit = options.limit || 100;
 
-  const cacheKey = `whale_analysis_pg_${range}_${teamId || 'all'}_${minTokens}_${search}_${limit}`;
+  const cacheKey = `whale_analysis_fs_${range}_${teamId || 'all'}_${minTokens}_${search}_${limit}`;
 
   return statsCache.getOrSet(cacheKey, 45, async () => {
-    const params: unknown[] = [];
-    let dateWhere = '';
-
-    if (range && range !== 'all') {
-      const match = range.match(/^(\d+)d$/);
-      const days = match ? Number(match[1]) : 30;
-      params.push(`${days} days`);
-      dateWhere += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at) >= (NOW() - $${params.length}::interval)`;
-    }
-
-    let teamWhere = '';
+    const constraints: Parameters<typeof queryCol>[1] = [];
     if (teamId) {
-      params.push(teamId);
-      teamWhere = ` AND s.team_id = $${params.length}`;
+      constraints.push({ type: 'where', field: 'team_id', op: '==', value: teamId });
     }
 
-    // 1. Fetch per-member stats with SQL aggregates
-    const memberQuery = `
-      SELECT
-        s.member_id,
-        COALESCE(m.display_name, 'Unknown Member') AS display_name,
-        s.team_id,
-        COALESCE(t.name, 'Independent') AS team_name,
-        COUNT(s.id)::int AS sessions_count,
-        COALESCE(SUM(${EFF_IN}), 0)::bigint AS tokens_in,
-        COALESCE(SUM(${EFF_OUT}), 0)::bigint AS tokens_out,
-        COALESCE(SUM(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
-        COALESCE(SUM(s.tokens_cache_write), 0)::bigint AS tokens_cache_write,
-        COALESCE(SUM(${EFF_IN} + ${EFF_OUT}), 0)::bigint AS total_tokens,
-        COALESCE(SUM(s.api_cost), 0)::double precision AS api_cost,
-        COALESCE(SUM(s.edits), 0)::int AS edits,
-        COALESCE(SUM(s.changed_lines), 0)::int AS changed_lines,
-        COALESCE(SUM(s.tool_calls), 0)::int AS tool_calls,
-        COALESCE(SUM(s.tool_errors), 0)::int AS tool_errors,
-        COALESCE(SUM(s.rework_loops), 0)::int AS rework_loops,
-        COUNT(CASE WHEN (${EFF_IN} + ${EFF_OUT}) > 5000000 OR s.tool_errors > 15 OR s.rework_loops > 5 THEN 1 END)::int AS runaway_count,
-        MIN(COALESCE(s.started_at, s.synced_at)) AS first_active,
-        MAX(COALESCE(s.ended_at, s.synced_at)) AS last_active
-      FROM sync_sessions s
-      LEFT JOIN members m ON m.id = s.member_id
-      LEFT JOIN teams t ON t.id = s.team_id
-      WHERE 1=1 ${dateWhere} ${teamWhere}
-      GROUP BY s.member_id, m.display_name, s.team_id, t.name
-      ORDER BY total_tokens DESC
-    `;
+    const [allSessions, membersList, teamsList] = await Promise.all([
+      queryCol<any>('sync_sessions', constraints),
+      queryCol<any>('members'),
+      queryCol<any>('teams'),
+    ]);
 
-    const { rows: memberRows } = await query(memberQuery, params);
+    const memberById = new Map(membersList.map((m: any) => [m.id, m]));
+    const teamById = new Map(teamsList.map((t: any) => [t.id, t]));
 
-    // 2. Fetch top project, model, source per member in bulk
-    const breakdownQuery = `
-      WITH ranked_projects AS (
-        SELECT
-          s.member_id,
-          COALESCE(s.agent, 'default') AS project_name,
-          SUM(${EFF_IN} + ${EFF_OUT})::bigint AS project_tokens,
-          SUM(s.api_cost)::double precision AS project_cost,
-          ROW_NUMBER() OVER (PARTITION BY s.member_id ORDER BY SUM(${EFF_IN} + ${EFF_OUT}) DESC) AS rn
-        FROM sync_sessions s
-        WHERE 1=1 ${dateWhere} ${teamWhere}
-        GROUP BY s.member_id, s.agent
-      ),
-      ranked_models AS (
-        SELECT
-          s.member_id,
-          COALESCE(s.model, 'default') AS model_name,
-          ROW_NUMBER() OVER (PARTITION BY s.member_id ORDER BY SUM(${EFF_IN} + ${EFF_OUT}) DESC) AS rn
-        FROM sync_sessions s
-        WHERE 1=1 ${dateWhere} ${teamWhere}
-        GROUP BY s.member_id, s.model
-      ),
-      ranked_sources AS (
-        SELECT
-          s.member_id,
-          COALESCE(s.source, 'cursor') AS source_name,
-          ROW_NUMBER() OVER (PARTITION BY s.member_id ORDER BY SUM(${EFF_IN} + ${EFF_OUT}) DESC) AS rn
-        FROM sync_sessions s
-        WHERE 1=1 ${dateWhere} ${teamWhere}
-        GROUP BY s.member_id, s.source
-      )
-      SELECT
-        p.member_id,
-        p.project_name,
-        p.project_tokens,
-        p.project_cost,
-        m.model_name,
-        src.source_name
-      FROM ranked_projects p
-      LEFT JOIN ranked_models m ON m.member_id = p.member_id AND m.rn = 1
-      LEFT JOIN ranked_sources src ON src.member_id = p.member_id AND src.rn = 1
-      WHERE p.rn = 1
-    `;
+    // Filter sessions by date range
+    const sessions = allSessions.filter((s) => {
+      const ts = getSessionTimestamp(s);
+      return isWithinRange(ts, range, null, null);
+    });
 
-    const { rows: breakdownRows } = await query(breakdownQuery, params);
-    const breakdownMap = new Map(breakdownRows.map((r: any) => [r.member_id, r]));
+    // 1. Group sessions by member
+    const memberStatsMap = new Map<string, any>();
+    const memberProjectsMap = new Map<string, Map<string, { tokens: number; cost: number }>>();
+    const memberModelsMap = new Map<string, Map<string, number>>();
+    const memberSourcesMap = new Map<string, Map<string, number>>();
 
-    let whales = memberRows.map((row: any) => {
-      const b = breakdownMap.get(row.member_id);
-      const totalTok = Number(row.total_tokens || 0);
-      const projTok = Number(b?.project_tokens || 0);
-      const projPct = totalTok > 0 ? (projTok / totalTok) * 100 : 0;
+    let globalTokIn = 0;
+    let globalTokOut = 0;
+    let globalCacheRead = 0;
+    let globalCost = 0;
+
+    const globalProjectsMap = new Map<string, { tokens: number; cost: number; sessions: number }>();
+    const globalModelsMap = new Map<string, { tokens: number; cost: number; sessions: number }>();
+
+    for (const s of sessions) {
+      const mid = String(s.member_id || 'unknown');
+      const tin = effIn(s);
+      const tout = effOut(s);
+      const totTok = tin + tout;
+      const cost = Number(s.api_cost || 0);
+      const cacheRead = Number(s.tokens_cache_read || 0);
+      const cacheWrite = Number(s.tokens_cache_write || 0);
+      const edits = Number(s.edits || 0);
+      const lines = Number(s.changed_lines || 0);
+      const tools = Number(s.tool_calls || 0);
+      const errors = Number(s.tool_errors || 0);
+      const rework = Number(s.rework_loops || 0);
+      const isRunaway = totTok > 5000000 || errors > 15 || rework > 5;
+      const ts = getSessionTimestamp(s);
+
+      globalTokIn += tin;
+      globalTokOut += tout;
+      globalCacheRead += cacheRead;
+      globalCost += cost;
+
+      const project = s.agent || 'default';
+      const model = s.model || 'default';
+      const source = s.source || 'cursor';
+
+      // Global rollups
+      if (!globalProjectsMap.has(project)) globalProjectsMap.set(project, { tokens: 0, cost: 0, sessions: 0 });
+      const gp = globalProjectsMap.get(project)!;
+      gp.tokens += totTok;
+      gp.cost += cost;
+      gp.sessions += 1;
+
+      if (!globalModelsMap.has(model)) globalModelsMap.set(model, { tokens: 0, cost: 0, sessions: 0 });
+      const gm = globalModelsMap.get(model)!;
+      gm.tokens += totTok;
+      gm.cost += cost;
+      gm.sessions += 1;
+
+      // Member stats
+      if (!memberStatsMap.has(mid)) {
+        const mem = memberById.get(mid);
+        const tm = teamById.get(s.team_id);
+        memberStatsMap.set(mid, {
+          member_id: mid,
+          display_name: mem?.display_name || 'Unknown Member',
+          team_id: s.team_id,
+          team_name: tm?.name || 'Independent',
+          sessions_count: 0,
+          tokens_in: 0,
+          tokens_out: 0,
+          tokens_cache_read: 0,
+          tokens_cache_write: 0,
+          total_tokens: 0,
+          api_cost: 0,
+          edits: 0,
+          changed_lines: 0,
+          tool_calls: 0,
+          tool_errors: 0,
+          rework_loops: 0,
+          runaway_count: 0,
+          first_active: ts,
+          last_active: ts,
+        });
+        memberProjectsMap.set(mid, new Map());
+        memberModelsMap.set(mid, new Map());
+        memberSourcesMap.set(mid, new Map());
+      }
+
+      const ms = memberStatsMap.get(mid)!;
+      ms.sessions_count += 1;
+      ms.tokens_in += tin;
+      ms.tokens_out += tout;
+      ms.tokens_cache_read += cacheRead;
+      ms.tokens_cache_write += cacheWrite;
+      ms.total_tokens += totTok;
+      ms.api_cost += cost;
+      ms.edits += edits;
+      ms.changed_lines += lines;
+      ms.tool_calls += tools;
+      ms.tool_errors += errors;
+      ms.rework_loops += rework;
+      if (isRunaway) ms.runaway_count += 1;
+
+      if (ts) {
+        if (!ms.first_active || ts < ms.first_active) ms.first_active = ts;
+        if (!ms.last_active || ts > ms.last_active) ms.last_active = ts;
+      }
+
+      // Member top break-downs
+      const mp = memberProjectsMap.get(mid)!;
+      if (!mp.has(project)) mp.set(project, { tokens: 0, cost: 0 });
+      const mpEntry = mp.get(project)!;
+      mpEntry.tokens += totTok;
+      mpEntry.cost += cost;
+
+      const mm = memberModelsMap.get(mid)!;
+      mm.set(model, (mm.get(model) || 0) + totTok);
+
+      const msrc = memberSourcesMap.get(mid)!;
+      msrc.set(source, (msrc.get(source) || 0) + totTok);
+    }
+
+    let whales = Array.from(memberStatsMap.values()).map((row) => {
+      const mid = row.member_id;
+      const mp = memberProjectsMap.get(mid)!;
+      const mm = memberModelsMap.get(mid)!;
+      const msrc = memberSourcesMap.get(mid)!;
+
+      let topProjName = 'none';
+      let topProjTok = 0;
+      let topProjCost = 0;
+      for (const [pname, pdata] of mp.entries()) {
+        if (pdata.tokens >= topProjTok) {
+          topProjName = pname;
+          topProjTok = pdata.tokens;
+          topProjCost = pdata.cost;
+        }
+      }
+
+      let topModName = 'default';
+      let topModTok = -1;
+      for (const [mname, mtok] of mm.entries()) {
+        if (mtok > topModTok) {
+          topModName = mname;
+          topModTok = mtok;
+        }
+      }
+
+      let topSrcName = 'cursor';
+      let topSrcTok = -1;
+      for (const [sname, stok] of msrc.entries()) {
+        if (stok > topSrcTok) {
+          topSrcName = sname;
+          topSrcTok = stok;
+        }
+      }
+
+      const totalTok = row.total_tokens;
+      const projPct = totalTok > 0 ? (topProjTok / totalTok) * 100 : 0;
 
       return {
         memberId: row.member_id,
         displayName: row.display_name,
         teamId: row.team_id,
         teamName: row.team_name,
-        sessionsCount: Number(row.sessions_count || 0),
-        tokensIn: Number(row.tokens_in || 0),
-        tokensOut: Number(row.tokens_out || 0),
-        tokensCacheRead: Number(row.tokens_cache_read || 0),
-        tokensCacheWrite: Number(row.tokens_cache_write || 0),
+        sessionsCount: row.sessions_count,
+        tokensIn: row.tokens_in,
+        tokensOut: row.tokens_out,
+        tokensCacheRead: row.tokens_cache_read,
+        tokensCacheWrite: row.tokens_cache_write,
         totalTokens: totalTok,
-        apiCost: Number(row.api_cost || 0),
-        edits: Number(row.edits || 0),
-        changedLines: Number(row.changed_lines || 0),
-        toolCalls: Number(row.tool_calls || 0),
-        toolErrors: Number(row.tool_errors || 0),
-        reworkLoops: Number(row.rework_loops || 0),
-        runawayCount: Number(row.runaway_count || 0),
+        apiCost: row.api_cost,
+        edits: row.edits,
+        changedLines: row.changed_lines,
+        toolCalls: row.tool_calls,
+        toolErrors: row.tool_errors,
+        reworkLoops: row.rework_loops,
+        runawayCount: row.runaway_count,
         firstActive: row.first_active,
         lastActive: row.last_active,
         topProject: {
-          name: b?.project_name || 'none',
-          tokens: projTok,
-          cost: Number(b?.project_cost || 0),
+          name: topProjName,
+          tokens: topProjTok,
+          cost: topProjCost,
           percentage: projPct,
         },
-        topModel: b?.model_name || 'default',
-        topSource: b?.source_name || 'cursor',
-        avgTokensPerSession: Number(row.sessions_count) > 0 ? Math.round(totalTok / Number(row.sessions_count)) : 0,
+        topModel: topModName,
+        topSource: topSrcName,
+        avgTokensPerSession: row.sessions_count > 0 ? Math.round(totalTok / row.sessions_count) : 0,
       };
     });
+
+    whales.sort((a, b) => b.totalTokens - a.totalTokens);
 
     if (minTokens > 0) {
       whales = whales.filter((w) => w.totalTokens >= minTokens);
@@ -184,87 +303,47 @@ export async function getPlatformWhales(options: WhaleFilterOptions = {}) {
       );
     }
 
-    // 3. Platform totals & top global projects / models & extreme sessions in parallel
-    const totalsQuery = `
-      SELECT
-        COALESCE(SUM(${EFF_IN}), 0)::bigint AS tokens_in,
-        COALESCE(SUM(${EFF_OUT}), 0)::bigint AS tokens_out,
-        COALESCE(SUM(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
-        COALESCE(SUM(s.api_cost), 0)::double precision AS total_cost,
-        COUNT(s.id)::int AS total_sessions
-      FROM sync_sessions s
-      WHERE 1=1 ${dateWhere} ${teamWhere}
-    `;
+    const topProjectsGlobal = Array.from(globalProjectsMap.entries())
+      .map(([name, data]) => ({ name, ...data }))
+      .sort((a, b) => b.tokens - a.tokens)
+      .slice(0, 10);
 
-    const topProjGlobalQuery = `
-      SELECT
-        COALESCE(s.agent, 'default') AS name,
-        COALESCE(SUM(${EFF_IN} + ${EFF_OUT}), 0)::bigint AS tokens,
-        COALESCE(SUM(s.api_cost), 0)::double precision AS cost,
-        COUNT(s.id)::int AS sessions
-      FROM sync_sessions s
-      WHERE 1=1 ${dateWhere} ${teamWhere}
-      GROUP BY s.agent
-      ORDER BY tokens DESC
-      LIMIT 10
-    `;
+    const topModelsGlobal = Array.from(globalModelsMap.entries())
+      .map(([name, data]) => ({ name, ...data }))
+      .sort((a, b) => b.tokens - a.tokens)
+      .slice(0, 10);
 
-    const topModelsGlobalQuery = `
-      SELECT
-        COALESCE(s.model, 'default') AS name,
-        COALESCE(SUM(${EFF_IN} + ${EFF_OUT}), 0)::bigint AS tokens,
-        COALESCE(SUM(s.api_cost), 0)::double precision AS cost,
-        COUNT(s.id)::int AS sessions
-      FROM sync_sessions s
-      WHERE 1=1 ${dateWhere} ${teamWhere}
-      GROUP BY s.model
-      ORDER BY tokens DESC
-      LIMIT 10
-    `;
-
-    // 4. Extreme Runaway Sessions
-    const extremeSessionsQuery = `
-      SELECT
-        s.id AS doc_id,
-        s.session_id,
-        s.member_id,
-        COALESCE(m.display_name, 'Unknown') AS member_name,
-        COALESCE(t.name, 'Independent') AS team_name,
-        COALESCE(s.agent, 'default') AS project,
-        COALESCE(s.source, 'cursor') AS source,
-        COALESCE(s.model, 'default') AS model,
-        (${EFF_IN})::bigint AS tokens_in,
-        (${EFF_OUT})::bigint AS tokens_out,
-        COALESCE(s.tokens_cache_read, 0)::bigint AS tokens_cache_read,
-        (${EFF_IN} + ${EFF_OUT})::bigint AS total_tokens,
-        COALESCE(s.api_cost, 0)::double precision AS api_cost,
-        COALESCE(s.tool_calls, 0)::int AS tool_calls,
-        COALESCE(s.tool_errors, 0)::int AS tool_errors,
-        COALESCE(s.rework_loops, 0)::int AS rework_loops,
-        s.started_at,
-        s.ended_at,
-        s.synced_at
-      FROM sync_sessions s
-      LEFT JOIN members m ON m.id = s.member_id
-      LEFT JOIN teams t ON t.id = s.team_id
-      WHERE 1=1 ${dateWhere} ${teamWhere}
-      ORDER BY total_tokens DESC, api_cost DESC
-      LIMIT 10
-    `;
-
-    const [totalRes, topProjRes, topModRes, extremeRes] = await Promise.all([
-      query(totalsQuery, params),
-      query(topProjGlobalQuery, params),
-      query(topModelsGlobalQuery, params),
-      query(extremeSessionsQuery, params),
-    ]);
-
-    const totalsRow = totalRes.rows[0] || {};
-    const globalTokIn = Number(totalsRow.tokens_in || 0);
-    const globalTokOut = Number(totalsRow.tokens_out || 0);
-    const topProjectsGlobal = topProjRes.rows;
-    const topModelsGlobal = topModRes.rows;
-    const extremeSessions = extremeRes.rows;
+    const extremeSessions = [...sessions]
+      .map((s) => {
+        const mem = memberById.get(s.member_id);
+        const tm = teamById.get(s.team_id);
+        const tin = effIn(s);
+        const tout = effOut(s);
+        const totTok = tin + tout;
+        return {
+          docId: s.id,
+          sessionId: s.session_id,
+          memberId: s.member_id,
+          memberName: mem?.display_name || 'Unknown',
+          teamName: tm?.name || 'Independent',
+          project: s.agent || 'default',
+          source: s.source || 'cursor',
+          model: s.model || 'default',
+          tokensIn: tin,
+          tokensOut: tout,
+          tokensCacheRead: Number(s.tokens_cache_read || 0),
+          totalTokens: totTok,
+          apiCost: Number(s.api_cost || 0),
+          toolCalls: Number(s.tool_calls || 0),
+          toolErrors: Number(s.tool_errors || 0),
+          reworkLoops: Number(s.rework_loops || 0),
+          startedAt: s.started_at,
+          endedAt: s.ended_at,
+          syncedAt: s.synced_at,
+        };
+      })
+      .sort((a, b) => b.totalTokens - a.totalTokens || b.apiCost - a.apiCost)
+      .slice(0, 10);
 
     return {
       whales: whales.slice(0, limit),
@@ -273,43 +352,13 @@ export async function getPlatformWhales(options: WhaleFilterOptions = {}) {
         totalTokens: globalTokIn + globalTokOut,
         tokensIn: globalTokIn,
         tokensOut: globalTokOut,
-        tokensCacheRead: Number(totalsRow.tokens_cache_read || 0),
-        totalCost: Number(totalsRow.total_cost || 0),
-        totalSessions: Number(totalsRow.total_sessions || 0),
+        tokensCacheRead: globalCacheRead,
+        totalCost: globalCost,
+        totalSessions: sessions.length,
       },
-      topProjectsGlobal: topProjectsGlobal.map((p: any) => ({
-        name: p.name,
-        tokens: Number(p.tokens),
-        cost: Number(p.cost),
-        sessions: Number(p.sessions),
-      })),
-      topModelsGlobal: topModelsGlobal.map((m: any) => ({
-        name: m.name,
-        tokens: Number(m.tokens),
-        cost: Number(m.cost),
-        sessions: Number(m.sessions),
-      })),
-      extremeSessions: extremeSessions.map((s: any) => ({
-        docId: s.doc_id,
-        sessionId: s.session_id,
-        memberId: s.member_id,
-        memberName: s.member_name,
-        teamName: s.team_name,
-        project: s.project,
-        source: s.source,
-        model: s.model,
-        tokensIn: Number(s.tokens_in),
-        tokensOut: Number(s.tokens_out),
-        tokensCacheRead: Number(s.tokens_cache_read),
-        totalTokens: Number(s.total_tokens),
-        apiCost: Number(s.api_cost),
-        toolCalls: Number(s.tool_calls),
-        toolErrors: Number(s.tool_errors),
-        reworkLoops: Number(s.rework_loops),
-        startedAt: s.started_at,
-        endedAt: s.ended_at,
-        syncedAt: s.synced_at,
-      })),
+      topProjectsGlobal,
+      topModelsGlobal,
+      extremeSessions,
     };
   });
 }
@@ -333,390 +382,416 @@ export async function buildMemberUsageDeepDive(
 
   const isAll = memberIds.includes('all') || memberIds.length === 0;
   const sortedIdsKey = isAll ? 'all' : [...memberIds].sort().join('_');
-  const cacheKey = `member_deep_dive_pg_${sortedIdsKey}_${teamId || 'any'}_${range}_${from || ''}_${to || ''}_${source || ''}_${model || ''}`;
+  const cacheKey = `member_deep_dive_fs_${sortedIdsKey}_${teamId || 'any'}_${range}_${from || ''}_${to || ''}_${source || ''}_${model || ''}`;
 
   return statsCache.getOrSet(cacheKey, 300, async () => {
     // 1. Fetch Member(s) & Team metadata
-    let memberRes;
-    let memberWhere = '';
-    const params: unknown[] = [];
+    const [allMembers, allTeams, teamMemberDocs] = await Promise.all([
+      queryCol<any>('members'),
+      queryCol<any>('teams'),
+      teamId ? queryCol<any>('team_members', [{ type: 'where', field: 'team_id', op: '==', value: teamId }]) : Promise.resolve([]),
+    ]);
 
+    const memberMap = new Map(allMembers.map((m: any) => [m.id, m]));
+    const teamMap = new Map(allTeams.map((t: any) => [t.id, t]));
+
+    let targetMemberIds: string[] = [];
     if (isAll && teamId) {
-      params.push(teamId);
-      memberWhere = `s.team_id = $1`;
-      memberRes = await query(
-        `SELECT m.id, m.display_name, m.created_at, m.team_id, t.name AS team_name
-         FROM members m
-         LEFT JOIN teams t ON t.id = m.team_id
-         WHERE m.team_id = $1
-         ORDER BY m.display_name ASC`,
-        [teamId]
-      );
-    } else if (memberIds.length === 1 && !isAll) {
-      params.push(memberIds[0]);
-      memberWhere = `s.member_id = $1`;
-      memberRes = await query(
-        `SELECT m.id, m.display_name, m.created_at, m.team_id, t.name AS team_name
-         FROM members m
-         LEFT JOIN teams t ON t.id = m.team_id
-         WHERE m.id = $1`,
-        [memberIds[0]]
-      );
+      targetMemberIds = teamMemberDocs.map((tm: any) => tm.member_id);
+    } else if (isAll) {
+      targetMemberIds = allMembers.map((m: any) => m.id);
     } else {
-      params.push(memberIds);
-      memberWhere = `s.member_id = ANY($1::uuid[])`;
-      memberRes = await query(
-        `SELECT m.id, m.display_name, m.created_at, m.team_id, t.name AS team_name
-         FROM members m
-         LEFT JOIN teams t ON t.id = m.team_id
-         WHERE m.id = ANY($1::uuid[])
-         ORDER BY m.display_name ASC`,
-        [memberIds]
-      );
+      targetMemberIds = memberIds;
     }
 
-    if (!memberRes.rows.length && !isAll) {
+    const memberRows = targetMemberIds.map((mid) => memberMap.get(mid)).filter(Boolean);
+    if (!memberRows.length && !isAll) {
       return null;
     }
 
-    const memberRows = memberRes.rows;
     const isMulti = memberRows.length > 1 || isAll;
     const firstRow = memberRows[0] || {};
+    const teamDoc = teamId ? teamMap.get(teamId) : (firstRow.team_id ? teamMap.get(firstRow.team_id) : null);
 
     const member = {
-      id: isAll ? 'all' : memberRows.map((r) => r.id).join(','),
+      id: isAll ? 'all' : memberRows.map((r: any) => r.id).join(','),
       displayName: isAll
         ? `All Team Members (${memberRows.length})`
         : memberRows.length === 1
         ? firstRow.display_name
-        : `${memberRows.length} Members (${memberRows.slice(0, 3).map((r) => r.display_name).join(', ')}${memberRows.length > 3 ? '…' : ''})`,
-      teamId: firstRow.team_id || teamId,
-      teamName: firstRow.team_name || 'Independent',
+        : `${memberRows.length} Members (${memberRows.slice(0, 3).map((r: any) => r.display_name).join(', ')}${memberRows.length > 3 ? '…' : ''})`,
+      teamId: teamId || firstRow.team_id,
+      teamName: teamDoc?.name || 'Independent',
       createdAt: firstRow.created_at,
       isMulti,
       count: memberRows.length,
-      selectedMembers: memberRows.map((r) => ({ id: r.id, displayName: r.display_name })),
+      selectedMembers: memberRows.map((r: any) => ({ id: r.id, displayName: r.display_name })),
     };
 
-    let filters = '';
-
-    if (range && range !== 'all') {
-      const match = range.match(/^(\d+)d$/);
-      const days = match ? Number(match[1]) : 30;
-      params.push(`${days} days`);
-      filters += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at) >= (NOW() - $${params.length}::interval)`;
-    }
-    if (from) {
-      params.push(from);
-      filters += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at) >= ($${params.length}::date)::timestamptz`;
-    }
-    if (to) {
-      params.push(to);
-      filters += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at) < (($${params.length}::date) + INTERVAL '1 day')`;
-    }
-    if (source && source !== 'all') {
-      params.push(source);
-      filters += ` AND s.source = $${params.length}`;
-    }
-    if (model && model !== 'all') {
-      params.push(model);
-      filters += ` AND s.model = $${params.length}`;
+    // 2. Fetch sessions
+    const sessionConstraints: Parameters<typeof queryCol>[1] = [];
+    if (teamId) {
+      sessionConstraints.push({ type: 'where', field: 'team_id', op: '==', value: teamId });
+    } else if (targetMemberIds.length === 1) {
+      sessionConstraints.push({ type: 'where', field: 'member_id', op: '==', value: targetMemberIds[0] });
     }
 
-    // 2. Execute all independent aggregation queries in parallel
-    const totalsQuery = `SELECT
-        COALESCE(SUM(${EFF_IN}), 0)::bigint AS tokens_in,
-        COALESCE(SUM(${EFF_OUT}), 0)::bigint AS tokens_out,
-        COALESCE(SUM(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
-        COALESCE(SUM(s.tokens_cache_write), 0)::bigint AS tokens_cache_write,
-        COALESCE(SUM(${EFF_IN} + ${EFF_OUT}), 0)::bigint AS total_tokens,
-        COALESCE(SUM(s.api_cost), 0)::double precision AS total_cost,
-        COUNT(s.id)::int AS session_count,
-        COUNT(DISTINCT COALESCE(s.ended_at, s.started_at, s.synced_at)::date)::int AS active_days,
-        COALESCE(SUM(s.edits), 0)::int AS edits,
-        COALESCE(SUM(s.changed_lines), 0)::int AS changed_lines,
-        COALESCE(SUM(s.tool_calls), 0)::int AS tool_calls,
-        COALESCE(SUM(s.tool_errors), 0)::int AS tool_errors,
-        COALESCE(SUM(s.rework_loops), 0)::int AS rework_loops,
-        COUNT(CASE WHEN (${EFF_IN} + ${EFF_OUT}) > 5000000 OR s.tool_errors > 15 OR s.rework_loops > 5 THEN 1 END)::int AS runaway_count
-       FROM sync_sessions s
-       WHERE ${memberWhere} ${filters}`;
+    const rawSessions = await queryCol<any>('sync_sessions', sessionConstraints);
 
-    const projectsQuery = `SELECT
-        COALESCE(s.agent, 'default') AS project,
-        array_agg(DISTINCT s.source) AS sources,
-        array_agg(DISTINCT s.model) AS models,
-        COUNT(s.id)::int AS sessions,
-        COALESCE(SUM(${EFF_IN}), 0)::bigint AS tokens_in,
-        COALESCE(SUM(${EFF_OUT}), 0)::bigint AS tokens_out,
-        COALESCE(SUM(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
-        COALESCE(SUM(${EFF_IN} + ${EFF_OUT}), 0)::bigint AS total_tokens,
-        COALESCE(SUM(s.api_cost), 0)::double precision AS api_cost,
-        COALESCE(SUM(s.edits), 0)::int AS edits,
-        COALESCE(SUM(s.changed_lines), 0)::int AS changed_lines,
-        MAX(COALESCE(s.ended_at, s.started_at, s.synced_at)) AS last_active
-       FROM sync_sessions s
-       WHERE ${memberWhere} ${filters}
-       GROUP BY s.agent
-       ORDER BY total_tokens DESC`;
+    // Apply filtering
+    const memberIdSet = new Set(targetMemberIds);
+    const sessions = rawSessions.filter((s) => {
+      if (!isAll && !memberIdSet.has(s.member_id)) return false;
+      if (source && source !== 'all' && s.source !== source) return false;
+      if (model && model !== 'all' && s.model !== model) return false;
+      const ts = getSessionTimestamp(s);
+      return isWithinRange(ts, range, from, to);
+    });
 
-    const toolsQuery = `SELECT
-        COALESCE(s.source, 'cursor') AS source,
-        COUNT(s.id)::int AS sessions,
-        COALESCE(SUM(${EFF_IN}), 0)::bigint AS tokens_in,
-        COALESCE(SUM(${EFF_OUT}), 0)::bigint AS tokens_out,
-        COALESCE(SUM(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
-        COALESCE(SUM(${EFF_IN} + ${EFF_OUT}), 0)::bigint AS total_tokens,
-        COALESCE(SUM(s.api_cost), 0)::double precision AS api_cost
-       FROM sync_sessions s
-       WHERE ${memberWhere} ${filters}
-       GROUP BY s.source
-       ORDER BY total_tokens DESC`;
+    // 3. Aggregate totals and multi-dimensional metrics
+    let tokensIn = 0;
+    let tokensOut = 0;
+    let tokensCacheRead = 0;
+    let tokensCacheWrite = 0;
+    let totalCost = 0;
+    let edits = 0;
+    let changedLines = 0;
+    let toolCalls = 0;
+    let toolErrors = 0;
+    let reworkLoops = 0;
+    let runawayCount = 0;
+    const activeDaysSet = new Set<string>();
 
-    const modelsQuery = `SELECT
-        COALESCE(s.model, 'default') AS model,
-        COALESCE(s.source, 'cursor') AS source,
-        COUNT(s.id)::int AS sessions,
-        COALESCE(SUM(${EFF_IN}), 0)::bigint AS tokens_in,
-        COALESCE(SUM(${EFF_OUT}), 0)::bigint AS tokens_out,
-        COALESCE(SUM(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
-        COALESCE(SUM(${EFF_IN} + ${EFF_OUT}), 0)::bigint AS total_tokens,
-        COALESCE(SUM(s.api_cost), 0)::double precision AS api_cost
-       FROM sync_sessions s
-       WHERE ${memberWhere} ${filters}
-       GROUP BY s.model, s.source
-       ORDER BY total_tokens DESC`;
+    const projectsMap = new Map<string, any>();
+    const toolsMap = new Map<string, any>();
+    const modelsMap = new Map<string, any>();
+    const timelineMap = new Map<string, any>();
+    const memberBreakdownMap = new Map<string, any>();
 
-    const sessionsQuery = `SELECT
-        s.id AS doc_id,
-        s.session_id,
-        s.member_id,
-        COALESCE(m.display_name, 'Unknown Member') AS member_name,
-        COALESCE(s.agent, 'default') AS project,
-        COALESCE(s.source, 'cursor') AS source,
-        COALESCE(s.model, 'default') AS model,
-        (${EFF_IN})::bigint AS tokens_in,
-        (${EFF_OUT})::bigint AS tokens_out,
-        COALESCE(s.tokens_cache_read, 0)::bigint AS tokens_cache_read,
-        COALESCE(s.tokens_cache_write, 0)::bigint AS tokens_cache_write,
-        (${EFF_IN} + ${EFF_OUT})::bigint AS total_tokens,
-        COALESCE(s.api_cost, 0)::double precision AS api_cost,
-        COALESCE(s.edits, 0)::int AS edits,
-        COALESCE(s.changed_lines, 0)::int AS changed_lines,
-        COALESCE(s.tool_calls, 0)::int AS tool_calls,
-        COALESCE(s.tool_errors, 0)::int AS tool_errors,
-        COALESCE(s.rework_loops, 0)::int AS rework_loops,
-        CASE WHEN (${EFF_IN} + ${EFF_OUT}) > 5000000 OR s.tool_errors > 15 OR s.rework_loops > 5 THEN true ELSE false END AS is_runaway,
-        s.started_at,
-        s.ended_at,
-        s.synced_at
-       FROM sync_sessions s
-       LEFT JOIN members m ON m.id = s.member_id
-       WHERE ${memberWhere} ${filters}
-       ORDER BY total_tokens DESC, api_cost DESC
-       LIMIT 25`;
+    for (const s of sessions) {
+      const tin = effIn(s);
+      const tout = effOut(s);
+      const totTok = tin + tout;
+      const cost = Number(s.api_cost || 0);
+      const cr = Number(s.tokens_cache_read || 0);
+      const cw = Number(s.tokens_cache_write || 0);
+      const ed = Number(s.edits || 0);
+      const cl = Number(s.changed_lines || 0);
+      const tc = Number(s.tool_calls || 0);
+      const te = Number(s.tool_errors || 0);
+      const rl = Number(s.rework_loops || 0);
+      const isRunaway = totTok > 5000000 || te > 15 || rl > 5;
+      const ts = getSessionTimestamp(s);
+      const dateStr = ts ? String(ts).slice(0, 10) : '';
 
-    const filesQuery = `
-      WITH heavy_sessions AS (
-        SELECT s.id
-        FROM sync_sessions s
-        WHERE ${memberWhere} ${filters}
-        ORDER BY (${EFF_IN} + ${EFF_OUT}) DESC
-        LIMIT 100
-      )
-      SELECT
-        f.path,
-        COALESCE(SUM(f.edits), 0)::int AS edits,
-        COALESCE(SUM(f.additions), 0)::int AS additions,
-        COALESCE(SUM(f.deletions), 0)::int AS deletions,
-        COALESCE(SUM(f.additions + f.deletions), 0)::int AS changed_lines
-      FROM sync_session_files f
-      JOIN heavy_sessions hs ON hs.id = f.sync_session_id
-      GROUP BY f.path
-      ORDER BY changed_lines DESC, edits DESC
-      LIMIT 20`;
+      tokensIn += tin;
+      tokensOut += tout;
+      tokensCacheRead += cr;
+      tokensCacheWrite += cw;
+      totalCost += cost;
+      edits += ed;
+      changedLines += cl;
+      toolCalls += tc;
+      toolErrors += te;
+      reworkLoops += rl;
+      if (isRunaway) runawayCount += 1;
+      if (dateStr) activeDaysSet.add(dateStr);
 
-    const timelineQuery = `SELECT
-        COALESCE(s.ended_at, s.started_at, s.synced_at)::date::text AS day,
-        COUNT(s.id)::int AS sessions,
-        COALESCE(SUM(${EFF_IN}), 0)::bigint AS tokens_in,
-        COALESCE(SUM(${EFF_OUT}), 0)::bigint AS tokens_out,
-        COALESCE(SUM(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
-        COALESCE(SUM(${EFF_IN} + ${EFF_OUT}), 0)::bigint AS total_tokens,
-        COALESCE(SUM(s.api_cost), 0)::double precision AS api_cost,
-        COALESCE(SUM(s.edits), 0)::int AS edits
-       FROM sync_sessions s
-       WHERE ${memberWhere} ${filters}
-       GROUP BY day
-       ORDER BY day ASC`;
+      const proj = s.agent || 'default';
+      const src = s.source || 'cursor';
+      const mod = s.model || 'default';
+      const mid = s.member_id;
 
-    const memberBreakdownQuery = isMulti
-      ? `SELECT
-          s.member_id,
-          COALESCE(m.display_name, 'Unknown Member') AS display_name,
-          COUNT(s.id)::int AS sessions,
-          COALESCE(SUM(${EFF_IN}), 0)::bigint AS tokens_in,
-          COALESCE(SUM(${EFF_OUT}), 0)::bigint AS tokens_out,
-          COALESCE(SUM(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
-          COALESCE(SUM(${EFF_IN} + ${EFF_OUT}), 0)::bigint AS total_tokens,
-          COALESCE(SUM(s.api_cost), 0)::double precision AS api_cost,
-          COALESCE(SUM(s.edits), 0)::int AS edits,
-          COALESCE(SUM(s.changed_lines), 0)::int AS changed_lines,
-          COALESCE(SUM(s.tool_calls), 0)::int AS tool_calls,
-          COALESCE(SUM(s.tool_errors), 0)::int AS tool_errors,
-          COALESCE(SUM(s.rework_loops), 0)::int AS rework_loops
-         FROM sync_sessions s
-         LEFT JOIN members m ON m.id = s.member_id
-         WHERE ${memberWhere} ${filters}
-         GROUP BY s.member_id, m.display_name
-         ORDER BY total_tokens DESC`
-      : null;
+      // Project breakdown
+      if (!projectsMap.has(proj)) {
+        projectsMap.set(proj, {
+          project: proj,
+          sources: new Set<string>(),
+          models: new Set<string>(),
+          sessions: 0,
+          tokens_in: 0,
+          tokens_out: 0,
+          tokens_cache_read: 0,
+          total_tokens: 0,
+          api_cost: 0,
+          edits: 0,
+          changed_lines: 0,
+          last_active: ts,
+        });
+      }
+      const pr = projectsMap.get(proj)!;
+      pr.sources.add(src);
+      pr.models.add(mod);
+      pr.sessions += 1;
+      pr.tokens_in += tin;
+      pr.tokens_out += tout;
+      pr.tokens_cache_read += cr;
+      pr.total_tokens += totTok;
+      pr.api_cost += cost;
+      pr.edits += ed;
+      pr.changed_lines += cl;
+      if (ts && (!pr.last_active || ts > pr.last_active)) pr.last_active = ts;
 
-    const [
-      totalsRes,
-      projectsRes,
-      toolsRes,
-      modelsRes,
-      sessionsRes,
-      filesRes,
-      timelineRes,
-      memberBreakdownRes,
-    ] = await Promise.all([
-      query(totalsQuery, params),
-      query(projectsQuery, params),
-      query(toolsQuery, params),
-      query(modelsQuery, params),
-      query(sessionsQuery, params),
-      query(filesQuery, params),
-      query(timelineQuery, params),
-      memberBreakdownQuery ? query(memberBreakdownQuery, params) : Promise.resolve({ rows: [] }),
-    ]);
+      // Tool breakdown
+      if (!toolsMap.has(src)) {
+        toolsMap.set(src, {
+          source: src,
+          sessions: 0,
+          tokens_in: 0,
+          tokens_out: 0,
+          tokens_cache_read: 0,
+          total_tokens: 0,
+          api_cost: 0,
+        });
+      }
+      const tr = toolsMap.get(src)!;
+      tr.sessions += 1;
+      tr.tokens_in += tin;
+      tr.tokens_out += tout;
+      tr.tokens_cache_read += cr;
+      tr.total_tokens += totTok;
+      tr.api_cost += cost;
 
-    const totals = totalsRes.rows[0] || {};
-    const totalMemberTokens = Number(totals.total_tokens || 0);
+      // Model breakdown
+      const modelKey = `${mod}::${src}`;
+      if (!modelsMap.has(modelKey)) {
+        modelsMap.set(modelKey, {
+          model: mod,
+          source: src,
+          sessions: 0,
+          tokens_in: 0,
+          tokens_out: 0,
+          tokens_cache_read: 0,
+          total_tokens: 0,
+          api_cost: 0,
+        });
+      }
+      const mr = modelsMap.get(modelKey)!;
+      mr.sessions += 1;
+      mr.tokens_in += tin;
+      mr.tokens_out += tout;
+      mr.tokens_cache_read += cr;
+      mr.total_tokens += totTok;
+      mr.api_cost += cost;
+
+      // Timeline breakdown
+      if (dateStr) {
+        if (!timelineMap.has(dateStr)) {
+          timelineMap.set(dateStr, {
+            day: dateStr,
+            sessions: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            tokens_cache_read: 0,
+            total_tokens: 0,
+            api_cost: 0,
+            edits: 0,
+          });
+        }
+        const dlr = timelineMap.get(dateStr)!;
+        dlr.sessions += 1;
+        dlr.tokens_in += tin;
+        dlr.tokens_out += tout;
+        dlr.tokens_cache_read += cr;
+        dlr.total_tokens += totTok;
+        dlr.api_cost += cost;
+        dlr.edits += ed;
+      }
+
+      // Member comparison breakdown
+      if (isMulti && mid) {
+        if (!memberBreakdownMap.has(mid)) {
+          const mem = memberMap.get(mid);
+          memberBreakdownMap.set(mid, {
+            member_id: mid,
+            display_name: mem?.display_name || 'Unknown Member',
+            sessions: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            tokens_cache_read: 0,
+            total_tokens: 0,
+            api_cost: 0,
+            edits: 0,
+            changed_lines: 0,
+            tool_calls: 0,
+            tool_errors: 0,
+            rework_loops: 0,
+          });
+        }
+        const mbr = memberBreakdownMap.get(mid)!;
+        mbr.sessions += 1;
+        mbr.tokens_in += tin;
+        mbr.tokens_out += tout;
+        mbr.tokens_cache_read += cr;
+        mbr.total_tokens += totTok;
+        mbr.api_cost += cost;
+        mbr.edits += ed;
+        mbr.changed_lines += cl;
+        mbr.tool_calls += tc;
+        mbr.tool_errors += te;
+        mbr.rework_loops += rl;
+      }
+    }
+
+    const totalMemberTokens = tokensIn + tokensOut;
+
+    // 4. Fetch heavy session files
+    const sortedHeavySessions = [...sessions]
+      .sort((a, b) => (effIn(b) + effOut(b)) - (effIn(a) + effOut(a)))
+      .slice(0, 100);
+
+    const heavySessionIds = sortedHeavySessions.map((s) => s.id).filter(Boolean);
+    let allSessionFiles: any[] = [];
+    if (heavySessionIds.length) {
+      for (const chunk of chunkArray(heavySessionIds, 30)) {
+        const files = await queryCol('sync_session_files', [
+          { type: 'where', field: 'sync_session_id', op: 'in', value: chunk },
+        ]);
+        allSessionFiles.push(...files);
+      }
+    }
+
+    const filesMap = new Map<string, any>();
+    for (const f of allSessionFiles) {
+      const p = f.path;
+      if (!filesMap.has(p)) {
+        filesMap.set(p, { path: p, edits: 0, additions: 0, deletions: 0, changed_lines: 0 });
+      }
+      const fe = filesMap.get(p)!;
+      fe.edits += Number(f.edits || 0);
+      fe.additions += Number(f.additions || 0);
+      fe.deletions += Number(f.deletions || 0);
+      fe.changed_lines += Number(f.additions || 0) + Number(f.deletions || 0);
+    }
+
+    const topFiles = Array.from(filesMap.values())
+      .sort((a, b) => b.changed_lines - a.changed_lines || b.edits - a.edits)
+      .slice(0, 20);
+
+    // Top sessions
+    const topSessions = sortedHeavySessions.slice(0, 25).map((s) => {
+      const mem = memberMap.get(s.member_id);
+      const tin = effIn(s);
+      const tout = effOut(s);
+      const totTok = tin + tout;
+      const te = Number(s.tool_errors || 0);
+      const rl = Number(s.rework_loops || 0);
+      const isRunaway = totTok > 5000000 || te > 15 || rl > 5;
+      return {
+        docId: s.id,
+        sessionId: s.session_id,
+        memberId: s.member_id,
+        memberName: mem?.display_name || 'Unknown Member',
+        project: s.agent || 'default',
+        source: s.source || 'cursor',
+        model: s.model || 'default',
+        tokensIn: tin,
+        tokensOut: tout,
+        tokensCacheRead: Number(s.tokens_cache_read || 0),
+        tokensCacheWrite: Number(s.tokens_cache_write || 0),
+        totalTokens: totTok,
+        apiCost: Number(s.api_cost || 0),
+        edits: Number(s.edits || 0),
+        changedLines: Number(s.changed_lines || 0),
+        toolCalls: Number(s.tool_calls || 0),
+        toolErrors: te,
+        reworkLoops: rl,
+        isRunaway,
+        startedAt: s.started_at,
+        endedAt: s.ended_at,
+        syncedAt: s.synced_at,
+      };
+    });
 
     return {
       member,
       totals: {
         totalTokens: totalMemberTokens,
-        tokensIn: Number(totals.tokens_in || 0),
-        tokensOut: Number(totals.tokens_out || 0),
-        tokensCacheRead: Number(totals.tokens_cache_read || 0),
-        tokensCacheWrite: Number(totals.tokens_cache_write || 0),
-        totalCost: Number(totals.total_cost || 0),
-        sessionCount: Number(totals.session_count || 0),
-        activeDays: Number(totals.active_days || 0),
-        edits: Number(totals.edits || 0),
-        changedLines: Number(totals.changed_lines || 0),
-        toolCalls: Number(totals.tool_calls || 0),
-        toolErrors: Number(totals.tool_errors || 0),
-        reworkLoops: Number(totals.rework_loops || 0),
-        runawaySessionsCount: Number(totals.runaway_count || 0),
-        avgTokensPerSession: Number(totals.session_count) > 0 ? Math.round(totalMemberTokens / Number(totals.session_count)) : 0,
-        avgCostPerSession: Number(totals.session_count) > 0 ? Number(totals.total_cost || 0) / Number(totals.session_count) : 0,
+        tokensIn,
+        tokensOut,
+        tokensCacheRead,
+        tokensCacheWrite,
+        totalCost,
+        sessionCount: sessions.length,
+        activeDays: activeDaysSet.size,
+        edits,
+        changedLines,
+        toolCalls,
+        toolErrors,
+        reworkLoops,
+        runawaySessionsCount: runawayCount,
+        avgTokensPerSession: sessions.length > 0 ? Math.round(totalMemberTokens / sessions.length) : 0,
+        avgCostPerSession: sessions.length > 0 ? totalCost / sessions.length : 0,
       },
-      memberComparisons: memberBreakdownRes.rows.map((mb: any) => ({
-        memberId: mb.member_id,
-        displayName: mb.display_name,
-        sessions: Number(mb.sessions),
-        tokensIn: Number(mb.tokens_in),
-        tokensOut: Number(mb.tokens_out),
-        tokensCacheRead: Number(mb.tokens_cache_read),
-        totalTokens: Number(mb.total_tokens),
-        apiCost: Number(mb.api_cost),
-        edits: Number(mb.edits),
-        changedLines: Number(mb.changed_lines),
-        toolCalls: Number(mb.tool_calls),
-        toolErrors: Number(mb.tool_errors),
-        reworkLoops: Number(mb.rework_loops),
-        percentage: totalMemberTokens > 0 ? (Number(mb.total_tokens) / totalMemberTokens) * 100 : 0,
-      })),
-      projects: projectsRes.rows.map((p: any) => ({
-        project: p.project,
-        sources: p.sources || [],
-        models: p.models || [],
-        sessions: Number(p.sessions),
-        tokensIn: Number(p.tokens_in),
-        tokensOut: Number(p.tokens_out),
-        tokensCacheRead: Number(p.tokens_cache_read),
-        totalTokens: Number(p.total_tokens),
-        apiCost: Number(p.api_cost),
-        edits: Number(p.edits),
-        changedLines: Number(p.changed_lines),
-        lastActive: p.last_active,
-        percentage: totalMemberTokens > 0 ? (Number(p.total_tokens) / totalMemberTokens) * 100 : 0,
-      })),
-      tools: toolsRes.rows.map((t: any) => ({
-        source: t.source,
-        sessions: Number(t.sessions),
-        tokensIn: Number(t.tokens_in),
-        tokensOut: Number(t.tokens_out),
-        tokensCacheRead: Number(t.tokens_cache_read),
-        totalTokens: Number(t.total_tokens),
-        apiCost: Number(t.api_cost),
-        percentage: totalMemberTokens > 0 ? (Number(t.total_tokens) / totalMemberTokens) * 100 : 0,
-      })),
-      models: modelsRes.rows.map((m: any) => {
-        const tin = Number(m.tokens_in);
-        const cr = Number(m.tokens_cache_read);
-        const denom = tin + cr;
-        const cacheHitRate = denom > 0 ? (cr / denom) * 100 : 0;
-        return {
-          model: m.model,
-          source: m.source,
-          sessions: Number(m.sessions),
-          tokensIn: tin,
-          tokensOut: Number(m.tokens_out),
-          tokensCacheRead: cr,
-          totalTokens: Number(m.total_tokens),
-          apiCost: Number(m.api_cost),
-          cacheHitRate,
-          percentage: totalMemberTokens > 0 ? (Number(m.total_tokens) / totalMemberTokens) * 100 : 0,
-        };
-      }),
-      topSessions: sessionsRes.rows.map((s: any) => ({
-        docId: s.doc_id,
-        sessionId: s.session_id,
-        memberId: s.member_id,
-        memberName: s.member_name,
-        project: s.project,
-        source: s.source,
-        model: s.model,
-        tokensIn: Number(s.tokens_in),
-        tokensOut: Number(s.tokens_out),
-        tokensCacheRead: Number(s.tokens_cache_read),
-        tokensCacheWrite: Number(s.tokens_cache_write),
-        totalTokens: Number(s.total_tokens),
-        apiCost: Number(s.api_cost),
-        edits: Number(s.edits),
-        changedLines: Number(s.changed_lines),
-        toolCalls: Number(s.tool_calls),
-        toolErrors: Number(s.tool_errors),
-        reworkLoops: Number(s.rework_loops),
-        isRunaway: Boolean(s.is_runaway),
-        startedAt: s.started_at,
-        endedAt: s.ended_at,
-        syncedAt: s.synced_at,
-      })),
-      topFiles: filesRes.rows.map((f: any) => ({
-        path: f.path,
-        edits: Number(f.edits),
-        additions: Number(f.additions),
-        deletions: Number(f.deletions),
-        changedLines: Number(f.changed_lines),
-      })),
-      dailyTimeline: timelineRes.rows.map((d: any) => ({
-        day: d.day,
-        sessions: Number(d.sessions),
-        tokensIn: Number(d.tokens_in),
-        tokensOut: Number(d.tokens_out),
-        tokensCacheRead: Number(d.tokens_cache_read),
-        totalTokens: Number(d.total_tokens),
-        apiCost: Number(d.api_cost),
-        edits: Number(d.edits),
-      })),
+      memberComparisons: Array.from(memberBreakdownMap.values())
+        .map((mb) => ({
+          ...mb,
+          percentage: totalMemberTokens > 0 ? (mb.total_tokens / totalMemberTokens) * 100 : 0,
+        }))
+        .sort((a, b) => b.total_tokens - a.total_tokens),
+      projects: Array.from(projectsMap.values())
+        .map((p) => ({
+          project: p.project,
+          sources: Array.from(p.sources),
+          models: Array.from(p.models),
+          sessions: p.sessions,
+          tokensIn: p.tokens_in,
+          tokensOut: p.tokens_out,
+          tokensCacheRead: p.tokens_cache_read,
+          totalTokens: p.total_tokens,
+          apiCost: p.api_cost,
+          edits: p.edits,
+          changedLines: p.changed_lines,
+          lastActive: p.last_active,
+          percentage: totalMemberTokens > 0 ? (p.total_tokens / totalMemberTokens) * 100 : 0,
+        }))
+        .sort((a, b) => b.totalTokens - a.totalTokens),
+      tools: Array.from(toolsMap.values())
+        .map((t) => ({
+          source: t.source,
+          sessions: t.sessions,
+          tokensIn: t.tokens_in,
+          tokensOut: t.tokens_out,
+          tokensCacheRead: t.tokens_cache_read,
+          totalTokens: t.total_tokens,
+          apiCost: t.api_cost,
+          percentage: totalMemberTokens > 0 ? (t.total_tokens / totalMemberTokens) * 100 : 0,
+        }))
+        .sort((a, b) => b.totalTokens - a.totalTokens),
+      models: Array.from(modelsMap.values())
+        .map((m) => {
+          const tin = m.tokens_in;
+          const cr = m.tokens_cache_read;
+          const denom = tin + cr;
+          const cacheHitRate = denom > 0 ? (cr / denom) * 100 : 0;
+          return {
+            model: m.model,
+            source: m.source,
+            sessions: m.sessions,
+            tokensIn: tin,
+            tokensOut: m.tokens_out,
+            tokensCacheRead: cr,
+            totalTokens: m.total_tokens,
+            apiCost: m.api_cost,
+            cacheHitRate,
+            percentage: totalMemberTokens > 0 ? (m.total_tokens / totalMemberTokens) * 100 : 0,
+          };
+        })
+        .sort((a, b) => b.totalTokens - a.totalTokens),
+      topSessions,
+      topFiles,
+      dailyTimeline: Array.from(timelineMap.values())
+        .map((d) => ({
+          day: d.day,
+          sessions: d.sessions,
+          tokensIn: d.tokens_in,
+          tokensOut: d.tokens_out,
+          tokensCacheRead: d.tokens_cache_read,
+          totalTokens: d.total_tokens,
+          apiCost: d.api_cost,
+          edits: d.edits,
+        }))
+        .sort((a, b) => a.day.localeCompare(b.day)),
     };
   });
 }
-
-
