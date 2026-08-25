@@ -137,16 +137,49 @@ export function col(name: string): CollectionReference<DocumentData> {
 // ── Read helpers ──────────────────────────────────────────────────────────────
 
 /** Get a single document by its ID. Returns null if not found. */
+import { statsCache } from './cache';
+import {
+  localGetDoc,
+  localSetDoc,
+  localDeleteDoc,
+  localQueryCol,
+  localBatchWrite,
+} from './local-store';
+
+function isQuotaOrOfflineError(err: any): boolean {
+  if (!err) return false;
+  const msg = String(err.message || err.details || err || '');
+  const code = err.code;
+  return (
+    code === 8 ||
+    code === 14 ||
+    code === 'RESOURCE_EXHAUSTED' ||
+    code === 'UNAVAILABLE' ||
+    msg.includes('RESOURCE_EXHAUSTED') ||
+    msg.includes('Quota exceeded') ||
+    msg.includes('unavailable') ||
+    msg.includes('Could not load the default credentials')
+  );
+}
+
 export async function getDocById(
   collection: string,
   id: string,
 ): Promise<DocumentData | null> {
-  const snap = await getDb().collection(collection).doc(id).get();
-  if (!snap.exists) return null;
-  return { id: snap.id, ...snap.data() };
+  try {
+    const snap = await getDb().collection(collection).doc(id).get();
+    if (!snap.exists) return null;
+    const doc = { id: snap.id, ...snap.data() };
+    localSetDoc(collection, id, doc, true);
+    return doc;
+  } catch (err: any) {
+    if (isQuotaOrOfflineError(err)) {
+      console.warn(`[firestore-fallback] Serving getDocById('${collection}', '${id}') from local snapshot store.`);
+      return localGetDoc(collection, id);
+    }
+    throw err;
+  }
 }
-
-import { statsCache } from './cache';
 
 /** Query a collection with optional where/orderBy/limit constraints. */
 export async function queryCol<T = DocumentData>(
@@ -159,16 +192,28 @@ export async function queryCol<T = DocumentData>(
     | { type: 'startAfter'; value: unknown }
   > = [],
 ): Promise<(T & { id: string })[]> {
-  let q: Query<DocumentData> = getDb().collection(collection);
-  for (const c of constraints) {
-    if (c.type === 'where') q = q.where(c.field, c.op, c.value);
-    else if (c.type === 'orderBy') q = q.orderBy(c.field, c.direction ?? 'asc');
-    else if (c.type === 'limit') q = q.limit(c.n);
-    else if (c.type === 'limitToLast') q = q.limitToLast(c.n);
-    else if (c.type === 'startAfter') q = (q as any).startAfter(c.value);
+  try {
+    let q: Query<DocumentData> = getDb().collection(collection);
+    for (const c of constraints) {
+      if (c.type === 'where') q = q.where(c.field, c.op, c.value);
+      else if (c.type === 'orderBy') q = q.orderBy(c.field, c.direction ?? 'asc');
+      else if (c.type === 'limit') q = q.limit(c.n);
+      else if (c.type === 'limitToLast') q = q.limitToLast(c.n);
+      else if (c.type === 'startAfter') q = (q as any).startAfter(c.value);
+    }
+    const snap = await q.get();
+    const docs = snap.docs.map((d) => ({ id: d.id, ...d.data() } as T & { id: string }));
+    for (const doc of docs) {
+      localSetDoc(collection, doc.id, doc, true);
+    }
+    return docs;
+  } catch (err: any) {
+    if (isQuotaOrOfflineError(err)) {
+      console.warn(`[firestore-fallback] Serving queryCol('${collection}') from local snapshot store.`);
+      return localQueryCol<T>(collection, constraints as any);
+    }
+    throw err;
   }
-  const snap = await q.get();
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() } as T & { id: string }));
 }
 
 /** Query a collection with automatic in-memory TTL caching to save Firestore reads. */
@@ -190,10 +235,19 @@ export async function setDocById(
   data: object,
   merge = false,
 ): Promise<void> {
-  await getDb().collection(collection).doc(id).set(
-    { ...data, _updatedAt: FieldValue.serverTimestamp() },
-    merge ? { merge: true } : {},
-  );
+  localSetDoc(collection, id, data, merge);
+  try {
+    await getDb().collection(collection).doc(id).set(
+      { ...data, _updatedAt: FieldValue.serverTimestamp() },
+      merge ? { merge: true } : {},
+    );
+  } catch (err: any) {
+    if (isQuotaOrOfflineError(err)) {
+      console.warn(`[firestore-fallback] Stored setDocById('${collection}', '${id}') locally.`);
+      return;
+    }
+    throw err;
+  }
 }
 
 /** Add a new document with an auto-generated ID. Returns the new doc ID. */
@@ -201,16 +255,35 @@ export async function addDocToCol(
   collection: string,
   data: object,
 ): Promise<string> {
-  const ref = await getDb().collection(collection).add({
-    ...data,
-    _createdAt: FieldValue.serverTimestamp(),
-  });
-  return ref.id;
+  const generatedId = newUuid();
+  localSetDoc(collection, generatedId, data);
+  try {
+    const ref = await getDb().collection(collection).add({
+      ...data,
+      _createdAt: FieldValue.serverTimestamp(),
+    });
+    return ref.id;
+  } catch (err: any) {
+    if (isQuotaOrOfflineError(err)) {
+      console.warn(`[firestore-fallback] Stored addDocToCol('${collection}') locally with ID '${generatedId}'.`);
+      return generatedId;
+    }
+    throw err;
+  }
 }
 
 /** Delete a document by ID. */
 export async function deleteDocById(collection: string, id: string): Promise<void> {
-  await getDb().collection(collection).doc(id).delete();
+  localDeleteDoc(collection, id);
+  try {
+    await getDb().collection(collection).doc(id).delete();
+  } catch (err: any) {
+    if (isQuotaOrOfflineError(err)) {
+      console.warn(`[firestore-fallback] Deleted doc '${id}' locally.`);
+      return;
+    }
+    throw err;
+  }
 }
 
 /** Delete all documents matching constraints (fetches then deletes in batch). */
@@ -220,11 +293,22 @@ export async function deleteWhere(
 ): Promise<number> {
   const docs = await queryCol<{ id: string }>(collection, constraints);
   if (!docs.length) return 0;
-  const batch = getDb().batch();
   for (const d of docs) {
-    batch.delete(getDb().collection(collection).doc(d.id));
+    localDeleteDoc(collection, d.id);
   }
-  await batch.commit();
+  try {
+    const batch = getDb().batch();
+    for (const d of docs) {
+      batch.delete(getDb().collection(collection).doc(d.id));
+    }
+    await batch.commit();
+  } catch (err: any) {
+    if (isQuotaOrOfflineError(err)) {
+      console.warn(`[firestore-fallback] Deleted ${docs.length} docs from '${collection}' locally.`);
+      return docs.length;
+    }
+    throw err;
+  }
   return docs.length;
 }
 
@@ -236,20 +320,28 @@ export async function batchWrite(
   >,
 ): Promise<void> {
   if (!operations.length) return;
-  // Firestore limit is 500 ops per batch; chunk if larger
-  const chunkSize = 450;
-  for (let i = 0; i < operations.length; i += chunkSize) {
-    const chunk = operations.slice(i, i + chunkSize);
-    const batch: WriteBatch = getDb().batch();
-    for (const op of chunk) {
-      const ref = getDb().collection(op.col).doc(op.id);
-      if (op.type === 'set') {
-        batch.set(ref, { ...op.data, _updatedAt: FieldValue.serverTimestamp() }, op.merge ? { merge: true } : {});
-      } else {
-        batch.delete(ref);
+  localBatchWrite(operations);
+  try {
+    const chunkSize = 450;
+    for (let i = 0; i < operations.length; i += chunkSize) {
+      const chunk = operations.slice(i, i + chunkSize);
+      const batch: WriteBatch = getDb().batch();
+      for (const op of chunk) {
+        const ref = getDb().collection(op.col).doc(op.id);
+        if (op.type === 'set') {
+          batch.set(ref, { ...op.data, _updatedAt: FieldValue.serverTimestamp() }, op.merge ? { merge: true } : {});
+        } else {
+          batch.delete(ref);
+        }
       }
+      await batch.commit();
     }
-    await batch.commit();
+  } catch (err: any) {
+    if (isQuotaOrOfflineError(err)) {
+      console.warn(`[firestore-fallback] Applied ${operations.length} batch operations locally.`);
+      return;
+    }
+    throw err;
   }
 }
 
