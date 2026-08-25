@@ -24,6 +24,18 @@ import { firebaseProjectId, firebaseServiceAccount } from './env';
 
 const globalForDb = globalThis as unknown as { _firestoreApp: App | undefined };
 
+function normalizePrivateKey(key: string): string {
+  let cleaned = key.trim();
+  if ((cleaned.startsWith('"') && cleaned.endsWith('"')) || (cleaned.startsWith("'") && cleaned.endsWith("'"))) {
+    cleaned = cleaned.slice(1, -1);
+  }
+  cleaned = cleaned.replace(/\\n/g, '\n').replace(/\\r/g, '');
+  if (!cleaned.includes('-----BEGIN PRIVATE KEY-----')) {
+    cleaned = `-----BEGIN PRIVATE KEY-----\n${cleaned}\n-----END PRIVATE KEY-----\n`;
+  }
+  return cleaned;
+}
+
 function getApp(): App {
   if (globalForDb._firestoreApp) return globalForDb._firestoreApp;
 
@@ -31,11 +43,38 @@ function getApp(): App {
   const serviceAccountStr = firebaseServiceAccount();
 
   let serviceAccount: any = null;
-  if (serviceAccountStr && !serviceAccountStr.startsWith('<') && serviceAccountStr.trim().startsWith('{')) {
-    try {
-      serviceAccount = JSON.parse(serviceAccountStr);
-    } catch {
-      console.warn('[firebase-admin] Failed to parse FIREBASE_SERVICE_ACCOUNT JSON. Trying local key files.');
+  if (serviceAccountStr && !serviceAccountStr.startsWith('<')) {
+    let str = serviceAccountStr.trim();
+    if ((str.startsWith('"') && str.endsWith('"')) || (str.startsWith("'") && str.endsWith("'"))) {
+      str = str.slice(1, -1);
+    }
+    if (!str.startsWith('{')) {
+      try {
+        const decoded = Buffer.from(str, 'base64').toString('utf8');
+        if (decoded.trim().startsWith('{')) {
+          str = decoded.trim();
+        }
+      } catch {}
+    }
+    if (str.startsWith('{')) {
+      try {
+        serviceAccount = JSON.parse(str);
+      } catch (e: any) {
+        console.warn('[firebase-admin] Failed to parse FIREBASE_SERVICE_ACCOUNT JSON:', e.message);
+      }
+    }
+  }
+
+  // Also support individual environment variables (FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY)
+  if (!serviceAccount) {
+    const clientEmail = process.env.FIREBASE_CLIENT_EMAIL || process.env.FIREBASE_ADMIN_CLIENT_EMAIL;
+    const privateKey = process.env.FIREBASE_PRIVATE_KEY || process.env.FIREBASE_ADMIN_PRIVATE_KEY;
+    if (clientEmail && privateKey) {
+      serviceAccount = {
+        project_id: projectId,
+        client_email: clientEmail,
+        private_key: privateKey,
+      };
     }
   }
 
@@ -84,7 +123,7 @@ function getApp(): App {
   }
 
   if (serviceAccount && typeof serviceAccount.private_key === 'string') {
-    serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+    serviceAccount.private_key = normalizePrivateKey(serviceAccount.private_key);
   }
 
   // Clean up any previously uncredentialed default apps (e.g. from hot reload)
