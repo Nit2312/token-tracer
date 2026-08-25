@@ -114,8 +114,16 @@ export async function buildTeamStats(
   const sortedIdsKey = isAllMembers ? 'all' : [...memberIdsArr].sort().join('_');
   const cacheKey = `team_stats_${teamId}_${from || ''}_${to || ''}_${sortedIdsKey}_${minTokens || ''}_${maxTokens || ''}_${source || ''}`;
   return statsCache.getOrSet(cacheKey, 90, async () => {
-    // 1. Members list (via team_members junction and cached members collection)
-    const [teamMemberDocs, allMembers, ingestDocs] = await Promise.all([
+    // 1. Fetch members list, pricing, and team sessions in parallel
+    const sessionConstraints: Parameters<typeof queryCol>[1] = [
+      { type: 'where', field: 'team_id', op: '==', value: teamId },
+    ];
+    if (memberIdsArr.length === 1) {
+      sessionConstraints.push({ type: 'where', field: 'member_id', op: '==', value: memberIdsArr[0] });
+    }
+    if (source && source !== 'all') sessionConstraints.push({ type: 'where', field: 'source', op: '==', value: source });
+
+    const [teamMemberDocs, allMembers, ingestDocs, allSessions, allPricing] = await Promise.all([
       getCachedCollection<{ member_id: string; role: string; created_at: string }>(
         'team_members',
         [{ type: 'where', field: 'team_id', op: '==', value: teamId }],
@@ -127,6 +135,8 @@ export async function buildTeamStats(
         [{ type: 'where', field: 'team_id', op: '==', value: teamId }],
         180,
       ),
+      queryCol<any>('sync_sessions', sessionConstraints),
+      getCachedCollection<any>('model_pricing', [], 300),
     ]);
 
     const memberById = new Map(allMembers.map((m: any) => [m.id, m]));
@@ -151,17 +161,6 @@ export async function buildTeamStats(
       })
       .filter(Boolean)
       .sort((a: any, b: any) => String(a.display_name).localeCompare(String(b.display_name)));
-
-    // 2. Fetch sessions for this team
-    const sessionConstraints: Parameters<typeof queryCol>[1] = [
-      { type: 'where', field: 'team_id', op: '==', value: teamId },
-    ];
-    if (memberIdsArr.length === 1) {
-      sessionConstraints.push({ type: 'where', field: 'member_id', op: '==', value: memberIdsArr[0] });
-    }
-    if (source && source !== 'all') sessionConstraints.push({ type: 'where', field: 'source', op: '==', value: source });
-
-    const allSessions = await queryCol<any>('sync_sessions', sessionConstraints);
 
     // Apply date/filter
     const sessions = allSessions.filter((s) =>
@@ -504,7 +503,6 @@ export async function buildTeamStats(
     .slice(0, 50);
 
   // 15. Model pricing (served from cached collection)
-  const allPricing = await getCachedCollection<any>('model_pricing', [], 300);
   const teamPricing = allPricing.filter((p) => p.team_id === teamId);
   const globalPricing = allPricing.filter((p) => !p.team_id);
   const modelPricing = [

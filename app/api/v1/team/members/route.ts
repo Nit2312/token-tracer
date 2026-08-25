@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthorizedTeamId, getSessionFromCookie } from '@/lib/auth';
 import { createMemberWithKey, createTeamUserWithMember, updateMember, deleteMember } from '@/lib/team/stats';
-import { queryCol, getDocById } from '@/lib/team/db';
+import { queryCol, getCachedCollection, getDocById } from '@/lib/team/db';
+import { statsCache } from '@/lib/team/cache';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,30 +20,37 @@ export async function GET(req: NextRequest) {
     }
 
     const session = getSessionFromCookie(req.headers.get('cookie'));
+    const cacheKey = `team_members_list_${teamId}_${session?.userId || 'anon'}_${session?.role || 'none'}`;
 
-    // Get team_members for this team
-    const teamMemberDocs = await queryCol<any>('team_members', [
-      { type: 'where', field: 'team_id', op: '==', value: teamId },
-    ]);
+    const result = await statsCache.getOrSet(cacheKey, 90, async () => {
+      // Get team_members for this team
+      const teamMemberDocs = await getCachedCollection<any>(
+        'team_members',
+        [{ type: 'where', field: 'team_id', op: '==', value: teamId }],
+        180,
+      );
 
-    let targetMemberIds = teamMemberDocs.map((tm: any) => tm.member_id).filter(Boolean);
-    if (session?.role === 'user' && session.memberId) {
-      targetMemberIds = targetMemberIds.filter((id: string) => id === session.memberId);
-    }
+      let targetMemberIds = teamMemberDocs.map((tm: any) => tm.member_id).filter(Boolean);
+      if (session?.role === 'user' && session.memberId) {
+        targetMemberIds = targetMemberIds.filter((id: string) => id === session.memberId);
+      }
 
-    if (targetMemberIds.length === 0) {
-      return NextResponse.json({ members: [] });
-    }
+      if (targetMemberIds.length === 0) {
+        return { members: [] };
+      }
 
-    const memberRoleMap = new Map(teamMemberDocs.map((tm: any) => [tm.member_id, tm.role]));
+      const memberRoleMap = new Map(teamMemberDocs.map((tm: any) => [tm.member_id, tm.role]));
 
-    // Fetch members, sync_sessions, ingest_events, member_keys in parallel filtered by team_id
-    const [memberDocs, sessionDocs, keyDocs, eventDocs] = await Promise.all([
-      Promise.all(targetMemberIds.map((id: string) => getDocById('members', id))),
-      queryCol<any>('sync_sessions', [{ type: 'where', field: 'team_id', op: '==', value: teamId }]),
-      queryCol<any>('member_keys', [{ type: 'where', field: 'team_id', op: '==', value: teamId }]),
-      queryCol<any>('ingest_events', [{ type: 'where', field: 'team_id', op: '==', value: teamId }]),
-    ]);
+      // Fetch all members, sync_sessions, ingest_events, member_keys in parallel
+      const [allMembers, sessionDocs, keyDocs, eventDocs] = await Promise.all([
+        getCachedCollection<any>('members', [], 300),
+        queryCol<any>('sync_sessions', [{ type: 'where', field: 'team_id', op: '==', value: teamId }]),
+        getCachedCollection<any>('member_keys', [{ type: 'where', field: 'team_id', op: '==', value: teamId }], 180),
+        getCachedCollection<any>('ingest_events', [{ type: 'where', field: 'team_id', op: '==', value: teamId }], 180),
+      ]);
+
+      const memberMap = new Map(allMembers.map((m: any) => [m.id, m]));
+      const memberDocs = targetMemberIds.map((id: string) => memberMap.get(id)).filter(Boolean);
 
     const sessionsByMember = new Map<string, any[]>();
     for (const s of sessionDocs) {
@@ -103,7 +111,10 @@ export async function GET(req: NextRequest) {
       })
       .sort((a, b) => String(a.display_name).localeCompare(String(b.display_name)));
 
-    return NextResponse.json({ members });
+      return { members };
+    });
+
+    return NextResponse.json(result);
   } catch (err) {
     console.error('[team/members GET error]', err);
     return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });

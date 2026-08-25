@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
-import { queryCol, setDocById, deleteDocById, newUuid } from '@/lib/team/db';
+import { queryCol, getCachedCollection, setDocById, deleteDocById, newUuid } from '@/lib/team/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -26,9 +26,9 @@ export async function GET(req: NextRequest) {
   if (!isAdmin(session)) return unauthorized();
 
   try {
-    const releases = await queryCol<any>('daemon_releases', [
+    const releases = await getCachedCollection<any>('daemon_releases', [
       { type: 'orderBy', field: 'released_at', direction: 'desc' },
-    ]);
+    ], 300);
     return NextResponse.json({ releases });
   } catch (err) {
     console.error('[releases GET error]', err);
