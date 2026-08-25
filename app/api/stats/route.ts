@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryCol, getDocById } from '@/lib/team/db';
+import { statsCache } from '@/lib/team/cache';
 
 export const dynamic = 'force-dynamic';
 
@@ -276,48 +277,54 @@ export async function GET(req: NextRequest) {
       if (w >= 0 && w < 7 && h >= 0 && h < 24) punch[w][h] += 1;
     }
 
-    // ── 5. Tools breakdown ────────────────────────────────────────────────────
-    const sessionDocIds = sessions.map((s) => s.id);
-    const toolCountsMap = new Map<string, number>();
+    // ── 5. Tools & Files breakdown (optimized: fetch only for top 20 heavy sessions) ────
+    const heavySessions = [...sessions]
+      .sort((a: any, b: any) => (effIn(b) + effOut(b) + Number(b.edits || 0) * 100) - (effIn(a) + effOut(a) + Number(a.edits || 0) * 100))
+      .slice(0, 20);
+    const heavyDocIds = heavySessions.map((s: any) => s.id).filter(Boolean);
 
-    // Chunk session ID queries for tools if needed
-    for (let i = 0; i < sessionDocIds.length; i += 30) {
-      const chunk = sessionDocIds.slice(i, i + 30);
-      if (!chunk.length) continue;
-      const toolDocs = await queryCol<{ tool_name: string; call_count: number }>('sync_session_tools', [
-        { type: 'where', field: 'sync_session_id', op: 'in', value: chunk },
-      ]);
-      for (const td of toolDocs) {
-        toolCountsMap.set(td.tool_name, (toolCountsMap.get(td.tool_name) || 0) + Number(td.call_count || 0));
+    let allToolDocs: any[] = [];
+    let allFileDocs: any[] = [];
+    if (heavyDocIds.length) {
+      for (let i = 0; i < heavyDocIds.length; i += 30) {
+        const chunk = heavyDocIds.slice(i, i + 30);
+        if (!chunk.length) continue;
+        const [toolDocs, fileDocs] = await Promise.all([
+          queryCol<{ tool_name: string; call_count: number }>('sync_session_tools', [
+            { type: 'where', field: 'sync_session_id', op: 'in', value: chunk },
+          ]),
+          queryCol<any>('sync_session_files', [
+            { type: 'where', field: 'sync_session_id', op: 'in', value: chunk },
+          ]),
+        ]);
+        allToolDocs.push(...toolDocs);
+        allFileDocs.push(...fileDocs);
       }
+    }
+
+    const toolCountsMap = new Map<string, number>();
+    for (const td of allToolDocs) {
+      toolCountsMap.set(td.tool_name, (toolCountsMap.get(td.tool_name) || 0) + Number(td.call_count || 0));
     }
     const topToolRows = [...toolCountsMap.entries()]
       .map(([name, count]) => ({ name, count }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 20);
 
-    // ── 6. Files breakdown ────────────────────────────────────────────────────
     const fileStatsMap = new Map<string, any>();
-    for (let i = 0; i < sessionDocIds.length; i += 30) {
-      const chunk = sessionDocIds.slice(i, i + 30);
-      if (!chunk.length) continue;
-      const fileDocs = await queryCol<any>('sync_session_files', [
-        { type: 'where', field: 'sync_session_id', op: 'in', value: chunk },
-      ]);
-      for (const fd of fileDocs) {
-        const prev = fileStatsMap.get(fd.path) || {
-          path: fd.path,
-          edits: 0,
-          additions: 0,
-          deletions: 0,
-          sessions: 0,
-        };
-        prev.edits += Number(fd.edits || 0);
-        prev.additions += Number(fd.additions || 0);
-        prev.deletions += Number(fd.deletions || 0);
-        prev.sessions += 1;
-        fileStatsMap.set(fd.path, prev);
-      }
+    for (const fd of allFileDocs) {
+      const prev = fileStatsMap.get(fd.path) || {
+        path: fd.path,
+        edits: 0,
+        additions: 0,
+        deletions: 0,
+        sessions: 0,
+      };
+      prev.edits += Number(fd.edits || 0);
+      prev.additions += Number(fd.additions || 0);
+      prev.deletions += Number(fd.deletions || 0);
+      prev.sessions += 1;
+      fileStatsMap.set(fd.path, prev);
     }
     const topFileRows = [...fileStatsMap.values()]
       .sort((a, b) => b.edits - a.edits || b.additions + b.deletions - (a.additions + a.deletions))

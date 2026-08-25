@@ -146,6 +146,8 @@ export async function getDocById(
   return { id: snap.id, ...snap.data() };
 }
 
+import { statsCache } from './cache';
+
 /** Query a collection with optional where/orderBy/limit constraints. */
 export async function queryCol<T = DocumentData>(
   collection: string,
@@ -167,6 +169,16 @@ export async function queryCol<T = DocumentData>(
   }
   const snap = await q.get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() } as T & { id: string }));
+}
+
+/** Query a collection with automatic in-memory TTL caching to save Firestore reads. */
+export async function getCachedCollection<T = DocumentData>(
+  collection: string,
+  constraints: Parameters<typeof queryCol>[1] = [],
+  ttlSeconds = 300,
+): Promise<(T & { id: string })[]> {
+  const cacheKey = `col_cache_${collection}_${JSON.stringify(constraints || [])}`;
+  return statsCache.getOrSet(cacheKey, ttlSeconds, () => queryCol<T>(collection, constraints));
 }
 
 // ── Write helpers ─────────────────────────────────────────────────────────────

@@ -5,7 +5,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { getSessionFromCookie } from '@/lib/auth';
-import { queryCol } from '@/lib/team/db';
+import { queryCol, getCachedCollection } from '@/lib/team/db';
 import { statsCache } from '@/lib/team/cache';
 
 export const dynamic = 'force-dynamic';
@@ -25,22 +25,22 @@ export async function GET(req: NextRequest) {
 
   const days = parseDays(req.nextUrl.searchParams.get('range'));
   const cacheKey = `admin_pipeline_health_${days}`;
-  const responseData = await statsCache.getOrSet(cacheKey, 60, async () => {
+  const responseData = await statsCache.getOrSet(cacheKey, 90, async () => {
     const cutoff = new Date(Date.now() - days * 86400 * 1000).toISOString();
     const cutoffDate = cutoff.slice(0, 10);
     const now = Date.now();
     const h24Ago = new Date(now - 24 * 3600 * 1000).toISOString();
 
     const [members, teams, events, sessions, releases] = await Promise.all([
-      queryCol<any>('members'),
-      queryCol<any>('teams'),
-      queryCol<any>('ingest_events'),
+      getCachedCollection<any>('members', [], 300),
+      getCachedCollection<any>('teams', [], 300),
+      getCachedCollection<any>('ingest_events', [], 120),
       queryCol<any>('sync_sessions'),
-      queryCol<any>('daemon_releases', [
+      getCachedCollection<any>('daemon_releases', [
         { type: 'where', field: 'active', op: '==', value: true },
         { type: 'orderBy', field: 'released_at', direction: 'desc' },
         { type: 'limit', n: 1 },
-      ]),
+      ], 300),
     ]);
 
   const teamById = new Map(teams.map((t: any) => [t.id, t]));

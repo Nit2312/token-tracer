@@ -3,7 +3,7 @@
  * Computes multi-dimensional breakdowns (Projects, Tools, Models, Sessions, Files, Timelines)
  * for both Team Admin and Superadmin scopes.
  */
-import { queryCol, getDocById } from '@/lib/team/db';
+import { queryCol, getCachedCollection, getDocById } from '@/lib/team/db';
 import { statsCache } from '@/lib/team/cache';
 
 export interface WhaleFilterOptions {
@@ -82,7 +82,7 @@ export async function getPlatformWhales(options: WhaleFilterOptions = {}) {
 
   const cacheKey = `whale_analysis_fs_${range}_${teamId || 'all'}_${minTokens}_${search}_${limit}`;
 
-  return statsCache.getOrSet(cacheKey, 45, async () => {
+  return statsCache.getOrSet(cacheKey, 90, async () => {
     const constraints: Parameters<typeof queryCol>[1] = [];
     if (teamId) {
       constraints.push({ type: 'where', field: 'team_id', op: '==', value: teamId });
@@ -90,8 +90,8 @@ export async function getPlatformWhales(options: WhaleFilterOptions = {}) {
 
     const [allSessions, membersList, teamsList] = await Promise.all([
       queryCol<any>('sync_sessions', constraints),
-      queryCol<any>('members'),
-      queryCol<any>('teams'),
+      getCachedCollection<any>('members', [], 300),
+      getCachedCollection<any>('teams', [], 300),
     ]);
 
     const memberById = new Map(membersList.map((m: any) => [m.id, m]));
@@ -385,11 +385,11 @@ export async function buildMemberUsageDeepDive(
   const cacheKey = `member_deep_dive_fs_${sortedIdsKey}_${teamId || 'any'}_${range}_${from || ''}_${to || ''}_${source || ''}_${model || ''}`;
 
   return statsCache.getOrSet(cacheKey, 300, async () => {
-    // 1. Fetch Member(s) & Team metadata
+    // 1. Fetch Member(s) & Team metadata (served from cache)
     const [allMembers, allTeams, teamMemberDocs] = await Promise.all([
-      queryCol<any>('members'),
-      queryCol<any>('teams'),
-      teamId ? queryCol<any>('team_members', [{ type: 'where', field: 'team_id', op: '==', value: teamId }]) : Promise.resolve([]),
+      getCachedCollection<any>('members', [], 300),
+      getCachedCollection<any>('teams', [], 300),
+      teamId ? getCachedCollection<any>('team_members', [{ type: 'where', field: 'team_id', op: '==', value: teamId }], 180) : Promise.resolve([]),
     ]);
 
     const memberMap = new Map(allMembers.map((m: any) => [m.id, m]));
@@ -635,10 +635,10 @@ export async function buildMemberUsageDeepDive(
 
     const totalMemberTokens = tokensIn + tokensOut;
 
-    // 4. Fetch heavy session files
+    // 4. Fetch heavy session files (optimized: capped to top 20 heavy sessions)
     const sortedHeavySessions = [...sessions]
       .sort((a, b) => (effIn(b) + effOut(b)) - (effIn(a) + effOut(a)))
-      .slice(0, 100);
+      .slice(0, 20);
 
     const heavySessionIds = sortedHeavySessions.map((s) => s.id).filter(Boolean);
     let allSessionFiles: any[] = [];

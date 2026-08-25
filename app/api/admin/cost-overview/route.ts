@@ -5,7 +5,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { getSessionFromCookie } from '@/lib/auth';
-import { queryCol } from '@/lib/team/db';
+import { queryCol, getCachedCollection } from '@/lib/team/db';
 import { statsCache } from '@/lib/team/cache';
 
 export const dynamic = 'force-dynamic';
@@ -25,14 +25,14 @@ export async function GET(req: NextRequest) {
 
   const days = parseDays(req.nextUrl.searchParams.get('range'));
   const cacheKey = `admin_cost_overview_${days}`;
-  const responseData = await statsCache.getOrSet(cacheKey, 60, async () => {
+  const responseData = await statsCache.getOrSet(cacheKey, 90, async () => {
     const cutoff = new Date(Date.now() - days * 86400 * 1000).toISOString();
     const cutoffDate = cutoff.slice(0, 10);
 
     const [sessionDocs, teamDocs, pricingDocs] = await Promise.all([
       queryCol<any>('sync_sessions'),
-      queryCol<any>('teams'),
-      queryCol<any>('model_pricing'),
+      getCachedCollection<any>('teams', [], 300),
+      getCachedCollection<any>('model_pricing', [], 300),
     ]);
 
   const inRangeSessions = sessionDocs.filter((s) => {

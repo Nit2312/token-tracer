@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
 import { verifyAdminToken, adminTokenFromCookie } from '@/lib/team/auth';
-import { queryCol, setDocById, newUuid } from '@/lib/team/db';
+import { queryCol, getCachedCollection, setDocById, newUuid } from '@/lib/team/db';
 
 import { statsCache } from '@/lib/team/cache';
 
@@ -29,9 +29,9 @@ export async function GET(req: NextRequest) {
       Boolean(val && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val));
 
     const cacheKey = `teams_list_${session?.userId || 'anon'}_${session?.role || 'none'}`;
-    const result = await statsCache.getOrSet(cacheKey, 60, async () => {
+    const result = await statsCache.getOrSet(cacheKey, 120, async () => {
+      const teamDocs = await getCachedCollection<any>('teams', [], 300);
       if (session && (session.role === 'admin' || session.role === 'user')) {
-        const teamDocs = await queryCol<any>('teams');
         let filteredTeams: any[] = teamDocs;
 
         if (isUuid(session.teamId)) {
@@ -41,7 +41,7 @@ export async function GET(req: NextRequest) {
           const userDocs = await queryCol<any>('users', [{ type: 'where', field: 'id', op: '==', value: session.userId }, { type: 'limit', n: 1 }]);
           const memberId = userDocs[0]?.member_id;
           if (memberId) {
-            const tmDocs = await queryCol<any>('team_members', [{ type: 'where', field: 'member_id', op: '==', value: memberId }]);
+            const tmDocs = await getCachedCollection<any>('team_members', [{ type: 'where', field: 'member_id', op: '==', value: memberId }], 180);
             const teamIds = new Set(tmDocs.map((tm: any) => tm.team_id));
             filteredTeams = teamDocs.filter((t: any) => teamIds.has(t.id));
           }
@@ -51,8 +51,7 @@ export async function GET(req: NextRequest) {
         return { teams: filteredTeams };
       }
 
-      const allTeams = await queryCol<any>('teams');
-      return { teams: allTeams.sort((a: any, b: any) => String(b.created_at || '').localeCompare(String(a.created_at || ''))) };
+      return { teams: teamDocs.sort((a: any, b: any) => String(b.created_at || '').localeCompare(String(a.created_at || ''))) };
     });
 
     return NextResponse.json(result);

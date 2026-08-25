@@ -6,7 +6,7 @@
  */
 import crypto from 'node:crypto';
 import {
-  queryCol, setDocById, addDocToCol, batchWrite, getDocById, newUuid,
+  queryCol, getCachedCollection, setDocById, addDocToCol, batchWrite, getDocById, newUuid,
 } from './db';
 import { generateApiKey, hashApiKey } from './auth';
 import { hashPassword } from '@/lib/auth';
@@ -113,24 +113,24 @@ export async function buildTeamStats(
 
   const sortedIdsKey = isAllMembers ? 'all' : [...memberIdsArr].sort().join('_');
   const cacheKey = `team_stats_${teamId}_${from || ''}_${to || ''}_${sortedIdsKey}_${minTokens || ''}_${maxTokens || ''}_${source || ''}`;
-  return statsCache.getOrSet(cacheKey, 60, async () => {
-    // 1. Members list (via team_members junction)
-    const teamMemberDocs = await queryCol<{ member_id: string; role: string; created_at: string }>(
-      'team_members',
-      [{ type: 'where', field: 'team_id', op: '==', value: teamId }],
-    );
+  return statsCache.getOrSet(cacheKey, 90, async () => {
+    // 1. Members list (via team_members junction and cached members collection)
+    const [teamMemberDocs, allMembers, ingestDocs] = await Promise.all([
+      getCachedCollection<{ member_id: string; role: string; created_at: string }>(
+        'team_members',
+        [{ type: 'where', field: 'team_id', op: '==', value: teamId }],
+        180,
+      ),
+      getCachedCollection<any>('members', [], 300),
+      getCachedCollection<{ member_id: string; created_at: string }>(
+        'ingest_events',
+        [{ type: 'where', field: 'team_id', op: '==', value: teamId }],
+        180,
+      ),
+    ]);
 
-    const memberIds = teamMemberDocs.map((tm) => tm.member_id);
+    const memberById = new Map(allMembers.map((m: any) => [m.id, m]));
 
-    // Fetch all member docs in parallel (Firestore doesn't support IN queries > 30 items, chunk if needed)
-    const memberDocs = await fetchDocsByIds('members', memberIds);
-    const memberById = new Map(memberDocs.map((m) => [m.id, m]));
-
-    // Fetch last ingest event per member
-    const ingestDocs = await queryCol<{ member_id: string; created_at: string }>(
-      'ingest_events',
-      [{ type: 'where', field: 'team_id', op: '==', value: teamId }],
-    );
     const lastIngestByMember = new Map<string, string>();
     for (const ie of ingestDocs) {
       const prev = lastIngestByMember.get(ie.member_id);
@@ -267,16 +267,26 @@ export async function buildTeamStats(
   const memberProjects = Array.from(memberProjectsMap.values())
     .sort((a, b) => b.api_cost - a.api_cost || b.sessions - a.sessions);
 
-  // 6. Per-member top files
-  const sessionIds = sessions.map((s) => s.id).filter(Boolean);
+  // 6. Top files & tools (optimized: fetch only for top 25 heavy sessions by token/edit volume)
+  const heavySessions = [...sessions]
+    .sort((a, b) => (effIn(b) + effOut(b) + Number(b.edits || 0) * 100) - (effIn(a) + effOut(a) + Number(a.edits || 0) * 100))
+    .slice(0, 25);
+  const heavySessionIds = heavySessions.map((s) => s.id).filter(Boolean);
+
   let allFiles: any[] = [];
-  if (sessionIds.length) {
-    // Chunk Firestore IN queries to 30
-    for (const chunk of chunkArray(sessionIds, 30)) {
-      const files = await queryCol('sync_session_files', [
-        { type: 'where', field: 'sync_session_id', op: 'in', value: chunk },
+  let allSessionTools: any[] = [];
+  if (heavySessionIds.length) {
+    for (const chunk of chunkArray(heavySessionIds, 30)) {
+      const [files, tools] = await Promise.all([
+        queryCol('sync_session_files', [
+          { type: 'where', field: 'sync_session_id', op: 'in', value: chunk },
+        ]),
+        queryCol('sync_session_tools', [
+          { type: 'where', field: 'sync_session_id', op: 'in', value: chunk },
+        ]),
       ]);
       allFiles.push(...files);
+      allSessionTools.push(...tools);
     }
   }
 
@@ -437,15 +447,6 @@ export async function buildTeamStats(
   };
 
   // 12. Top tools
-  let allSessionTools: any[] = [];
-  if (sessionIds.length) {
-    for (const chunk of chunkArray(sessionIds, 30)) {
-      const tools = await queryCol('sync_session_tools', [
-        { type: 'where', field: 'sync_session_id', op: 'in', value: chunk },
-      ]);
-      allSessionTools.push(...tools);
-    }
-  }
   const toolCountMap = new Map<string, number>();
   for (const t of allSessionTools) {
     const name = String(t.tool_name);
@@ -502,13 +503,10 @@ export async function buildTeamStats(
     .sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''))
     .slice(0, 50);
 
-  // 15. Model pricing
-  const teamPricing = await queryCol('model_pricing', [
-    { type: 'where', field: 'team_id', op: '==', value: teamId },
-  ]);
-  const globalPricing = await queryCol('model_pricing', [
-    { type: 'where', field: 'team_id', op: '==', value: null },
-  ]);
+  // 15. Model pricing (served from cached collection)
+  const allPricing = await getCachedCollection<any>('model_pricing', [], 300);
+  const teamPricing = allPricing.filter((p) => p.team_id === teamId);
+  const globalPricing = allPricing.filter((p) => !p.team_id);
   const modelPricing = [
     ...teamPricing.map((p) => ({ ...p })),
     ...globalPricing.map((p) => ({ ...p })),
