@@ -15,7 +15,7 @@ import { statsCache } from './cache';
 interface StatsOptions {
   from?: string | null;
   to?: string | null;
-  memberId?: string | null;
+  memberId?: string | string[] | null;
   minTokens?: number | null;
   maxTokens?: number | null;
   source?: string | null;
@@ -47,7 +47,7 @@ function passesDateFilter(
   s: any,
   from: string | null,
   to: string | null,
-  memberId: string | null,
+  memberId: string | string[] | null,
   source: string | null,
   minTokens: number | null,
   maxTokens: number | null,
@@ -56,7 +56,15 @@ function passesDateFilter(
   const dateStr = ts ? String(ts).slice(0, 10) : null;
   if (from && dateStr && dateStr < String(from).slice(0, 10)) return false;
   if (to && dateStr && dateStr > String(to).slice(0, 10)) return false;
-  if (memberId && memberId !== 'all' && s.member_id !== memberId) return false;
+  
+  let memberIdsArr: string[] = [];
+  if (Array.isArray(memberId)) {
+    memberIdsArr = memberId.map((id) => String(id).trim()).filter(Boolean);
+  } else if (typeof memberId === 'string' && memberId.trim() && memberId !== 'all') {
+    memberIdsArr = memberId.split(',').map((id) => id.trim()).filter((id) => Boolean(id) && id !== 'all');
+  }
+  if (memberIdsArr.length > 0 && !memberIdsArr.includes(s.member_id)) return false;
+
   if (source && source !== 'all' && s.source !== source) return false;
   const totalTokens = Number(s.tokens_in || 0) + Number(s.tokens_out || 0);
   if (minTokens != null && Number(minTokens) > 0 && totalTokens < Number(minTokens)) return false;
@@ -81,23 +89,30 @@ export async function buildTeamStats(
       tokenLeaderboard: [],
       scoreboard: [],
       atRisk: [],
+      projects: [],
       bySource: [],
       byDay: [],
-      punch: Array.from({ length: 7 }, () => Array(24).fill(0)),
-      activity: { activeDays: 0, streak: 0, peakHour: { weekday: 0, hour: 0, n: 0 }, busiestDay: null },
       topTools: [],
+      punch: {},
+      activity: { peakHour: null, activeDays: 0, streak: 0 },
       topFiles: [],
       recentLogs: [],
-      memberSources: [],
-      memberProjects: [],
-      memberFiles: [],
-      memberModels: [],
-      projectRollup: [],
       modelPricing: [],
+      memberModels: [],
+      window: { from: from ?? null, to: to ?? null, memberId: memberId ? String(memberId) : null, minTokens: minTokens ?? null, maxTokens: maxTokens ?? null, source: source ?? null },
     };
   }
 
-  const cacheKey = `team_stats_${teamId}_${from || ''}_${to || ''}_${memberId || ''}_${minTokens || ''}_${maxTokens || ''}_${source || ''}`;
+  let memberIdsArr: string[] = [];
+  if (Array.isArray(memberId)) {
+    memberIdsArr = memberId.map((id) => String(id).trim()).filter(Boolean);
+  } else if (typeof memberId === 'string' && memberId.trim()) {
+    memberIdsArr = memberId.split(',').map((id) => id.trim()).filter((id) => Boolean(id) && id !== 'all');
+  }
+  const isAllMembers = memberIdsArr.length === 0;
+
+  const sortedIdsKey = isAllMembers ? 'all' : [...memberIdsArr].sort().join('_');
+  const cacheKey = `team_stats_${teamId}_${from || ''}_${to || ''}_${sortedIdsKey}_${minTokens || ''}_${maxTokens || ''}_${source || ''}`;
   return statsCache.getOrSet(cacheKey, 60, async () => {
     // 1. Members list (via team_members junction)
     const teamMemberDocs = await queryCol<{ member_id: string; role: string; created_at: string }>(
@@ -105,61 +120,61 @@ export async function buildTeamStats(
       [{ type: 'where', field: 'team_id', op: '==', value: teamId }],
     );
 
-  const memberIds = teamMemberDocs.map((tm) => tm.member_id);
+    const memberIds = teamMemberDocs.map((tm) => tm.member_id);
 
-  // Fetch all member docs in parallel (Firestore doesn't support IN queries > 30 items, chunk if needed)
-  const memberDocs = await fetchDocsByIds('members', memberIds);
-  const memberById = new Map(memberDocs.map((m) => [m.id, m]));
+    // Fetch all member docs in parallel (Firestore doesn't support IN queries > 30 items, chunk if needed)
+    const memberDocs = await fetchDocsByIds('members', memberIds);
+    const memberById = new Map(memberDocs.map((m) => [m.id, m]));
 
-  // Fetch last ingest event per member
-  const ingestDocs = await queryCol<{ member_id: string; created_at: string }>(
-    'ingest_events',
-    [{ type: 'where', field: 'team_id', op: '==', value: teamId }],
-  );
-  const lastIngestByMember = new Map<string, string>();
-  for (const ie of ingestDocs) {
-    const prev = lastIngestByMember.get(ie.member_id);
-    if (!prev || ie.created_at > prev) lastIngestByMember.set(ie.member_id, ie.created_at);
-  }
+    // Fetch last ingest event per member
+    const ingestDocs = await queryCol<{ member_id: string; created_at: string }>(
+      'ingest_events',
+      [{ type: 'where', field: 'team_id', op: '==', value: teamId }],
+    );
+    const lastIngestByMember = new Map<string, string>();
+    for (const ie of ingestDocs) {
+      const prev = lastIngestByMember.get(ie.member_id);
+      if (!prev || ie.created_at > prev) lastIngestByMember.set(ie.member_id, ie.created_at);
+    }
 
-  const members = teamMemberDocs
-    .map((tm) => {
-      const m = memberById.get(tm.member_id);
-      if (!m) return null;
-      return {
-        id: m.id,
-        display_name: m.display_name,
-        role: tm.role,
-        created_at: m.created_at,
-        last_sync_at: lastIngestByMember.get(m.id) || null,
-      };
-    })
-    .filter(Boolean)
-    .sort((a: any, b: any) => String(a.display_name).localeCompare(String(b.display_name)));
+    const members = teamMemberDocs
+      .map((tm) => {
+        const m = memberById.get(tm.member_id);
+        if (!m) return null;
+        return {
+          id: m.id,
+          display_name: m.display_name,
+          role: tm.role,
+          created_at: m.created_at,
+          last_sync_at: lastIngestByMember.get(m.id) || null,
+        };
+      })
+      .filter(Boolean)
+      .sort((a: any, b: any) => String(a.display_name).localeCompare(String(b.display_name)));
 
-  // 2. Fetch sessions for this team
-  const sessionConstraints: Parameters<typeof queryCol>[1] = [
-    { type: 'where', field: 'team_id', op: '==', value: teamId },
-  ];
-  if (memberId) sessionConstraints.push({ type: 'where', field: 'member_id', op: '==', value: memberId });
-  if (source && source !== 'all') sessionConstraints.push({ type: 'where', field: 'source', op: '==', value: source });
+    // 2. Fetch sessions for this team
+    const sessionConstraints: Parameters<typeof queryCol>[1] = [
+      { type: 'where', field: 'team_id', op: '==', value: teamId },
+    ];
+    if (memberIdsArr.length === 1) {
+      sessionConstraints.push({ type: 'where', field: 'member_id', op: '==', value: memberIdsArr[0] });
+    }
+    if (source && source !== 'all') sessionConstraints.push({ type: 'where', field: 'source', op: '==', value: source });
 
-  const allSessions = await queryCol<any>('sync_sessions', sessionConstraints);
+    const allSessions = await queryCol<any>('sync_sessions', sessionConstraints);
 
-  // Apply date/filter
-  const sessions = allSessions.filter((s) =>
-    passesDateFilter(s, from, to, memberId, source, minTokens, maxTokens),
-  );
+    // Apply date/filter
+    const sessions = allSessions.filter((s) =>
+      passesDateFilter(s, from, to, memberId, source, minTokens, maxTokens),
+    );
 
-  // 3. Aggregate per-member stats
-  const memberStatsMap = new Map<string, any>();
-  for (const s of sessions) {
-    const mid = String(s.member_id);
-    if (!memberStatsMap.has(mid)) {
-      const m = memberById.get(mid);
-      memberStatsMap.set(mid, {
-        member_id: mid,
-        display_name: m?.display_name || 'Unknown',
+    // 3. Aggregate per-member stats
+    const memberStatsMap = new Map<string, any>();
+    for (const m of members) {
+      if (!isAllMembers && !memberIdsArr.includes(m!.id)) continue;
+      memberStatsMap.set(m!.id, {
+        member_id: m!.id,
+        display_name: m!.display_name || 'Unknown',
         sessions: 0, edits: 0, additions: 0, deletions: 0,
         changed_lines: 0, files_touched: 0, tool_calls: 0, tool_errors: 0,
         rework_loops: 0, corrections: 0, abandoned: 0,
@@ -167,27 +182,42 @@ export async function buildTeamStats(
         api_cost: 0, priced_sessions: 0,
       });
     }
-    const ms = memberStatsMap.get(mid);
-    ms.sessions++;
-    ms.edits += Number(s.edits || 0);
-    ms.additions += Number(s.additions || 0);
-    ms.deletions += Number(s.deletions || 0);
-    ms.changed_lines += Number(s.changed_lines || 0);
-    ms.files_touched += Number(s.files_touched || 0);
-    ms.tool_calls += Number(s.tool_calls || 0);
-    ms.tool_errors += Number(s.tool_errors || 0);
-    ms.rework_loops += Number(s.rework_loops || 0);
-    ms.corrections += Number(s.corrections || 0);
-    ms.abandoned += s.abandoned ? 1 : 0;
-    ms.tokens_in += effIn(s);
-    ms.tokens_out += effOut(s);
-    ms.tokens_cache_read += Number(s.tokens_cache_read || 0);
-    ms.tokens_cache_write += Number(s.tokens_cache_write || 0);
-    ms.api_cost += Number(s.api_cost || 0);
-    if (s.priced) ms.priced_sessions++;
-  }
-  const memberStats = Array.from(memberStatsMap.values())
-    .sort((a, b) => b.api_cost - a.api_cost || b.edits - a.edits || b.sessions - a.sessions);
+
+    for (const s of sessions) {
+      const mid = String(s.member_id);
+      if (!memberStatsMap.has(mid)) {
+        const m = memberById.get(mid);
+        memberStatsMap.set(mid, {
+          member_id: mid,
+          display_name: m?.display_name || 'Unknown',
+          sessions: 0, edits: 0, additions: 0, deletions: 0,
+          changed_lines: 0, files_touched: 0, tool_calls: 0, tool_errors: 0,
+          rework_loops: 0, corrections: 0, abandoned: 0,
+          tokens_in: 0, tokens_out: 0, tokens_cache_read: 0, tokens_cache_write: 0,
+          api_cost: 0, priced_sessions: 0,
+        });
+      }
+      const ms = memberStatsMap.get(mid);
+      ms.sessions++;
+      ms.edits += Number(s.edits || 0);
+      ms.additions += Number(s.additions || 0);
+      ms.deletions += Number(s.deletions || 0);
+      ms.changed_lines += Number(s.changed_lines || 0);
+      ms.files_touched += Number(s.files_touched || 0);
+      ms.tool_calls += Number(s.tool_calls || 0);
+      ms.tool_errors += Number(s.tool_errors || 0);
+      ms.rework_loops += Number(s.rework_loops || 0);
+      ms.corrections += Number(s.corrections || 0);
+      ms.abandoned += s.abandoned ? 1 : 0;
+      ms.tokens_in += effIn(s);
+      ms.tokens_out += effOut(s);
+      ms.tokens_cache_read += Number(s.tokens_cache_read || 0);
+      ms.tokens_cache_write += Number(s.tokens_cache_write || 0);
+      ms.api_cost += Number(s.api_cost || 0);
+      if (s.priced) ms.priced_sessions++;
+    }
+    const memberStats = Array.from(memberStatsMap.values())
+      .sort((a, b) => b.api_cost - a.api_cost || b.edits - a.edits || b.sessions - a.sessions);
 
   // 4. Per-member breakdown by source
   const memberSourcesMap = new Map<string, any>();

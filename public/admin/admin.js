@@ -2138,6 +2138,10 @@ function setupAnalyticsTabs() {
       usageLoaded = true;
       loadUsageTrends($('#usage-range-select')?.value || '30d');
     }
+    if (tabId === 'tab-top-usage') {
+      topUsageLoaded = true;
+      loadTopUsage();
+    }
     if (tabId === 'tab-prompts') {
       window.dispatchEvent(new CustomEvent('prompts-tab-activated'));
     }
@@ -2608,5 +2612,451 @@ if (typeof window !== 'undefined') {
   setTimeout(bindInfraEvents, 0);
 }
 
+let topUsageLoaded = false;
+let currentWhalesData = null;
 
+async function loadTopUsage() {
+  const tbody = $('#whale-table-body');
+  if (tbody) {
+    tbody.innerHTML = `<tr><td colSpan="10" class="muted" style="text-align:center; padding:30px;"><span class="inline-spinner"></span> Analyzing top usage and spenders across the platform…</td></tr>`;
+  }
 
+  // Populate team dropdown if empty
+  const teamSel = $('#whale-team-select');
+  if (teamSel && teamSel.options.length <= 1 && teams && teams.length) {
+    const curVal = teamSel.value;
+    teamSel.innerHTML = '<option value="all">All Teams</option>' +
+      teams.map(t => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join('');
+    if (curVal) teamSel.value = curVal;
+  }
+
+  const range = $('#whale-range-select')?.value || 'all';
+  const teamId = $('#whale-team-select')?.value || 'all';
+  const minTokens = $('#whale-min-tokens-select')?.value || '0';
+  const search = $('#whale-search-input')?.value || '';
+
+  const params = new URLSearchParams();
+  if (range && range !== 'all') params.set('range', range);
+  if (teamId && teamId !== 'all') params.set('teamId', teamId);
+  if (minTokens && minTokens !== '0') params.set('minTokens', minTokens);
+  if (search) params.set('search', search);
+
+  try {
+    const res = await fetch(`/api/admin/top-usage?${params.toString()}`);
+    if (!res.ok) {
+      throw new Error(`Failed to load whale analysis: ${res.statusText}`);
+    }
+    const data = await res.json();
+    currentWhalesData = data;
+    renderTopUsage(data);
+  } catch (err) {
+    console.error('[loadTopUsage error]', err);
+    if (tbody) {
+      tbody.innerHTML = `<tr><td colSpan="10" style="color:var(--error-text); text-align:center; padding:20px;">Error loading top usage: ${esc(err.message)}</td></tr>`;
+    }
+  }
+}
+
+function renderTopUsage(data) {
+  if (!data) return;
+
+  // 1. KPI Cards
+  const topUser = data.whales?.[0];
+  const topUserEl = $('#whale-kpi-top-user');
+  const topUserSub = $('#whale-kpi-top-user-sub');
+  if (topUserEl) {
+    topUserEl.textContent = topUser ? topUser.displayName : 'None';
+  }
+  if (topUserSub && topUser) {
+    topUserSub.textContent = `${fmtTokens(topUser.totalTokens)} tokens • ${fmtCost(topUser.apiCost)}`;
+  }
+
+  const totalTokensEl = $('#whale-kpi-total-tokens');
+  const totalCostEl = $('#whale-kpi-total-cost');
+  if (totalTokensEl) {
+    totalTokensEl.textContent = fmtTokens(data.totals?.totalTokens || 0);
+  }
+  if (totalCostEl) {
+    totalCostEl.textContent = `${fmtCost(data.totals?.totalCost || 0)} total platform spend`;
+  }
+
+  const topProj = data.topProjectsGlobal?.[0];
+  const topProjEl = $('#whale-kpi-top-project');
+  const topProjSub = $('#whale-kpi-top-project-sub');
+  if (topProjEl) {
+    topProjEl.textContent = topProj ? topProj.name : 'None';
+  }
+  if (topProjSub && topProj) {
+    topProjSub.textContent = `${fmtTokens(topProj.tokens)} tokens (${topProj.sessions} sessions)`;
+  }
+
+  const whaleCountEl = $('#whale-kpi-whale-count');
+  if (whaleCountEl) {
+    whaleCountEl.textContent = String(data.totalWhales || 0);
+  }
+
+  // 2. Global Projects Section
+  const globalProjEl = $('#whale-global-projects');
+  if (globalProjEl) {
+    if (!data.topProjectsGlobal?.length) {
+      globalProjEl.innerHTML = `<p class="muted" style="font-size:12px; margin:8px 0;">No project data found.</p>`;
+    } else {
+      const maxProjTok = Math.max(...data.topProjectsGlobal.map(p => p.tokens), 1);
+      globalProjEl.innerHTML = data.topProjectsGlobal.map(p => {
+        const pct = Math.min(100, Math.round((p.tokens / maxProjTok) * 100));
+        return `
+          <div style="margin-bottom:10px;">
+            <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:3px;">
+              <span style="font-weight:600;">📁 ${esc(p.name)}</span>
+              <span class="muted">${fmtTokens(p.tokens)} tokens • ${fmtCost(p.cost)} (${p.sessions} sess)</span>
+            </div>
+            <div class="progress-bar" style="height:6px; background:rgba(255,255,255,0.06); border-radius:3px; overflow:hidden;">
+              <div style="width:${pct}%; height:100%; background:var(--brand); border-radius:3px;"></div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+  }
+
+  // 3. Extreme Runaway Sessions
+  const extremeEl = $('#whale-extreme-sessions');
+  if (extremeEl) {
+    if (!data.extremeSessions?.length) {
+      extremeEl.innerHTML = `<p class="muted" style="font-size:12px; margin:8px 0;">No runaway sessions detected.</p>`;
+    } else {
+      extremeEl.innerHTML = data.extremeSessions.map(s => {
+        const isRunaway = s.totalTokens > 5_000_000 || s.toolErrors > 15 || s.reworkLoops > 5;
+        const badge = isRunaway ? `<span class="source-tag" style="background:rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.3); font-size:10px;">⚠️ Loop / Anomaly</span>` : '';
+        return `
+          <div style="padding:8px; margin-bottom:8px; background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius-sm); font-size:11.5px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+              <strong>👤 ${esc(s.memberName)} <span class="muted">(${esc(s.teamName)})</span></strong>
+              <strong style="color:var(--brand-hi);">${fmtTokens(s.totalTokens)}</strong>
+            </div>
+            <div style="display:flex; justify-content:space-between; color:var(--muted); font-size:11px; align-items:center;">
+              <span>📁 ${esc(s.project)} • 🤖 <code>${esc(s.model)}</code></span>
+              <div style="display:flex; gap:6px; align-items:center;">
+                ${badge}
+                <button type="button" class="hbtn" style="font-size:10.5px; padding:2px 6px;" onclick="inspectWhalePrompt('${esc(s.sessionId)}')">Inspect Prompts ↗</button>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+  }
+
+  // 4. Whale Table
+  const tbody = $('#whale-table-body');
+  if (tbody) {
+    if (!data.whales?.length) {
+      tbody.innerHTML = `<tr><td colSpan="10" class="muted" style="text-align:center; padding:30px;">No members matching filters.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = data.whales.map((w, idx) => {
+      const topProjName = w.topProject?.name || 'none';
+      const topProjPct = Math.round(w.topProject?.percentage || 0);
+      const runawayBadge = w.runawayCount > 0
+        ? `<span class="source-tag" style="background:rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.3); font-size:11px; font-weight:600;">⚠️ ${w.runawayCount} runaway</span>`
+        : `<span class="muted" style="font-size:11px;">✓ Normal</span>`;
+
+      const rankBadge = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`;
+
+      return `
+        <tr style="cursor:pointer;" onclick="openWhaleDrilldown('${esc(w.memberId)}', '${esc(w.displayName)}')">
+          <td style="font-weight:600; text-align:center; font-size:13px;">${rankBadge}</td>
+          <td>
+            <div style="font-weight:600; color:var(--text); font-size:13px;">👤 ${esc(w.displayName)}</div>
+            <div class="muted" style="font-size:11px;">${w.sessionsCount} sessions • ${w.topSource}</div>
+          </td>
+          <td>
+            <span class="source-tag">${esc(w.teamName)}</span>
+          </td>
+          <td>
+            <div style="font-weight:700; color:var(--brand-hi); font-size:13.5px;">${fmtTokens(w.totalTokens)}</div>
+            <div class="muted" style="font-size:10.5px;">${fmtTokens(w.tokensIn)} in / ${fmtTokens(w.tokensOut)} out</div>
+          </td>
+          <td>
+            <span style="color:#a78bfa; font-weight:600;">${fmtTokens(w.tokensCacheRead)}</span>
+          </td>
+          <td>
+            <strong style="color:var(--text);">${fmtCost(w.apiCost)}</strong>
+          </td>
+          <td>
+            <div style="font-weight:600; font-size:12px;">📁 ${esc(topProjName)}</div>
+            <div class="muted" style="font-size:10.5px;">${topProjPct}% of member burn</div>
+          </td>
+          <td>
+            <code style="font-size:11px;">${esc(w.topModel)}</code>
+          </td>
+          <td>${runawayBadge}</td>
+          <td style="text-align:right;" onclick="event.stopPropagation();">
+            <button type="button" class="hbtn primary" style="font-size:11.5px; padding:4px 10px;" onclick="openWhaleDrilldown('${esc(w.memberId)}', '${esc(w.displayName)}')">
+              🔍 Analyze Breakdown
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  }
+}
+
+// Whale Drilldown Modal
+const adminDrilldownCache = new Map();
+
+async function openWhaleDrilldown(memberId, memberName) {
+  const dialog = $('#whale-drilldown-dialog');
+  if (!dialog) return;
+
+  const titleEl = $('#wdd-title');
+  const subEl = $('#wdd-subtitle');
+  if (titleEl) titleEl.textContent = `👤 ${memberName || 'Member'} — Token Deep-Dive Analysis`;
+  if (subEl) subEl.textContent = `Analyzing where this developer spent their tokens…`;
+
+  const loadingEl = $('#wdd-loading');
+  const contentEl = $('#wdd-content');
+
+  if (typeof dialog.showModal === 'function') {
+    dialog.showModal();
+  } else {
+    dialog.setAttribute('open', '');
+  }
+
+  const range = $('#whale-range-select')?.value || 'all';
+  const cacheKey = `${memberId}_${range}`;
+  const cached = adminDrilldownCache.get(cacheKey);
+  if (cached && (Date.now() - cached.ts < 60000)) {
+    renderWhaleDrilldown(cached.data);
+    return;
+  }
+
+  if (loadingEl) loadingEl.hidden = false;
+  if (contentEl) contentEl.hidden = true;
+
+  try {
+    const res = await fetch(`/api/admin/top-usage?memberId=${encodeURIComponent(memberId)}&range=${encodeURIComponent(range)}`);
+    if (!res.ok) {
+      throw new Error(`Failed to load member deep dive: ${res.statusText}`);
+    }
+    const data = await res.json();
+    adminDrilldownCache.set(cacheKey, { ts: Date.now(), data });
+    renderWhaleDrilldown(data);
+  } catch (err) {
+    console.error('[openWhaleDrilldown error]', err);
+    if (loadingEl) {
+      loadingEl.innerHTML = `<span style="color:var(--error-text);">Error loading deep dive: ${esc(err.message)}</span>`;
+    }
+  }
+}
+
+function renderWhaleDrilldown(data) {
+  const loadingEl = $('#wdd-loading');
+  const contentEl = $('#wdd-content');
+  if (loadingEl) loadingEl.hidden = true;
+  if (contentEl) contentEl.hidden = false;
+
+  if (!data) return;
+
+  const m = data.member || {};
+  const totals = data.totals || {};
+
+  const subEl = $('#wdd-subtitle');
+  if (subEl) {
+    subEl.textContent = `Team: ${m.teamName || 'Independent'} • Total Consumption: ${fmtTokens(totals.totalTokens)} tokens (${fmtCost(totals.totalCost)}) across ${totals.sessionCount} sessions`;
+  }
+
+  // Stats Pills
+  const statTok = $('#wdd-stat-tokens');
+  const statCost = $('#wdd-stat-cost');
+  if (statTok) statTok.textContent = fmtTokens(totals.totalTokens);
+  if (statCost) statCost.textContent = `${fmtCost(totals.totalCost)} total API cost`;
+
+  const statInOut = $('#wdd-stat-in-out');
+  const statCache = $('#wdd-stat-cache');
+  if (statInOut) statInOut.textContent = `${fmtTokens(totals.tokensIn)} in / ${fmtTokens(totals.tokensOut)} out`;
+  if (statCache) statCache.textContent = `Cache read: ${fmtTokens(totals.tokensCacheRead)} (${fmtTokens(totals.tokensCacheWrite)} write)`;
+
+  const statSess = $('#wdd-stat-sessions');
+  const statAvg = $('#wdd-stat-avg');
+  if (statSess) statSess.textContent = `${totals.sessionCount} sessions (${totals.activeDays} days)`;
+  if (statAvg) statAvg.textContent = `Avg: ${fmtTokens(totals.avgTokensPerSession)} / session`;
+
+  const statEdits = $('#wdd-stat-edits');
+  const statLines = $('#wdd-stat-lines');
+  if (statEdits) statEdits.textContent = `${totals.edits || 0} code edits`;
+  if (statLines) statLines.textContent = `${totals.changedLines || 0} lines changed • ${totals.toolCalls || 0} tool calls`;
+
+  // Dimension 1: Projects Table
+  const projTbody = $('#wdd-projects-tbody');
+  if (projTbody) {
+    if (!data.projects?.length) {
+      projTbody.innerHTML = `<tr><td colSpan="7" class="muted" style="text-align:center; padding:16px;">No project records logged.</td></tr>`;
+    } else {
+      projTbody.innerHTML = data.projects.map(p => `
+        <tr>
+          <td><strong>📁 ${esc(p.project)}</strong></td>
+          <td>${(p.sources || []).map(s => `<span class="source-tag">${esc(s)}</span>`).join(' ')}</td>
+          <td>${p.sessions}</td>
+          <td>${fmtTokens(p.tokensIn)} / ${fmtTokens(p.tokensOut)}</td>
+          <td><strong style="color:var(--brand-hi);">${fmtTokens(p.totalTokens)}</strong></td>
+          <td>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-weight:600; width:36px;">${Math.round(p.percentage)}%</span>
+              <div style="flex:1; max-width:80px; height:6px; background:rgba(255,255,255,0.06); border-radius:3px; overflow:hidden;">
+                <div style="width:${Math.min(100, Math.round(p.percentage))}%; height:100%; background:var(--brand); border-radius:3px;"></div>
+              </div>
+            </div>
+          </td>
+          <td><strong>${fmtCost(p.apiCost)}</strong></td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  // Dimension 2: Models Table
+  const modTbody = $('#wdd-models-tbody');
+  if (modTbody) {
+    if (!data.models?.length) {
+      modTbody.innerHTML = `<tr><td colSpan="7" class="muted" style="text-align:center; padding:16px;">No model records logged.</td></tr>`;
+    } else {
+      modTbody.innerHTML = data.models.map(mod => `
+        <tr>
+          <td><strong>🤖 <code>${esc(mod.model)}</code></strong></td>
+          <td><span class="source-tag">${esc(mod.source)}</span></td>
+          <td>${mod.sessions}</td>
+          <td>${fmtTokens(mod.tokensIn)} / ${fmtTokens(mod.tokensOut)}</td>
+          <td><span style="color:#a78bfa; font-weight:600;">${Math.round(mod.cacheHitRate)}%</span></td>
+          <td><strong>${fmtTokens(mod.totalTokens)}</strong></td>
+          <td><strong>${fmtCost(mod.apiCost)}</strong></td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  // Dimension 3: Top Sessions Table
+  const sessTbody = $('#wdd-sessions-tbody');
+  if (sessTbody) {
+    if (!data.topSessions?.length) {
+      sessTbody.innerHTML = `<tr><td colSpan="7" class="muted" style="text-align:center; padding:16px;">No session logs found.</td></tr>`;
+    } else {
+      sessTbody.innerHTML = data.topSessions.map(s => {
+        const runawayBadge = s.isRunaway
+          ? `<span class="source-tag" style="background:rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.3); font-size:10px;">⚠️ Loop / Runaway</span>`
+          : `<span class="muted" style="font-size:10.5px;">✓ Normal</span>`;
+        const timeStr = s.startedAt ? String(s.startedAt).slice(0, 16).replace('T', ' ') : '—';
+
+        return `
+          <tr>
+            <td>
+              <div style="font-weight:600; font-size:12px; font-family:monospace;">${esc(s.sessionId)}</div>
+              <div class="muted" style="font-size:10.5px;">${timeStr}</div>
+            </td>
+            <td>📁 ${esc(s.project)}</td>
+            <td>
+              <div><span class="source-tag">${esc(s.source)}</span></div>
+              <code style="font-size:10px;">${esc(s.model)}</code>
+            </td>
+            <td>
+              <div style="font-weight:700; color:var(--brand-hi);">${fmtTokens(s.totalTokens)}</div>
+              <div class="muted" style="font-size:10px;">${fmtTokens(s.tokensIn)} in • ${fmtTokens(s.tokensCacheRead)} cache</div>
+            </td>
+            <td><strong>${fmtCost(s.apiCost)}</strong></td>
+            <td>
+              ${runawayBadge}
+              <div class="muted" style="font-size:10px;">${s.toolErrors || 0} errs • ${s.reworkLoops || 0} loops</div>
+            </td>
+            <td style="text-align:right;">
+              <button type="button" class="hbtn" style="font-size:11px; padding:3px 8px;" onclick="inspectWhalePrompt('${esc(s.sessionId)}')">
+                Prompts ↗
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+  }
+
+  // Dimension 4: Files Table
+  const filesTbody = $('#wdd-files-tbody');
+  if (filesTbody) {
+    if (!data.topFiles?.length) {
+      filesTbody.innerHTML = `<tr><td colSpan="3" class="muted" style="text-align:center; padding:16px;">No code diff records logged.</td></tr>`;
+    } else {
+      filesTbody.innerHTML = data.topFiles.map(f => `
+        <tr>
+          <td><code style="font-size:11.5px;">${esc(f.path)}</code></td>
+          <td>${f.edits} edits</td>
+          <td><span style="color:#4ade80;">+${f.additions || 0}</span> <span style="color:#f87171;">−${f.deletions || 0}</span> (${f.changedLines} changed)</td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  // Dimension 5: Daily Timeline
+  const timelineEl = $('#wdd-timeline-chart');
+  if (timelineEl) {
+    if (!data.dailyTimeline?.length) {
+      timelineEl.innerHTML = `<p class="muted" style="font-size:12px; margin:0;">No daily timeline data available.</p>`;
+    } else {
+      const maxDaily = Math.max(...data.dailyTimeline.map(d => d.totalTokens), 1);
+      timelineEl.innerHTML = `
+        <div style="display:flex; gap:6px; align-items:flex-end; height:120px; padding-top:20px; overflow-x:auto;">
+          ${data.dailyTimeline.map(d => {
+            const h = Math.max(4, Math.round((d.totalTokens / maxDaily) * 90));
+            return `
+              <div style="display:flex; flex-direction:column; align-items:center; flex:1; min-width:24px;" title="${d.day}: ${fmtTokens(d.totalTokens)} tokens (${fmtCost(d.apiCost)}) across ${d.sessions} sessions">
+                <span style="font-size:9px; color:var(--muted); margin-bottom:4px;">${fmtTokens(d.totalTokens)}</span>
+                <div style="width:100%; height:${h}px; background:var(--brand); border-radius:3px 3px 0 0; opacity:0.85;"></div>
+                <span style="font-size:9px; color:var(--muted); margin-top:4px; transform:rotate(-45deg); transform-origin:left top; white-space:nowrap;">${d.day.slice(5)}</span>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+  }
+}
+
+function inspectWhalePrompt(sessionId) {
+  // Close modal
+  const dialog = $('#whale-drilldown-dialog');
+  if (dialog) dialog.close?.();
+
+  // Switch to prompts tab
+  const btn = $('#tabbtn-prompts');
+  if (btn) btn.click();
+
+  // Filter prompt explorer by session ID if input exists
+  setTimeout(() => {
+    const searchInput = $('#prompt-search-input') || $('#prompt-search');
+    if (searchInput) {
+      searchInput.value = sessionId;
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      searchInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }, 100);
+}
+
+// Bind Top Usage Events
+function bindTopUsageEvents() {
+  $('#whale-range-select')?.addEventListener('change', () => loadTopUsage());
+  $('#whale-team-select')?.addEventListener('change', () => loadTopUsage());
+  $('#whale-min-tokens-select')?.addEventListener('change', () => loadTopUsage());
+  $('#whale-refresh-btn')?.addEventListener('click', () => loadTopUsage());
+
+  let searchTimeout = null;
+  $('#whale-search-input')?.addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => loadTopUsage(), 350);
+  });
+
+  $('#wdd-close-btn')?.addEventListener('click', () => {
+    $('#whale-drilldown-dialog')?.close?.();
+  });
+}
+
+if (typeof window !== 'undefined') {
+  setTimeout(bindTopUsageEvents, 0);
+}

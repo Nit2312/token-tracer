@@ -1,4 +1,6 @@
 /* Team admin UI — deep analytics for members, projects, tokens, model pricing, and files */
+const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
 const RANGE_PRESETS = [
   { id: 'today', label: 'Today' },
   { id: '7d', label: '7d' },
@@ -14,6 +16,9 @@ let adminToken = sessionStorage.getItem('team-admin-token') || '';
 let currentStatsData = null;
 let currentMembersList = [];
 let currentUser = null;
+let globalSelectedMemberIds = new Set(['all']);
+const deepDiveClientCache = new Map();
+let ddDebounceTimer = null;
 
 async function checkAuth() {
   try {
@@ -429,8 +434,9 @@ function statsQuery() {
   if (!dateRange.all && dateRange.from) params.set('from', dateRange.from);
   if (!dateRange.all && dateRange.to) params.set('to', dateRange.to);
 
-  const memberId = document.getElementById('global-member-filter')?.value;
-  if (memberId && memberId !== 'all') params.set('memberId', memberId);
+  if (!globalSelectedMemberIds.has('all') && globalSelectedMemberIds.size > 0) {
+    params.set('memberId', Array.from(globalSelectedMemberIds).join(','));
+  }
 
   const source = document.getElementById('global-source-filter')?.value;
   if (source && source !== 'all') params.set('source', source);
@@ -512,11 +518,11 @@ function renderTokenLeaderboard(rows) {
   const maxTokens = rows[0]?.total_tokens || 1;
 
   el.innerHTML = `<table><thead><tr>
-    <th>Rank</th><th>Member</th><th>Total Tokens</th><th>Team Share</th><th>Input Tokens</th><th>Output Tokens</th><th>Cache Read</th><th>Est. API Cost</th>
+    <th>Rank</th><th>Member</th><th>Total Tokens</th><th>Team Share</th><th>Input Tokens</th><th>Output Tokens</th><th>Cache Read</th><th>Est. API Cost</th><th style="text-align:right;">Deep Dive</th>
   </tr></thead><tbody>${rows.map((r, i) => `<tr>
     <td><strong>#${i + 1}</strong></td>
     <td><strong>👤 ${r.display_name}</strong></td>
-    <td><strong>${fmt(r.total_tokens)}</strong></td>
+    <td><strong style="color:var(--brand-hi);">${fmt(r.total_tokens)}</strong></td>
     <td>
       <div class="bar-row" style="margin:0">
         <div class="track" style="width:80px"><div class="fill" style="width:${Math.round((r.total_tokens / maxTokens) * 100)}%"></div></div>
@@ -527,6 +533,11 @@ function renderTokenLeaderboard(rows) {
     <td>${fmt(r.tokens_out)}</td>
     <td>${fmt(r.tokens_cache_read)}</td>
     <td><strong>${fmtCost(r.api_cost)}</strong></td>
+    <td style="text-align:right;">
+      <button type="button" class="hbtn" style="font-size:11px; padding:3px 8px; border-color:var(--brand); color:var(--brand-hi);" onclick="openTeamMemberDeepDive('${r.member_id}', '${encodeURIComponent(r.display_name)}')">
+        🔍 Analyze
+      </button>
+    </td>
   </tr>`).join('')}</tbody></table>`;
 }
 
@@ -618,8 +629,9 @@ function renderMemberDrilldown(membersData) {
             <span class="source-tag">${fmt(m.sessions)} sessions</span>
             <span class="source-tag">${fmt(Number(m.tokens_in || 0) + Number(m.tokens_out || 0))} tokens</span>
           </div>
-          <div style="display:flex; align-items:center; gap:10px;">
+          <div style="display:flex; align-items:center; gap:8px;">
             <strong>${fmtCost(m.api_cost)} total cost</strong>
+            <button type="button" class="hbtn primary" style="font-size:11px;padding:3px 8px;" onclick="event.stopPropagation(); openTeamMemberDeepDive('${m.member_id}', '${encodeURIComponent(m.display_name)}')">🔍 Full Token Breakdown</button>
             <button type="button" class="hbtn" style="border-color:var(--brand);color:var(--brand-hi);font-size:11px;padding:3px 8px;" onclick="event.stopPropagation(); triggerMemberSync('${m.member_id}', '${encodeURIComponent(m.display_name)}')">⚡ Trigger Sync</button>
             <span class="collapse-icon">▼</span>
           </div>
@@ -785,6 +797,8 @@ window.deletePricingRule = async function (id) {
 
 function renderMembersTable(rows) {
   currentMembersList = rows || [];
+  populateGlobalMemberCheckboxes();
+  populateDeepDiveMemberCheckboxes();
   const select = document.getElementById('global-member-filter');
   if (select) {
     const currentVal = select.value;
@@ -922,6 +936,8 @@ async function loadStats({ soft = true } = {}) {
     renderSessionLogs(stats.recentLogs);
     renderModelPricingTable(stats.modelPricing);
     renderMemberModelsTable(stats.memberModels);
+    populateGlobalMemberCheckboxes();
+    populateDeepDiveMemberCheckboxes();
     loadPrompts().catch(console.error);
   } finally {
     if (useSoft) softLoading(false);
@@ -1012,6 +1028,7 @@ async function loadMembers() {
   if (!teamId) return;
   const { members } = await api(`/api/v1/team/members?teamId=${teamId}`);
   renderMembersTable(members);
+  populateDeepDiveMemberCheckboxes();
 }
 
 async function loadTeams() {
@@ -1065,6 +1082,8 @@ async function showApp() {
       if (teamSelectDiv) teamSelectDiv.style.display = 'none';
 
       // Hide member filter select & label
+      const memberFilterGroup = document.getElementById('global-member-filter-group');
+      if (memberFilterGroup) memberFilterGroup.style.display = 'none';
       const memberFilterSelect = document.getElementById('global-member-filter');
       const memberFilterLabel = memberFilterSelect?.closest('label');
       if (memberFilterLabel) memberFilterLabel.style.display = 'none';
@@ -1124,6 +1143,10 @@ function setupTabs() {
         targetEl.hidden = false;
         targetEl.classList.add('active');
       }
+      if (targetId === 'tab-deep-dive') {
+        populateDeepDiveMemberCheckboxes();
+        loadDeepDiveTabData();
+      }
       if (titleEl) {
         // Prefer explicit title; fall back to button label without leading emoji/icon.
         const label = (btn.dataset.title || btn.textContent || '')
@@ -1178,7 +1201,7 @@ function updateFiltersBadge() {
   if (!badge) return;
   let count = 0;
   if (!dateRange.all) count++;
-  if (document.getElementById('global-member-filter')?.value !== 'all') count++;
+  if (!globalSelectedMemberIds.has('all') && globalSelectedMemberIds.size > 0) count++;
   if (document.getElementById('global-source-filter')?.value !== 'all') count++;
   if (Number(document.getElementById('global-min-tokens-filter')?.value) > 0) count++;
   badge.textContent = String(count);
@@ -1211,6 +1234,8 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 document.getElementById('team-select').addEventListener('change', (e) => {
   teamId = e.target.value;
   localStorage.setItem('team-id', teamId);
+  globalSelectedMemberIds = new Set(['all']);
+  populateGlobalMemberCheckboxes();
   const mf = document.getElementById('global-member-filter');
   if (mf) mf.value = 'all';
   const mds = document.getElementById('member-filter-select');
@@ -1779,3 +1804,894 @@ document.getElementById('publish-release-form')?.addEventListener('submit', asyn
     if (btn) { btn.disabled = false; btn.textContent = 'Publish Release'; }
   }
 });
+
+// ── Deep-Dive Token Analysis Tab & Multi-Member Controller ──────────────────
+let ddSelectedMemberIds = new Set(['all']);
+let ddTabInitialized = false;
+
+function initDeepDiveTab() {
+  if (ddTabInitialized) return;
+  ddTabInitialized = true;
+
+  const pickerBtn = document.getElementById('dd-member-picker-btn');
+  const popover = document.getElementById('dd-member-dropdown');
+  const searchInput = document.getElementById('dd-member-search');
+  const selectAllBtn = document.getElementById('dd-select-all-btn');
+  const clearAllBtn = document.getElementById('dd-clear-all-btn');
+  const applyBtn = document.getElementById('dd-apply-btn');
+  const refreshBtn = document.getElementById('dd-refresh-btn');
+
+  // Toggle popover
+  pickerBtn?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!popover) return;
+    const isHidden = popover.hidden;
+    if (isHidden) {
+      populateDeepDiveMemberCheckboxes();
+      if (getAvailableTeamMembers().length === 0 && teamId) {
+        try {
+          await loadMembers();
+        } catch (_) {}
+      }
+    }
+    popover.hidden = !isHidden;
+    pickerBtn.setAttribute('aria-expanded', String(!isHidden));
+    if (!popover.hidden && searchInput) {
+      searchInput.value = '';
+      filterDeepDiveMemberCheckboxes('');
+      searchInput.focus();
+    }
+  });
+
+  // Close popover when clicking outside
+  document.addEventListener('click', (e) => {
+    if (popover && !popover.hidden && !e.target.closest('#dd-member-picker-wrap')) {
+      popover.hidden = true;
+      pickerBtn?.setAttribute('aria-expanded', 'false');
+    }
+  });
+
+  // Search input filter
+  searchInput?.addEventListener('input', (e) => {
+    filterDeepDiveMemberCheckboxes((e.target.value || '').trim().toLowerCase());
+  });
+
+  // Select all members
+  selectAllBtn?.addEventListener('click', () => {
+    ddSelectedMemberIds = new Set(['all']);
+    populateDeepDiveMemberCheckboxes();
+    updateDeepDiveChips();
+  });
+
+  // Clear all selections
+  clearAllBtn?.addEventListener('click', () => {
+    ddSelectedMemberIds = new Set();
+    populateDeepDiveMemberCheckboxes();
+    updateDeepDiveChips();
+  });
+
+  // Apply button
+  applyBtn?.addEventListener('click', () => {
+    if (popover) popover.hidden = true;
+    pickerBtn?.setAttribute('aria-expanded', 'false');
+    loadDeepDiveTabData();
+  });
+
+  // Refresh button
+  refreshBtn?.addEventListener('click', () => {
+    loadDeepDiveTabData();
+  });
+
+  // Tab activation hook
+  const tabBtn = document.getElementById('tabbtn-deep-dive');
+  if (tabBtn) {
+    const origOnClick = tabBtn.onclick;
+    tabBtn.onclick = (e) => {
+      if (typeof origOnClick === 'function') origOnClick(e);
+      populateDeepDiveMemberCheckboxes();
+      loadDeepDiveTabData();
+    };
+  }
+}
+
+function getAvailableTeamMembers() {
+  const members = [];
+  const seen = new Set();
+
+  const add = (id, name) => {
+    if (!id || seen.has(String(id))) return;
+    seen.add(String(id));
+    members.push({ id: String(id), name: String(name || 'Member').trim() });
+  };
+
+  // 1. From loaded members list
+  if (Array.isArray(currentMembersList)) {
+    currentMembersList.forEach(m => {
+      add(m.id || m.member_id, m.display_name || m.name);
+    });
+  }
+
+  // 2. From currentStatsData (leaderboard, tokenLeaderboard, scoreboard)
+  if (typeof currentStatsData === 'object' && currentStatsData !== null) {
+    if (Array.isArray(currentStatsData.leaderboard)) {
+      currentStatsData.leaderboard.forEach(m => {
+        add(m.member_id || m.id, m.display_name || m.name);
+      });
+    }
+    if (Array.isArray(currentStatsData.tokenLeaderboard)) {
+      currentStatsData.tokenLeaderboard.forEach(m => {
+        add(m.member_id || m.id, m.display_name || m.name);
+      });
+    }
+    if (Array.isArray(currentStatsData.scoreboard)) {
+      currentStatsData.scoreboard.forEach(m => {
+        add(m.member_id || m.id, m.display_name || m.name);
+      });
+    }
+  }
+
+  // 3. From global member filter select dropdown options
+  const globalSel = document.getElementById('global-member-filter');
+  if (globalSel && globalSel.options) {
+    Array.from(globalSel.options).forEach(opt => {
+      if (opt.value && opt.value !== 'all') {
+        add(opt.value, opt.text.replace(/^[^\w\s]+\s*/, ''));
+      }
+    });
+  }
+
+  // 4. From current user session if member
+  if (typeof currentUser === 'object' && currentUser !== null && currentUser.memberId) {
+    add(currentUser.memberId, currentUser.displayName || currentUser.username || 'You');
+  }
+
+  return members.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function populateDeepDiveMemberCheckboxes() {
+  const container = document.getElementById('dd-member-checkbox-list');
+  if (!container) return;
+
+  const members = getAvailableTeamMembers();
+  const isAll = ddSelectedMemberIds.has('all') || ddSelectedMemberIds.size === 0;
+
+  if (members.length === 0) {
+    container.innerHTML = `
+      <div style="padding: 12px; text-align: center; color: var(--muted); font-size: 12px;">
+        No team members found yet.
+      </div>
+    `;
+    updateDeepDiveChips();
+    return;
+  }
+
+  let html = `
+    <label class="member-checkbox-item" style="font-weight:600; border-bottom:1px solid var(--border); margin-bottom:4px; padding-bottom:6px;">
+      <input type="checkbox" value="all" ${isAll ? 'checked' : ''} onchange="handleDeepDiveMemberCheck('all', this.checked)">
+      <span>🌐 All Team Members (${members.length})</span>
+    </label>
+  `;
+
+  html += members.map(m => {
+    const isChecked = !isAll && ddSelectedMemberIds.has(m.id);
+    return `
+      <label class="member-checkbox-item" data-name="${esc(m.name.toLowerCase())}">
+        <input type="checkbox" value="${m.id}" ${isChecked ? 'checked' : ''} onchange="handleDeepDiveMemberCheck('${m.id}', this.checked)">
+        <span>👤 ${esc(m.name)}</span>
+      </label>
+    `;
+  }).join('');
+
+  container.innerHTML = html;
+  updateDeepDiveChips();
+}
+
+function filterDeepDiveMemberCheckboxes(query) {
+  const items = document.querySelectorAll('#dd-member-checkbox-list .member-checkbox-item[data-name]');
+  items.forEach(item => {
+    const name = item.dataset.name || '';
+    item.style.display = !query || name.includes(query) ? 'flex' : 'none';
+  });
+}
+
+window.handleDeepDiveMemberCheck = function(id, isChecked) {
+  if (id === 'all') {
+    if (isChecked) {
+      ddSelectedMemberIds = new Set(['all']);
+    } else {
+      ddSelectedMemberIds = new Set();
+    }
+  } else {
+    ddSelectedMemberIds.delete('all');
+    if (isChecked) {
+      ddSelectedMemberIds.add(id);
+    } else {
+      ddSelectedMemberIds.delete(id);
+    }
+    if (ddSelectedMemberIds.size === 0) {
+      ddSelectedMemberIds = new Set(['all']);
+    }
+  }
+
+  populateDeepDiveMemberCheckboxes();
+};
+
+window.removeDeepDiveMemberChip = function(id) {
+  if (id === 'all') return;
+  ddSelectedMemberIds.delete(id);
+  if (ddSelectedMemberIds.size === 0) {
+    ddSelectedMemberIds = new Set(['all']);
+  }
+  populateDeepDiveMemberCheckboxes();
+  loadDeepDiveTabData();
+};
+
+function updateDeepDiveChips() {
+  const chipsList = document.getElementById('dd-selected-chips-list');
+  const labelEl = document.getElementById('dd-member-picker-label');
+  if (!chipsList) return;
+
+  const members = getAvailableTeamMembers();
+  const memberMap = new Map(members.map(m => [m.id, m.name]));
+  const isAll = ddSelectedMemberIds.has('all') || ddSelectedMemberIds.size === 0;
+
+  if (isAll) {
+    if (labelEl) labelEl.textContent = `👥 All Members (${members.length})`;
+    chipsList.innerHTML = `<span class="dd-member-chip">🌐 All Team Members (${members.length})</span>`;
+    return;
+  }
+
+  const selectedCount = ddSelectedMemberIds.size;
+  if (labelEl) {
+    labelEl.textContent = selectedCount === 1
+      ? `👤 ${memberMap.get(Array.from(ddSelectedMemberIds)[0]) || '1 Member'}`
+      : `👥 ${selectedCount} Members Selected`;
+  }
+
+  chipsList.innerHTML = Array.from(ddSelectedMemberIds).map(id => {
+    const name = memberMap.get(id) || id;
+    return `
+      <span class="dd-member-chip">
+        👤 ${esc(name)}
+        <button type="button" class="dd-chip-remove" onclick="removeDeepDiveMemberChip('${id}')" title="Remove filter">✕</button>
+      </span>
+    `;
+  }).join('');
+}
+
+async function loadDeepDiveTabData() {
+  const loadingEl = document.getElementById('dd-tab-loading');
+  const contentEl = document.getElementById('dd-tab-content');
+
+  const activeTeamId = teamId || document.getElementById('team-select')?.value;
+  const from = !dateRange.all ? dateRange.from : null;
+  const to = !dateRange.all ? dateRange.to : null;
+
+  const params = new URLSearchParams();
+  if (activeTeamId) params.set('teamId', activeTeamId);
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+
+  const isAll = ddSelectedMemberIds.has('all') || ddSelectedMemberIds.size === 0;
+  if (isAll) {
+    params.set('memberIds', 'all');
+  } else {
+    params.set('memberIds', Array.from(ddSelectedMemberIds).join(','));
+  }
+
+  const cacheKey = params.toString();
+  const cached = deepDiveClientCache.get(cacheKey);
+  // Immediate return if cached within 3 minutes (180,000ms)
+  if (cached && (Date.now() - cached.ts < 180000)) {
+    renderDeepDiveTabContent(cached.data);
+    return;
+  }
+
+  if (loadingEl) loadingEl.hidden = false;
+  if (contentEl) contentEl.hidden = true;
+
+  try {
+    const res = await fetch(`/api/v1/team/usage-deep-dive?${cacheKey}`);
+    if (!res.ok) {
+      throw new Error(`Failed to fetch deep dive analytics: ${res.statusText}`);
+    }
+    const data = await res.json();
+    deepDiveClientCache.set(cacheKey, { ts: Date.now(), data });
+    renderDeepDiveTabContent(data);
+  } catch (err) {
+    console.error('[loadDeepDiveTabData error]', err);
+    if (loadingEl) {
+      loadingEl.innerHTML = `<span style="color:var(--error-text);">Error loading deep dive: ${esc(err.message)}</span>`;
+    }
+  }
+}
+
+function renderDeepDiveTabContent(data) {
+  const loadingEl = document.getElementById('dd-tab-loading');
+  const contentEl = document.getElementById('dd-tab-content');
+  if (loadingEl) loadingEl.hidden = true;
+  if (contentEl) contentEl.hidden = false;
+
+  if (!data) return;
+
+  const totals = data.totals || {};
+  const isMulti = data.member?.isMulti || (data.memberComparisons && data.memberComparisons.length > 1);
+
+  // Stat cards
+  const statTok = document.getElementById('dd-kpi-tokens');
+  const statCost = document.getElementById('dd-kpi-cost');
+  if (statTok) statTok.textContent = fmt(totals.totalTokens);
+  if (statCost) statCost.textContent = `${fmtCost(totals.totalCost)} total API cost`;
+
+  const statInOut = document.getElementById('dd-kpi-in-out');
+  const statCache = document.getElementById('dd-kpi-cache');
+  if (statInOut) statInOut.textContent = `${fmt(totals.tokensIn)} in / ${fmt(totals.tokensOut)} out`;
+  if (statCache) statCache.textContent = `Cache read: ${fmt(totals.tokensCacheRead)} (${fmt(totals.tokensCacheWrite)} write)`;
+
+  const statSess = document.getElementById('dd-kpi-sessions');
+  const statAvg = document.getElementById('dd-kpi-avg');
+  if (statSess) statSess.textContent = `${totals.sessionCount} sessions (${totals.activeDays} active days)`;
+  if (statAvg) statAvg.textContent = `Avg: ${fmt(totals.avgTokensPerSession)} / session`;
+
+  const statEdits = document.getElementById('dd-kpi-edits');
+  const statTools = document.getElementById('dd-kpi-tools');
+  if (statEdits) statEdits.textContent = `${totals.edits || 0} code edits`;
+  if (statTools) statTools.textContent = `${totals.changedLines || 0} lines changed • ${totals.toolCalls || 0} tool calls • ${totals.runawaySessionsCount || 0} loops`;
+
+  // Multi-Member Comparison Section
+  const compSection = document.getElementById('dd-member-comparison-section');
+  const compTbody = document.getElementById('dd-member-comparison-tbody');
+  if (compSection && compTbody) {
+    if (isMulti && data.memberComparisons && data.memberComparisons.length > 0) {
+      compSection.hidden = false;
+      compTbody.innerHTML = data.memberComparisons.map(mb => `
+        <tr>
+          <td>
+            <strong>👤 ${esc(mb.displayName)}</strong>
+          </td>
+          <td>${mb.sessions}</td>
+          <td>${fmt(mb.tokensIn)} / ${fmt(mb.tokensOut)}</td>
+          <td><strong style="color:var(--brand-hi);">${fmt(mb.totalTokens)}</strong></td>
+          <td>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-weight:600; width:36px;">${Math.round(mb.percentage)}%</span>
+              <div style="flex:1; max-width:80px; height:6px; background:rgba(255,255,255,0.06); border-radius:3px; overflow:hidden;">
+                <div style="width:${Math.min(100, Math.round(mb.percentage))}%; height:100%; background:var(--brand); border-radius:3px;"></div>
+              </div>
+            </div>
+          </td>
+          <td><strong>${fmtCost(mb.apiCost)}</strong></td>
+          <td>${mb.edits} edits <span class="muted">(${mb.changedLines} lines)</span></td>
+          <td>${mb.reworkLoops} loops <span class="muted">(${mb.toolErrors} errs)</span></td>
+        </tr>
+      `).join('');
+    } else {
+      compSection.hidden = true;
+    }
+  }
+
+  // Dimension 1: Projects Table
+  const projTbody = document.getElementById('dd-projects-tbody');
+  if (projTbody) {
+    if (!data.projects?.length) {
+      projTbody.innerHTML = `<tr><td colSpan="6" class="muted" style="text-align:center; padding:16px;">No project records logged.</td></tr>`;
+    } else {
+      projTbody.innerHTML = data.projects.map(p => `
+        <tr>
+          <td><strong>📁 ${cleanProjectName(p.project)}</strong></td>
+          <td>${(p.sources || []).map(s => `<span class="source-tag">${esc(s)}</span>`).join(' ')}</td>
+          <td>${p.sessions}</td>
+          <td><strong style="color:var(--brand-hi);">${fmt(p.totalTokens)}</strong></td>
+          <td>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-weight:600; width:36px;">${Math.round(p.percentage)}%</span>
+              <div style="flex:1; max-width:60px; height:6px; background:rgba(255,255,255,0.06); border-radius:3px; overflow:hidden;">
+                <div style="width:${Math.min(100, Math.round(p.percentage))}%; height:100%; background:var(--brand); border-radius:3px;"></div>
+              </div>
+            </div>
+          </td>
+          <td><strong>${fmtCost(p.apiCost)}</strong></td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  // Dimension 2: Models Table
+  const modTbody = document.getElementById('dd-models-tbody');
+  if (modTbody) {
+    if (!data.models?.length) {
+      modTbody.innerHTML = `<tr><td colSpan="6" class="muted" style="text-align:center; padding:16px;">No model records logged.</td></tr>`;
+    } else {
+      modTbody.innerHTML = data.models.map(mod => `
+        <tr>
+          <td><strong>🤖 <code>${esc(mod.model)}</code></strong></td>
+          <td><span class="source-tag">${esc(mod.source)}</span></td>
+          <td>${mod.sessions}</td>
+          <td><span style="color:#a78bfa; font-weight:600;">${Math.round(mod.cacheHitRate)}%</span></td>
+          <td><strong>${fmt(mod.totalTokens)}</strong></td>
+          <td><strong>${fmtCost(mod.apiCost)}</strong></td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  // Dimension 3: Top Sessions Table
+  const sessTbody = document.getElementById('dd-sessions-tbody');
+  if (sessTbody) {
+    if (!data.topSessions?.length) {
+      sessTbody.innerHTML = `<tr><td colSpan="6" class="muted" style="text-align:center; padding:16px;">No session logs found.</td></tr>`;
+    } else {
+      sessTbody.innerHTML = data.topSessions.map(s => {
+        const runawayBadge = s.isRunaway
+          ? `<span class="source-tag" style="background:rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.3); font-size:10px;">⚠️ Loop / Runaway</span>`
+          : `<span class="muted" style="font-size:10.5px;">✓ Normal</span>`;
+        const timeStr = s.startedAt ? String(s.startedAt).slice(0, 16).replace('T', ' ') : '—';
+
+        return `
+          <tr>
+            <td>
+              <div style="font-weight:600; font-size:12px; font-family:monospace;">${esc(s.sessionId)}</div>
+              <div class="muted" style="font-size:10.5px;">${timeStr}</div>
+            </td>
+            <td>
+              <span class="badge-pill" style="font-size:11px;">👤 ${esc(s.memberName || 'Member')}</span>
+            </td>
+            <td>
+              <div>📁 ${cleanProjectName(s.project)}</div>
+              <code style="font-size:10px;">${esc(s.model)}</code>
+            </td>
+            <td>
+              <div style="font-weight:700; color:var(--brand-hi);">${fmt(s.totalTokens)}</div>
+              <div class="muted" style="font-size:10px;">${fmt(s.tokensIn)} in • ${fmt(s.tokensCacheRead)} cache</div>
+            </td>
+            <td><strong>${fmtCost(s.apiCost)}</strong></td>
+            <td>
+              ${runawayBadge}
+              <div class="muted" style="font-size:10px;">${s.toolErrors || 0} errs • ${s.reworkLoops || 0} loops</div>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+  }
+
+  // Dimension 4: Files Table
+  const filesTbody = document.getElementById('dd-files-tbody');
+  if (filesTbody) {
+    if (!data.topFiles?.length) {
+      filesTbody.innerHTML = `<tr><td colSpan="4" class="muted" style="text-align:center; padding:16px;">No code diff records logged.</td></tr>`;
+    } else {
+      filesTbody.innerHTML = data.topFiles.map(f => `
+        <tr>
+          <td><code style="font-size:11.5px;">${esc(f.path)}</code></td>
+          <td>${f.edits} edits</td>
+          <td><span style="color:#4ade80;">+${f.additions || 0}</span> <span style="color:#f87171;">−${f.deletions || 0}</span></td>
+          <td><strong>${f.changedLines}</strong></td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  // Dimension 5: Daily Timeline
+  const timelineTbody = document.getElementById('dd-timeline-tbody');
+  if (timelineTbody) {
+    if (!data.dailyTimeline?.length) {
+      timelineTbody.innerHTML = `<tr><td colSpan="5" class="muted" style="text-align:center; padding:16px;">No daily timeline data available.</td></tr>`;
+    } else {
+      timelineTbody.innerHTML = data.dailyTimeline.slice().reverse().map(d => `
+        <tr>
+          <td><strong>${esc(d.day)}</strong></td>
+          <td>${d.sessions}</td>
+          <td><strong style="color:var(--brand-hi);">${fmt(d.totalTokens)}</strong></td>
+          <td>${fmtCost(d.apiCost)}</td>
+          <td>${d.edits} edits</td>
+        </tr>
+      `).join('');
+    }
+  }
+}
+
+// ── Team Member Token Deep-Dive Modal Controller ────────────────────────────
+async function openTeamMemberDeepDive(memberId, memberName) {
+  // Select this member in the Deep-Dive Tab filter as well
+  if (memberId) {
+    ddSelectedMemberIds = new Set([memberId]);
+    populateDeepDiveMemberCheckboxes();
+  }
+
+  const dialog = document.getElementById('team-whale-drilldown-dialog');
+  if (!dialog) return;
+
+  const titleEl = document.getElementById('twdd-title');
+  const subEl = document.getElementById('twdd-subtitle');
+  const decodedName = decodeURIComponent(memberName || 'Member');
+  if (titleEl) titleEl.textContent = `👤 ${decodedName} — Deep-Dive Token Analysis`;
+  if (subEl) subEl.textContent = `Analyzing where this member spent their tokens across repositories, models & sessions…`;
+
+  const loadingEl = document.getElementById('twdd-loading');
+  const contentEl = document.getElementById('twdd-content');
+
+  if (typeof dialog.showModal === 'function') {
+    dialog.showModal();
+  } else {
+    dialog.setAttribute('open', '');
+  }
+
+  const activeTeamId = teamId || document.getElementById('team-select')?.value;
+  const from = !dateRange.all ? dateRange.from : null;
+  const to = !dateRange.all ? dateRange.to : null;
+
+  const params = new URLSearchParams();
+  if (activeTeamId) params.set('teamId', activeTeamId);
+  params.set('memberId', memberId);
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+
+  const cacheKey = params.toString();
+  const cached = deepDiveClientCache.get(cacheKey);
+  if (cached && (Date.now() - cached.ts < 180000)) {
+    renderTeamMemberDeepDive(cached.data);
+    return;
+  }
+
+  if (loadingEl) loadingEl.hidden = false;
+  if (contentEl) contentEl.hidden = true;
+
+  try {
+    const res = await fetch(`/api/v1/team/usage-deep-dive?${cacheKey}`);
+    if (!res.ok) {
+      throw new Error(`Failed to load member deep dive: ${res.statusText}`);
+    }
+    const data = await res.json();
+    deepDiveClientCache.set(cacheKey, { ts: Date.now(), data });
+    renderTeamMemberDeepDive(data);
+  } catch (err) {
+    console.error('[openTeamMemberDeepDive error]', err);
+    if (loadingEl) {
+      loadingEl.innerHTML = `<span style="color:var(--error-text);">Error loading deep dive: ${esc(err.message)}</span>`;
+    }
+  }
+}
+
+function renderTeamMemberDeepDive(data) {
+  const loadingEl = document.getElementById('twdd-loading');
+  const contentEl = document.getElementById('twdd-content');
+  if (loadingEl) loadingEl.hidden = true;
+  if (contentEl) contentEl.hidden = false;
+
+  if (!data) return;
+
+  const m = data.member || {};
+  const totals = data.totals || {};
+
+  const subEl = document.getElementById('twdd-subtitle');
+  if (subEl) {
+    subEl.textContent = `Team: ${m.teamName || 'Independent'} • Total Volume: ${fmt(totals.totalTokens)} tokens (${fmtCost(totals.totalCost)}) across ${totals.sessionCount} sessions`;
+  }
+
+  // Stat cards
+  const statTok = document.getElementById('twdd-stat-tokens');
+  const statCost = document.getElementById('twdd-stat-cost');
+  if (statTok) statTok.textContent = fmt(totals.totalTokens);
+  if (statCost) statCost.textContent = `${fmtCost(totals.totalCost)} total API cost`;
+
+  const statInOut = document.getElementById('twdd-stat-in-out');
+  const statCache = document.getElementById('twdd-stat-cache');
+  if (statInOut) statInOut.textContent = `${fmt(totals.tokensIn)} in / ${fmt(totals.tokensOut)} out`;
+  if (statCache) statCache.textContent = `Cache read: ${fmt(totals.tokensCacheRead)} (${fmt(totals.tokensCacheWrite)} write)`;
+
+  const statSess = document.getElementById('twdd-stat-sessions');
+  const statAvg = document.getElementById('twdd-stat-avg');
+  if (statSess) statSess.textContent = `${totals.sessionCount} sessions (${totals.activeDays} active days)`;
+  if (statAvg) statAvg.textContent = `Avg: ${fmt(totals.avgTokensPerSession)} / session`;
+
+  const statEdits = document.getElementById('twdd-stat-edits');
+  const statLines = document.getElementById('twdd-stat-lines');
+  if (statEdits) statEdits.textContent = `${totals.edits || 0} code edits`;
+  if (statLines) statLines.textContent = `${totals.changedLines || 0} lines changed • ${totals.toolCalls || 0} tool calls`;
+
+  // Dimension 1: Projects Table
+  const projTbody = document.getElementById('twdd-projects-tbody');
+  if (projTbody) {
+    if (!data.projects?.length) {
+      projTbody.innerHTML = `<tr><td colSpan="7" class="muted" style="text-align:center; padding:16px;">No project records logged.</td></tr>`;
+    } else {
+      projTbody.innerHTML = data.projects.map(p => `
+        <tr>
+          <td><strong>📁 ${cleanProjectName(p.project)}</strong></td>
+          <td>${(p.sources || []).map(s => `<span class="source-tag">${esc(s)}</span>`).join(' ')}</td>
+          <td>${p.sessions}</td>
+          <td>${fmt(p.tokensIn)} / ${fmt(p.tokensOut)}</td>
+          <td><strong style="color:var(--brand-hi);">${fmt(p.totalTokens)}</strong></td>
+          <td>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-weight:600; width:36px;">${Math.round(p.percentage)}%</span>
+              <div style="flex:1; max-width:80px; height:6px; background:rgba(255,255,255,0.06); border-radius:3px; overflow:hidden;">
+                <div style="width:${Math.min(100, Math.round(p.percentage))}%; height:100%; background:var(--brand); border-radius:3px;"></div>
+              </div>
+            </div>
+          </td>
+          <td><strong>${fmtCost(p.apiCost)}</strong></td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  // Dimension 2: Models Table
+  const modTbody = document.getElementById('twdd-models-tbody');
+  if (modTbody) {
+    if (!data.models?.length) {
+      modTbody.innerHTML = `<tr><td colSpan="7" class="muted" style="text-align:center; padding:16px;">No model records logged.</td></tr>`;
+    } else {
+      modTbody.innerHTML = data.models.map(mod => `
+        <tr>
+          <td><strong>🤖 <code>${esc(mod.model)}</code></strong></td>
+          <td><span class="source-tag">${esc(mod.source)}</span></td>
+          <td>${mod.sessions}</td>
+          <td>${fmt(mod.tokensIn)} / ${fmt(mod.tokensOut)}</td>
+          <td><span style="color:#a78bfa; font-weight:600;">${Math.round(mod.cacheHitRate)}%</span></td>
+          <td><strong>${fmt(mod.totalTokens)}</strong></td>
+          <td><strong>${fmtCost(mod.apiCost)}</strong></td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  // Dimension 3: Top Sessions Table
+  const sessTbody = document.getElementById('twdd-sessions-tbody');
+  if (sessTbody) {
+    if (!data.topSessions?.length) {
+      sessTbody.innerHTML = `<tr><td colSpan="7" class="muted" style="text-align:center; padding:16px;">No session logs found.</td></tr>`;
+    } else {
+      sessTbody.innerHTML = data.topSessions.map(s => {
+        const runawayBadge = s.isRunaway
+          ? `<span class="source-tag" style="background:rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.3); font-size:10px;">⚠️ Loop / Runaway</span>`
+          : `<span class="muted" style="font-size:10.5px;">✓ Normal</span>`;
+        const timeStr = s.startedAt ? String(s.startedAt).slice(0, 16).replace('T', ' ') : '—';
+
+        return `
+          <tr>
+            <td>
+              <div style="font-weight:600; font-size:12px; font-family:monospace;">${esc(s.sessionId)}</div>
+              <div class="muted" style="font-size:10.5px;">${timeStr}</div>
+            </td>
+            <td>📁 ${cleanProjectName(s.project)}</td>
+            <td>
+              <div><span class="source-tag">${esc(s.source)}</span></div>
+              <code style="font-size:10px;">${esc(s.model)}</code>
+            </td>
+            <td>
+              <div style="font-weight:700; color:var(--brand-hi);">${fmt(s.totalTokens)}</div>
+              <div class="muted" style="font-size:10px;">${fmt(s.tokensIn)} in • ${fmt(s.tokensCacheRead)} cache</div>
+            </td>
+            <td><strong>${fmtCost(s.apiCost)}</strong></td>
+            <td>
+              ${runawayBadge}
+              <div class="muted" style="font-size:10px;">${s.toolErrors || 0} errs • ${s.reworkLoops || 0} loops</div>
+            </td>
+            <td style="text-align:right;">
+              <button type="button" class="hbtn" style="font-size:11px; padding:3px 8px;" onclick="inspectTeamPrompt('${esc(s.sessionId)}')">
+                Prompts ↗
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+  }
+
+  // Dimension 4: Files Table
+  const filesTbody = document.getElementById('twdd-files-tbody');
+  if (filesTbody) {
+    if (!data.topFiles?.length) {
+      filesTbody.innerHTML = `<tr><td colSpan="3" class="muted" style="text-align:center; padding:16px;">No code diff records logged.</td></tr>`;
+    } else {
+      filesTbody.innerHTML = data.topFiles.map(f => `
+        <tr>
+          <td><code style="font-size:11.5px;">${esc(f.path)}</code></td>
+          <td>${f.edits} edits</td>
+          <td><span style="color:#4ade80;">+${f.additions || 0}</span> <span style="color:#f87171;">−${f.deletions || 0}</span> (${f.changedLines} changed)</td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  // Dimension 5: Daily Timeline
+  const timelineEl = document.getElementById('twdd-timeline-chart');
+  if (timelineEl) {
+    if (!data.dailyTimeline?.length) {
+      timelineEl.innerHTML = `<p class="muted" style="font-size:12px; margin:0;">No daily timeline data available.</p>`;
+    } else {
+      const maxDaily = Math.max(...data.dailyTimeline.map(d => d.totalTokens), 1);
+      timelineEl.innerHTML = `
+        <div style="display:flex; gap:6px; align-items:flex-end; height:120px; padding-top:20px; overflow-x:auto;">
+          ${data.dailyTimeline.map(d => {
+            const h = Math.max(4, Math.round((d.totalTokens / maxDaily) * 90));
+            return `
+              <div style="display:flex; flex-direction:column; align-items:center; flex:1; min-width:24px;" title="${d.day}: ${fmt(d.totalTokens)} tokens (${fmtCost(d.apiCost)}) across ${d.sessions} sessions">
+                <span style="font-size:9px; color:var(--muted); margin-bottom:4px;">${fmt(d.totalTokens)}</span>
+                <div style="width:100%; height:${h}px; background:var(--brand); border-radius:3px 3px 0 0; opacity:0.85;"></div>
+                <span style="font-size:9px; color:var(--muted); margin-top:4px; transform:rotate(-45deg); transform-origin:left top; white-space:nowrap;">${d.day.slice(5)}</span>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+  }
+}
+
+function inspectTeamPrompt(sessionId) {
+  const dialog = document.getElementById('team-whale-drilldown-dialog');
+  if (dialog) dialog.close?.();
+
+  const tabBtn = document.getElementById('tabbtn-prompts');
+  if (tabBtn) tabBtn.click();
+
+  setTimeout(() => {
+    const searchInput = document.getElementById('prompt-search') || document.getElementById('prompt-search-input');
+    if (searchInput) {
+      searchInput.value = sessionId;
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      searchInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }, 100);
+}
+
+document.getElementById('twdd-close-btn')?.addEventListener('click', () => {
+  document.getElementById('team-whale-drilldown-dialog')?.close?.();
+});
+
+// ── Global Multi-Member Picker Functions ──────────────────────────────────
+function initGlobalMemberPicker() {
+  const pickerBtn = document.getElementById('global-member-picker-btn');
+  const popover = document.getElementById('global-member-dropdown');
+  const searchInput = document.getElementById('global-member-search');
+  const selectAllBtn = document.getElementById('global-select-all-btn');
+  const clearAllBtn = document.getElementById('global-clear-all-btn');
+
+  // Toggle popover
+  pickerBtn?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!popover) return;
+    const isHidden = popover.hidden;
+    if (isHidden) {
+      populateGlobalMemberCheckboxes();
+      if (getAvailableTeamMembers().length === 0 && teamId) {
+        try {
+          await loadMembers();
+          populateGlobalMemberCheckboxes();
+        } catch (_) {}
+      }
+    }
+    popover.hidden = !isHidden;
+    pickerBtn.setAttribute('aria-expanded', String(!isHidden));
+    if (!popover.hidden && searchInput) {
+      searchInput.value = '';
+      filterGlobalMemberCheckboxes('');
+      searchInput.focus();
+    }
+  });
+
+  // Close popover when clicking outside
+  document.addEventListener('click', (e) => {
+    if (popover && !popover.hidden && !e.target.closest('#global-member-picker-wrap')) {
+      popover.hidden = true;
+      pickerBtn?.setAttribute('aria-expanded', 'false');
+    }
+  });
+
+  // Search input filter
+  searchInput?.addEventListener('input', (e) => {
+    filterGlobalMemberCheckboxes((e.target.value || '').trim().toLowerCase());
+  });
+
+  // Select all members
+  selectAllBtn?.addEventListener('click', () => {
+    globalSelectedMemberIds = new Set(['all']);
+    populateGlobalMemberCheckboxes();
+    updateFiltersBadge();
+    loadStats().catch((err) => setAppError(formatError(err.message)));
+  });
+
+  // Clear all selections
+  clearAllBtn?.addEventListener('click', () => {
+    globalSelectedMemberIds = new Set();
+    populateGlobalMemberCheckboxes();
+    updateFiltersBadge();
+    loadStats().catch((err) => setAppError(formatError(err.message)));
+  });
+}
+
+function filterGlobalMemberCheckboxes(query) {
+  const items = document.querySelectorAll('#global-member-checkbox-list .member-checkbox-item[data-name]');
+  items.forEach(item => {
+    const name = item.dataset.name || '';
+    item.style.display = !query || name.includes(query) ? 'flex' : 'none';
+  });
+}
+
+window.handleGlobalMemberCheck = function(id, isChecked) {
+  if (id === 'all') {
+    if (isChecked) {
+      globalSelectedMemberIds = new Set(['all']);
+    } else {
+      globalSelectedMemberIds = new Set();
+    }
+  } else {
+    globalSelectedMemberIds.delete('all');
+    if (isChecked) {
+      globalSelectedMemberIds.add(id);
+    } else {
+      globalSelectedMemberIds.delete(id);
+    }
+    if (globalSelectedMemberIds.size === 0) {
+      globalSelectedMemberIds = new Set(['all']);
+    }
+  }
+
+  populateGlobalMemberCheckboxes();
+  updateFiltersBadge();
+  loadStats().catch((err) => setAppError(formatError(err.message)));
+};
+
+function populateGlobalMemberCheckboxes() {
+  const container = document.getElementById('global-member-checkbox-list');
+  const labelEl = document.getElementById('global-member-picker-label');
+  if (!container) return;
+
+  const members = getAvailableTeamMembers();
+  const isAll = globalSelectedMemberIds.has('all') || globalSelectedMemberIds.size === 0;
+
+  // Update label
+  if (labelEl) {
+    if (isAll) {
+      labelEl.textContent = `👥 All Members (${members.length})`;
+    } else if (globalSelectedMemberIds.size === 1) {
+      const selectedId = Array.from(globalSelectedMemberIds)[0];
+      const m = members.find(x => x.id === selectedId);
+      labelEl.textContent = m ? `👤 ${m.name}` : `👤 1 Member`;
+    } else {
+      labelEl.textContent = `👥 ${globalSelectedMemberIds.size} Members`;
+    }
+  }
+
+  if (members.length === 0) {
+    container.innerHTML = `
+      <div style="padding: 12px; text-align: center; color: var(--muted); font-size: 12px;">
+        No team members found yet.
+      </div>
+    `;
+    return;
+  }
+
+  let html = `
+    <label class="member-checkbox-item" style="font-weight:600; border-bottom:1px solid var(--border); margin-bottom:4px; padding-bottom:6px;">
+      <input type="checkbox" value="all" ${isAll ? 'checked' : ''} onchange="handleGlobalMemberCheck('all', this.checked)">
+      <span>🌐 All Members (${members.length})</span>
+    </label>
+  `;
+
+  html += members.map(m => {
+    const isChecked = !isAll && globalSelectedMemberIds.has(m.id);
+    return `
+      <label class="member-checkbox-item" data-name="${esc(m.name.toLowerCase())}">
+        <input type="checkbox" value="${m.id}" ${isChecked ? 'checked' : ''} onchange="handleGlobalMemberCheck('${m.id}', this.checked)">
+        <span>👤 ${esc(m.name)}</span>
+      </label>
+    `;
+  }).join('');
+
+  container.innerHTML = html;
+}
+
+// Auto-initialize pickers
+document.addEventListener('DOMContentLoaded', () => {
+  initGlobalMemberPicker();
+  initDeepDiveTab();
+});
+setTimeout(() => {
+  initGlobalMemberPicker();
+  initDeepDiveTab();
+}, 200);
+

@@ -18,7 +18,7 @@ export async function GET(req: NextRequest) {
     const limit = Math.max(1, Math.min(250, Number(searchParams.get('limit') || 50)));
 
     // Filter by memberId if role === 'user', or optional global-member-filter parameter if admin
-    let memberId = searchParams.get('memberId') || 'all';
+    let memberId = searchParams.get('memberIds') || searchParams.get('memberId') || 'all';
     if (session?.role === 'user') {
       memberId = session.memberId || 'all';
     }
@@ -27,6 +27,11 @@ export async function GET(req: NextRequest) {
     const to = searchParams.get('to');
     const source = searchParams.get('source');
     const minTokens = searchParams.get('minTokens');
+
+    let memberIdsArr: string[] = [];
+    if (memberId && memberId !== 'all') {
+      memberIdsArr = memberId.split(',').map((id) => id.trim()).filter((id) => Boolean(id) && id !== 'all');
+    }
 
     // Fetch session_turns for user role
     const turnConstraints: Parameters<typeof queryCol>[1] = [
@@ -59,7 +64,7 @@ export async function GET(req: NextRequest) {
     let filteredTurns = userTurns.filter((t: any) => {
       const ss = sessionBySessionId.get(t.session_id);
       if (!ss) return false;
-      if (memberId && memberId !== 'all' && ss.member_id !== memberId) return false;
+      if (memberIdsArr.length > 0 && !memberIdsArr.includes(ss.member_id)) return false;
       if (source && source !== 'all' && ss.source !== source) return false;
 
       const ts = ss.ended_at || ss.started_at || ss.synced_at;
