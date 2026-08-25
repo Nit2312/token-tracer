@@ -14,7 +14,7 @@ import {
   IMPERSONATION_COOKIE,
   type SessionPayload,
 } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { getDocById, queryCol } from '@/lib/team/db';
 import { recordAuditEvent } from '@/lib/team/audit';
 
 export const dynamic = 'force-dynamic';
@@ -61,12 +61,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Look up the target user
-    const { rows } = await query(
-      `SELECT id, username, display_name, role, member_id, team_id, active
-       FROM users WHERE id = $1`,
-      [targetUserId],
-    );
-    const targetUser = rows[0] as any;
+    const targetUser = await getDocById('users', targetUserId) as any;
 
     if (!targetUser) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
@@ -77,22 +72,13 @@ export async function POST(req: NextRequest) {
     }
 
     let targetTeamId = targetUser.team_id;
-    if (targetUser.role === 'user' && targetUser.member_id) {
-      const { rows: tmRows } = await query(
-        'SELECT team_id FROM team_members WHERE member_id = $1 ORDER BY created_at ASC LIMIT 1',
-        [targetUser.member_id]
-      );
-      if (tmRows[0]?.team_id) {
-        targetTeamId = tmRows[0].team_id;
-      }
-    } else if (!targetTeamId && targetUser.member_id) {
-      const { rows: tmRows } = await query(
-        'SELECT team_id FROM team_members WHERE member_id = $1 LIMIT 1',
-        [targetUser.member_id]
-      );
-      if (tmRows[0]?.team_id) {
-        targetTeamId = tmRows[0].team_id;
-      }
+    if (targetUser.member_id) {
+      const tmDocs = await queryCol<{ team_id: string }>('team_members', [
+        { type: 'where', field: 'member_id', op: '==', value: targetUser.member_id },
+        { type: 'orderBy', field: 'created_at', direction: 'asc' },
+        { type: 'limit', n: 1 },
+      ]);
+      if (tmDocs[0]?.team_id) targetTeamId = tmDocs[0].team_id;
     }
 
     // Build the impersonated session payload

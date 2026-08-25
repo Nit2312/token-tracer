@@ -10,7 +10,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'node:crypto';
 import { adminPassword, superadminPassword } from '@/lib/team/env';
 import { verifyAdminPassword } from '@/lib/team/auth';
-import { query } from '@/lib/team/db';
+import { queryCol } from '@/lib/team/db';
 import {
   findUserByUsername, verifyPassword, touchLastLogin,
   buildSessionCookie, type SessionPayload,
@@ -122,22 +122,13 @@ export async function POST(req: NextRequest) {
     await resetFailedLogin(user.id);
 
     let userTeamId = user.team_id;
-    if (user.role === 'user' && user.member_id) {
-      const { rows: tmRows } = await query(
-        'SELECT team_id FROM team_members WHERE member_id = $1 ORDER BY created_at ASC LIMIT 1',
-        [user.member_id]
-      );
-      if (tmRows[0]?.team_id) {
-        userTeamId = tmRows[0].team_id;
-      }
-    } else if (!userTeamId && user.member_id) {
-      const { rows: tmRows } = await query(
-        'SELECT team_id FROM team_members WHERE member_id = $1 LIMIT 1',
-        [user.member_id]
-      );
-      if (tmRows[0]?.team_id) {
-        userTeamId = tmRows[0].team_id;
-      }
+    if (user.member_id) {
+      const tmDocs = await queryCol<{ team_id: string }>('team_members', [
+        { type: 'where', field: 'member_id', op: '==', value: user.member_id },
+        { type: 'orderBy', field: 'created_at', direction: 'asc' },
+        { type: 'limit', n: 1 },
+      ]);
+      if (tmDocs[0]?.team_id) userTeamId = tmDocs[0].team_id;
     }
 
     payload = {

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthorizedTeamId, getSessionFromCookie } from '@/lib/auth';
 import { verifyAdminToken, adminTokenFromCookie, memberFromAuthHeader } from '@/lib/team/auth';
-import { query } from '@/lib/team/db';
+import { queryCol, getDocById, setDocById } from '@/lib/team/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -59,16 +59,17 @@ export async function POST(req: NextRequest) {
       memberId = session.memberId;
     }
 
+    const nowIso = new Date().toISOString();
+
     if (memberId === 'all') {
-      await query(
-        'UPDATE members SET sync_requested_at = now() WHERE id IN (SELECT member_id FROM team_members WHERE team_id = $1)',
-        [teamId],
+      const tmDocs = await queryCol<any>('team_members', [
+        { type: 'where', field: 'team_id', op: '==', value: teamId },
+      ]);
+      await Promise.all(
+        tmDocs.map((tm) => setDocById('members', tm.member_id, { sync_requested_at: nowIso }, true))
       );
     } else {
-      await query(
-        'UPDATE members SET sync_requested_at = now() WHERE id = $1 AND id IN (SELECT member_id FROM team_members WHERE team_id = $2)',
-        [memberId, teamId],
-      );
+      await setDocById('members', memberId, { sync_requested_at: nowIso }, true);
     }
 
     return NextResponse.json(
@@ -92,12 +93,8 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: 'invalid API key' }, { status: 401, headers: corsHeaders });
     }
 
-    const { rows } = await query(
-      'SELECT sync_requested_at FROM members WHERE id = $1',
-      [member.member_id],
-    );
-
-    const syncRequestedAt = rows[0]?.sync_requested_at || null;
+    const memberDoc = await getDocById('members', member.member_id);
+    const syncRequestedAt = memberDoc?.sync_requested_at || null;
 
     return NextResponse.json(
       { syncRequested: Boolean(syncRequestedAt), syncRequestedAt },

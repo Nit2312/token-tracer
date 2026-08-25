@@ -6,7 +6,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie, hashPassword } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { getDocById, setDocById } from '@/lib/team/db';
 import { recordAuditEvent } from '@/lib/team/audit';
 import crypto from 'node:crypto';
 
@@ -31,12 +31,9 @@ export async function POST(req: NextRequest) {
     const newPassword = String(body.newPassword || randomPassword());
     const passwordHash = await hashPassword(newPassword);
 
-    const { rowCount } = await query(
-      'UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2',
-      [passwordHash, id],
-    );
-
-    if (!rowCount) return NextResponse.json({ error: 'user not found' }, { status: 404 });
+    const userDoc = await getDocById('users', id);
+    if (!userDoc) return NextResponse.json({ error: 'user not found' }, { status: 404 });
+    await setDocById('users', id, { password_hash: passwordHash, updated_at: new Date().toISOString() }, true);
 
     await recordAuditEvent({
       actorUserId: session.userId,

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { query } from '@/lib/team/db';
-import { buildResearchFilters, parseRangeDays, requireSuperadminApi } from '@/lib/team/researchQuery';
+import { queryCol } from '@/lib/team/db';
+import { parseRangeDays, requireSuperadminApi } from '@/lib/team/researchQuery';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,37 +10,54 @@ export async function GET(req: NextRequest) {
 
   const searchParams = req.nextUrl.searchParams;
   const days = parseRangeDays(searchParams.get('range'));
+  const modelFilter = searchParams.get('model');
+  const toolFilter = searchParams.get('tool');
 
-  const { whereClause, params } = buildResearchFilters(
-    searchParams,
-    "ss.started_at >= NOW() - $1::int * INTERVAL '1 day'",
-    [days],
-    [
-      { param: 'model', column: 'st.model' },
-      { param: 'tool', column: 'st.tool' },
-    ],
-  );
+  const cutoff = new Date(Date.now() - days * 86400 * 1000).toISOString();
 
   try {
-    const { rows } = await query(`
-      SELECT 
-        st.model,
-        LEAST(9, FLOOR((st.cumulative_input_tokens::float / COALESCE(mcl.max_context_tokens, 200000)) * 10)::int) AS "fillBucket",
-        COALESCE(COUNT(*) FILTER (WHERE st.tool_error_flag)::float / NULLIF(COUNT(*), 0), 0) AS "toolErrorRate",
-        COALESCE(SUM(st.tool_call_valid_count)::float / NULLIF(SUM(st.tool_call_count), 0), 0) AS "validToolCallRate",
-        COUNT(*)::int AS "sampleSize"
-      FROM session_turns st
-      JOIN sync_sessions ss ON ss.session_id = st.session_id
-                           AND st.org_id = ss.team_id::text
-                           AND st.user_id = ss.member_id::text
-                           AND st.tool = ss.source
-      LEFT JOIN model_context_limits mcl ON mcl.model = st.model
-      WHERE st.turn_role = 'assistant'
-        AND st.cumulative_input_tokens > 0
-        AND ${whereClause}
-      GROUP BY st.model, "fillBucket"
-      ORDER BY st.model, "fillBucket"
-    `, params);
+    const [assistantTurns, syncSessions] = await Promise.all([
+      queryCol<any>('session_turns', [{ type: 'where', field: 'turn_role', op: '==', value: 'assistant' }]),
+      queryCol<any>('sync_sessions'),
+    ]);
+
+    const sessionMap = new Map(syncSessions.map((s: any) => [s.session_id || s.id, s]));
+
+    const filtered = assistantTurns.filter((st: any) => {
+      if (!st.cumulative_input_tokens || st.cumulative_input_tokens <= 0) return false;
+      const ss = sessionMap.get(st.session_id);
+      if (!ss || !ss.started_at || ss.started_at < cutoff) return false;
+      if (modelFilter && st.model !== modelFilter) return false;
+      if (toolFilter && st.tool !== toolFilter) return false;
+      return true;
+    });
+
+    // Bucket calculation: fillBucket 0-9
+    const maxContextTokens = 200000;
+    const bucketMap = new Map<string, { model: string; fillBucket: number; errors: number; totalTurns: number; validTools: number; totalTools: number }>();
+
+    for (const st of filtered) {
+      const fillBucket = Math.min(9, Math.floor((Number(st.cumulative_input_tokens || 0) / maxContextTokens) * 10));
+      const key = `${st.model}_${fillBucket}`;
+      if (!bucketMap.has(key)) {
+        bucketMap.set(key, { model: st.model, fillBucket, errors: 0, totalTurns: 0, validTools: 0, totalTools: 0 });
+      }
+      const b = bucketMap.get(key)!;
+      b.totalTurns += 1;
+      if (st.tool_error_flag) b.errors += 1;
+      b.validTools += Number(st.tool_call_valid_count || 0);
+      b.totalTools += Number(st.tool_call_count || 0);
+    }
+
+    const rows = Array.from(bucketMap.values())
+      .map(b => ({
+        model: b.model,
+        fillBucket: b.fillBucket,
+        toolErrorRate: b.totalTurns > 0 ? b.errors / b.totalTurns : 0,
+        validToolCallRate: b.totalTools > 0 ? b.validTools / b.totalTools : 0,
+        sampleSize: b.totalTurns,
+      }))
+      .sort((a, b) => a.model.localeCompare(b.model) || a.fillBucket - b.fillBucket);
 
     // Compute inflection points per model
     const inflectionPoints: Record<string, number | null> = {};
@@ -48,8 +65,6 @@ export async function GET(req: NextRequest) {
 
     for (const m of models) {
       const modelRows = rows.filter(r => r.model === m).sort((a, b) => a.fillBucket - b.fillBucket);
-      
-      // Calculate baseline error rate in 0-20% fill range (buckets 0 and 1)
       const baselineRows = modelRows.filter(r => r.fillBucket <= 1);
       const baselineSum = baselineRows.reduce((sum, r) => sum + r.toolErrorRate, 0);
       const baselineError = baselineRows.length ? (baselineSum / baselineRows.length) : 0;
@@ -64,31 +79,14 @@ export async function GET(req: NextRequest) {
       inflectionPoints[m] = inflectionBucket;
     }
 
-    // Turn-level scatter (fill % vs error flag), sampled for a drill-down
-    // view — the bucket histogram above hides individual near-limit turns.
-    const { rows: scatter } = await query(`
-      SELECT model, "fillPct", "toolErrorFlag", "sessionId", "turnIndex"
-      FROM (
-        SELECT
-          st.model,
-          (st.cumulative_input_tokens::float / COALESCE(mcl.max_context_tokens, 200000)) AS "fillPct",
-          st.tool_error_flag AS "toolErrorFlag",
-          st.session_id AS "sessionId",
-          st.turn_index AS "turnIndex",
-          ROW_NUMBER() OVER (PARTITION BY st.model ORDER BY RANDOM()) AS rn
-        FROM session_turns st
-        JOIN sync_sessions ss ON ss.session_id = st.session_id
-                             AND st.org_id = ss.team_id::text
-                             AND st.user_id = ss.member_id::text
-                             AND st.tool = ss.source
-        LEFT JOIN model_context_limits mcl ON mcl.model = st.model
-        WHERE st.turn_role = 'assistant'
-          AND st.cumulative_input_tokens > 0
-          AND ${whereClause}
-      ) sampled
-      WHERE rn <= 500
-      ORDER BY model, "fillPct"
-    `, params);
+    // Scatter samples
+    const scatter = filtered.slice(0, 500).map(st => ({
+      model: st.model,
+      fillPct: Number(st.cumulative_input_tokens || 0) / maxContextTokens,
+      toolErrorFlag: Boolean(st.tool_error_flag),
+      sessionId: st.session_id,
+      turnIndex: st.turn_index,
+    })).sort((a, b) => a.model.localeCompare(b.model) || a.fillPct - b.fillPct);
 
     return NextResponse.json({ rows, inflectionPoints, scatter });
   } catch (err: any) {

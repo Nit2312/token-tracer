@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { setDocById, getDocById, deleteDocById, newUuid } from '@/lib/team/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,17 +15,12 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const name = String(body.name || '').trim();
+    if (!name) return NextResponse.json({ error: 'team name is required' }, { status: 400 });
 
-    if (!name) {
-      return NextResponse.json({ error: 'team name is required' }, { status: 400 });
-    }
+    const id = newUuid();
+    await setDocById('teams', id, { id, name, created_at: new Date().toISOString() });
 
-    const { rows } = await query(
-      `INSERT INTO teams (name) VALUES ($1) RETURNING id, name`,
-      [name]
-    );
-
-    return NextResponse.json({ team: rows[0] }, { status: 201 });
+    return NextResponse.json({ team: { id, name } }, { status: 201 });
   } catch (err: any) {
     console.error('[admin/teams POST error]', err);
     return NextResponse.json({ error: String(err.message || err) }, { status: 500 });
@@ -39,21 +34,14 @@ export async function PUT(req: NextRequest) {
     const body = await req.json();
     const { id, name } = body;
     const trimmedName = String(name || '').trim();
+    if (!id || !trimmedName) return NextResponse.json({ error: 'id and team name are required' }, { status: 400 });
 
-    if (!id || !trimmedName) {
-      return NextResponse.json({ error: 'id and team name are required' }, { status: 400 });
-    }
+    const existing = await getDocById('teams', id);
+    if (!existing) return NextResponse.json({ error: 'team not found' }, { status: 404 });
 
-    const { rows } = await query(
-      `UPDATE teams SET name = $2 WHERE id = $1 RETURNING id, name`,
-      [id, trimmedName]
-    );
+    await setDocById('teams', id, { name: trimmedName, updated_at: new Date().toISOString() }, true);
 
-    if (!rows[0]) {
-      return NextResponse.json({ error: 'team not found' }, { status: 404 });
-    }
-
-    return NextResponse.json({ team: rows[0] });
+    return NextResponse.json({ team: { id, name: trimmedName } });
   } catch (err: any) {
     console.error('[admin/teams PUT error]', err);
     return NextResponse.json({ error: String(err.message || err) }, { status: 500 });
@@ -67,8 +55,8 @@ export async function DELETE(req: NextRequest) {
   if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
 
   try {
-    const { rowCount } = await query('DELETE FROM teams WHERE id = $1', [id]);
-    return NextResponse.json({ ok: true, deleted: (rowCount || 0) > 0 });
+    await deleteDocById('teams', id);
+    return NextResponse.json({ ok: true, deleted: true });
   } catch (err: any) {
     console.error('[admin/teams DELETE error]', err);
     return NextResponse.json({ error: String(err.message || err) }, { status: 500 });

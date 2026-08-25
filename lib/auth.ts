@@ -6,7 +6,7 @@
 import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { sessionSecret } from '@/lib/team/env';
-import { query } from '@/lib/team/db';
+import { queryCol, setDocById, getDocById, newUuid } from '@/lib/team/db';
 import { adminTokenFromCookie, verifyAdminToken } from './team/auth';
 
 export const COOKIE_NAME = 'app_session';
@@ -16,7 +16,7 @@ export const COOKIE_MAX_AGE = 7 * 24 * 60 * 60; // 7 days in seconds
 export type Role = 'user' | 'admin' | 'superadmin';
 
 export interface SessionPayload {
-  userId: string;   // For users: UUID from users table. For admin/superadmin: 'admin' | 'superadmin'
+  userId: string;   // For users: UUID from users collection. For admin/superadmin: 'admin' | 'superadmin'
   username: string;
   displayName: string;
   role: Role;
@@ -151,42 +151,41 @@ export interface DbUser {
   role: Role;
   active: boolean;
   failed_login_attempts?: number;
-  locked_until?: Date | string | null;
+  locked_until?: string | null;
 }
 
 export async function findUserByUsername(username: string): Promise<DbUser | null> {
   const norm = String(username || '').trim().toLowerCase();
   if (!norm) return null;
-  const { rows } = await query<DbUser>(
-    `SELECT id, username, password_hash, display_name, member_id, team_id, role, active,
-            failed_login_attempts, locked_until
-     FROM users WHERE LOWER(username) = $1`,
-    [norm],
-  );
-  return rows[0] || null;
+  const docs = await queryCol<DbUser>('users', [
+    { type: 'where', field: 'username', op: '==', value: norm },
+    { type: 'limit', n: 1 },
+  ]);
+  return docs[0] || null;
 }
 
 export async function touchLastLogin(userId: string): Promise<void> {
-  await query('UPDATE users SET last_login_at = now() WHERE id = $1', [userId]);
+  await setDocById('users', userId, { last_login_at: new Date().toISOString() }, true);
 }
 
 export async function recordFailedLogin(userId: string, currentAttempts: number): Promise<void> {
   const newAttempts = (currentAttempts || 0) + 1;
-  let lockedUntil: Date | null = null;
+  let lockedUntil: string | null = null;
   if (newAttempts >= 5) {
-    lockedUntil = new Date(Date.now() + 15 * 60 * 1000); // 15 mins lock
+    lockedUntil = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 mins lock
   }
-  await query(
-    'UPDATE users SET failed_login_attempts = $1, locked_until = $2 WHERE id = $3',
-    [newAttempts, lockedUntil, userId]
-  );
+  await setDocById('users', userId, {
+    failed_login_attempts: newAttempts,
+    locked_until: lockedUntil,
+  }, true);
 }
 
 export async function resetFailedLogin(userId: string): Promise<void> {
-  await query(
-    'UPDATE users SET failed_login_attempts = 0, locked_until = NULL, last_login_at = now() WHERE id = $1',
-    [userId]
-  );
+  await setDocById('users', userId, {
+    failed_login_attempts: 0,
+    locked_until: null,
+    last_login_at: new Date().toISOString(),
+  }, true);
 }
 
 /** @deprecated Raw API keys are not stored — they are only shown once at creation time. */

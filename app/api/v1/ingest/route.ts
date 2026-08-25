@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { memberFromAuthHeader } from '@/lib/team/auth';
 import { ingestSessions } from '@/lib/team/ingest';
-import { query } from '@/lib/team/db';
+import { setDocById } from '@/lib/team/db';
 
 
 export const dynamic = 'force-dynamic';
@@ -27,10 +27,8 @@ export async function POST(req: NextRequest) {
     const daemonVersion = (req.headers.get('x-daemon-version') || '').trim() || null;
     if (daemonVersion) {
       // Fire-and-forget — don't block ingest on this
-      query(
-        `UPDATE members SET daemon_version = $1, daemon_last_seen_at = now() WHERE id = $2`,
-        [daemonVersion, member.member_id],
-      ).catch((e: unknown) => console.warn('[ingest version-track warn]', e));
+      setDocById('members', member.member_id, { daemon_version: daemonVersion, daemon_last_seen_at: new Date().toISOString() }, true)
+        .catch((e: unknown) => console.warn('[ingest version-track warn]', e));
     }
     let body: Record<string, unknown> = {};
     try {

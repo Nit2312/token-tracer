@@ -8,7 +8,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie, clearSessionCookie } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { queryCol, getDocById } from '@/lib/team/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,8 +18,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'not authenticated' }, { status: 401 });
   }
 
-  // For regular users, also fetch their raw API key (stored in member_keys).
-  // We only expose the key label + creation date, not the hash.
   let apiKey: string | null = null;
   let installCommandMac: string | null = null;
   let installCommandWin: string | null = null;
@@ -36,51 +34,42 @@ export async function GET(req: NextRequest) {
   let currentDisplayName = session.displayName;
 
   if (isUuid(session.userId)) {
-    const { rows: userRows } = await query(
-      `SELECT u.display_name, u.api_key, u.member_id, u.team_id FROM users u WHERE u.id = $1`,
-      [session.userId],
-    );
-    if (userRows[0]) {
-      apiKey = userRows[0].api_key ?? null;
-      memberId = userRows[0].member_id ?? memberId;
-      teamId = userRows[0].team_id ?? teamId;
-      if (userRows[0].display_name) {
-        currentDisplayName = userRows[0].display_name;
-      }
+    const userDoc = await getDocById('users', session.userId);
+    if (userDoc) {
+      apiKey = userDoc.api_key ?? null;
+      memberId = userDoc.member_id ?? memberId;
+      teamId = userDoc.team_id ?? teamId;
+      if (userDoc.display_name) currentDisplayName = userDoc.display_name;
     }
   }
 
   if (isUuid(memberId)) {
-    const { rows: countRows } = await query(
-      `SELECT count(*)::int AS count FROM sync_sessions WHERE member_id = $1`,
-      [memberId],
-    );
-    sessionCount = countRows[0]?.count || 0;
+    // Count sessions for this member
+    const sessionDocs = await queryCol('sync_sessions', [
+      { type: 'where', field: 'member_id', op: '==', value: memberId },
+    ]);
+    sessionCount = sessionDocs.length;
 
     // Fetch all teams this member belongs to
-    const { rows: teamRows } = await query<{ id: string; name: string; role: string }>(
-      `SELECT t.id, t.name, tm.role
-       FROM team_members tm
-       JOIN teams t ON t.id = tm.team_id
-       WHERE tm.member_id = $1
-       ORDER BY t.name`,
-      [memberId],
+    const tmDocs = await queryCol<{ team_id: string; role: string }>('team_members', [
+      { type: 'where', field: 'member_id', op: '==', value: memberId },
+    ]);
+    const teamDocs = await Promise.all(
+      tmDocs.map((tm) => getDocById('teams', tm.team_id).then((t) => t ? { id: t.id, name: t.name, role: tm.role } : null)),
     );
-    userTeams = teamRows;
+    userTeams = (teamDocs.filter(Boolean) as any[]).sort((a, b) => String(a.name).localeCompare(String(b.name)));
+
     if (session.role === 'user') {
-      if (userTeams.length > 0 && !userTeams.some(t => t.id === teamId)) {
+      if (userTeams.length > 0 && !userTeams.some((t) => t.id === teamId)) {
         teamId = userTeams[0].id;
       }
     } else {
-      if (!teamId && userTeams.length > 0) {
-        teamId = userTeams[0].id;
-      }
+      if (!teamId && userTeams.length > 0) teamId = userTeams[0].id;
     }
   }
 
   // Bypasses onboarding if running locally without a database and local files exist
-  if (sessionCount === 0 && process.env.VERCEL !== '1' && !process.env.DATABASE_URL && !process.env.NEON_CONNECTION_STRING) {
-
+  if (sessionCount === 0 && process.env.VERCEL !== '1' && !process.env.FIREBASE_PROJECT_ID) {
     try {
       const { scanSessions } = await import('@/lib/scan.mjs');
       const local = scanSessions({});
