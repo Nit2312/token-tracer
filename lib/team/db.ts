@@ -104,17 +104,32 @@ function getApp(): App {
   }
 
   if (serviceAccount) {
-    globalForDb._firestoreApp = initializeApp({
-      credential: cert(serviceAccount),
-      projectId: serviceAccount.project_id || projectId,
-    });
+    try {
+      globalForDb._firestoreApp = initializeApp({
+        credential: cert(serviceAccount),
+        projectId: serviceAccount.project_id || projectId,
+      });
+    } catch (certErr: any) {
+      console.warn('[firebase-admin] Failed to initializeApp with cert():', certErr.message);
+      try {
+        globalForDb._firestoreApp = initializeApp({ projectId });
+      } catch {
+        const apps = getApps();
+        if (apps.length) globalForDb._firestoreApp = apps[0];
+      }
+    }
   } else {
-    globalForDb._firestoreApp = initializeApp({
-      projectId,
-    });
+    try {
+      globalForDb._firestoreApp = initializeApp({
+        projectId,
+      });
+    } catch {
+      const apps = getApps();
+      if (apps.length) globalForDb._firestoreApp = apps[0];
+    }
   }
 
-  return globalForDb._firestoreApp;
+  return globalForDb._firestoreApp!;
 }
 
 export function getDb(): Firestore {
