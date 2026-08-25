@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthorizedTeamId, getSessionFromCookie } from '@/lib/auth';
-import { queryCol, getDocById } from '@/lib/team/db';
+import { queryCol, getCachedCollection, getDocById } from '@/lib/team/db';
+import { statsCache } from '@/lib/team/cache';
 
 export const dynamic = 'force-dynamic';
 
@@ -33,25 +34,27 @@ export async function GET(req: NextRequest) {
       memberIdsArr = memberId.split(',').map((id) => id.trim()).filter((id) => Boolean(id) && id !== 'all');
     }
 
-    // Fetch session_turns for user role
-    const turnConstraints: Parameters<typeof queryCol>[1] = [
-      { type: 'where', field: 'turn_role', op: '==', value: 'user' },
-    ];
-    if (teamId) {
-      turnConstraints.push({ type: 'where', field: 'org_id', op: '==', value: teamId });
-    }
+    const cacheKey = `team_prompts_${teamId}_${page}_${limit}_${memberIdsArr.sort().join('_')}_${from || ''}_${to || ''}_${source || ''}_${minTokens || ''}`;
+    const result = await statsCache.getOrSet(cacheKey, 60, async () => {
+      // Fetch session_turns for user role
+      const turnConstraints: Parameters<typeof queryCol>[1] = [
+        { type: 'where', field: 'turn_role', op: '==', value: 'user' },
+      ];
+      if (teamId) {
+        turnConstraints.push({ type: 'where', field: 'org_id', op: '==', value: teamId });
+      }
 
-    const [userTurns, assistantTurns, syncSessions, memberDocs] = await Promise.all([
-      queryCol<any>('session_turns', turnConstraints),
-      queryCol<any>('session_turns', [
-        { type: 'where', field: 'turn_role', op: '==', value: 'assistant' },
-        { type: 'where', field: 'org_id', op: '==', value: teamId },
-      ]),
-      queryCol<any>('sync_sessions', [
-        { type: 'where', field: 'team_id', op: '==', value: teamId },
-      ]),
-      queryCol<any>('members'),
-    ]);
+      const [userTurns, assistantTurns, syncSessions, memberDocs] = await Promise.all([
+        queryCol<any>('session_turns', turnConstraints),
+        queryCol<any>('session_turns', [
+          { type: 'where', field: 'turn_role', op: '==', value: 'assistant' },
+          { type: 'where', field: 'org_id', op: '==', value: teamId },
+        ]),
+        queryCol<any>('sync_sessions', [
+          { type: 'where', field: 'team_id', op: '==', value: teamId },
+        ]),
+        getCachedCollection<any>('members', [], 300),
+      ]);
 
     const sessionBySessionId = new Map(syncSessions.map((s: any) => [s.session_id || s.id, s]));
     const memberById = new Map(memberDocs.map((m: any) => [m.id, m]));
@@ -115,13 +118,16 @@ export async function GET(req: NextRequest) {
       };
     });
 
-    return NextResponse.json({
-      prompts,
-      page,
-      limit,
-      totalPages: Math.ceil(totalCount / limit),
-      totalCount,
+      return {
+        prompts,
+        page,
+        limit,
+        totalPages: Math.ceil(totalCount / limit),
+        totalCount,
+      };
     });
+
+    return NextResponse.json(result);
   } catch (err: any) {
     console.error('[team-prompts GET error]', err);
     return NextResponse.json({ error: err.message }, { status: 500 });

@@ -3,7 +3,7 @@
  * Calculates session costs inline using Firestore pricing rules for instant and
  * concurrency-safe pricing without timeouts.
  */
-import { queryCol, setDocById, addDocToCol, batchWrite, newUuid } from './db';
+import { queryCol, getCachedCollection, setDocById, addDocToCol, batchWrite, newUuid } from './db';
 import { recalculateTeamCosts, matchesModelPattern } from './stats';
 import { saveSessionTurns } from './research';
 import { statsCache } from './cache';
@@ -54,25 +54,17 @@ export async function ingestSessions(
     return { accepted: 0, total: 0 };
   }
 
-  // 1. Fetch custom pricing rules (team-specific overrides first, then global overrides)
-  const teamPricingDocs = await queryCol<{
+  // 1. Fetch custom pricing rules (served from cached collection)
+  const allPricingDocs = await getCachedCollection<{
     model_pattern: string;
     cost_in_per_m: number;
     cost_out_per_m: number;
     cost_cache_read_per_m: number;
     team_id: string | null;
-  }>('model_pricing', [
-    { type: 'where', field: 'team_id', op: '==', value: member.team_id || null },
-  ]);
-  const globalPricingDocs = await queryCol<{
-    model_pattern: string;
-    cost_in_per_m: number;
-    cost_out_per_m: number;
-    cost_cache_read_per_m: number;
-    team_id: string | null;
-  }>('model_pricing', [
-    { type: 'where', field: 'team_id', op: '==', value: null },
-  ]);
+  }>('model_pricing', [], 300);
+
+  const teamPricingDocs = allPricingDocs.filter((p) => p.team_id === (member.team_id || null));
+  const globalPricingDocs = allPricingDocs.filter((p) => !p.team_id);
   const customRules = [...teamPricingDocs, ...globalPricingDocs];
 
   const defaultRules = [
