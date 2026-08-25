@@ -1,12 +1,11 @@
 /**
  * GET /api/admin/research/error-spikes?range=30d&model=&tool=&org=
  * Superadmin-only. Daily tool-error-rate series with rolling-baseline spike
- * detection, plus a per-day tool_name breakdown (which tool is driving a
- * given day's error rate) sourced from `session_tool_errors`.
+ * detection, plus a per-day tool_name breakdown.
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { query } from '@/lib/team/db';
-import { buildResearchFilters, parseRangeDays, requireSuperadminApi } from '@/lib/team/researchQuery';
+import { queryCol } from '@/lib/team/db';
+import { parseRangeDays, requireSuperadminApi } from '@/lib/team/researchQuery';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,110 +15,138 @@ export async function GET(req: NextRequest) {
 
   const searchParams = req.nextUrl.searchParams;
   const days = parseRangeDays(searchParams.get('range'), { def: 30, max: 90 });
+  const modelFilter = searchParams.get('model');
+  const toolFilter = searchParams.get('tool');
+  const orgFilter = searchParams.get('org');
 
-  const { whereClause: seriesWhere, params: seriesParams } = buildResearchFilters(
-    searchParams,
-    "ss.started_at >= NOW() - $1::int * INTERVAL '1 day'",
-    [days],
-    [
-      { param: 'model', column: 'st.model' },
-      { param: 'tool', column: 'st.tool' },
-      { param: 'org', column: 'st.org_id' },
-    ],
-  );
-
-  const { whereClause: toolWhere, params: toolParams } = buildResearchFilters(
-    searchParams,
-    "ste.is_error = true AND ste.created_at >= NOW() - $1::int * INTERVAL '1 day'",
-    [days],
-    [
-      { param: 'model', column: 'ste.model' },
-      { param: 'tool', column: 'ste.tool' },
-      { param: 'org', column: 'ste.org_id' },
-    ],
-  );
+  const cutoff = new Date(Date.now() - days * 86400 * 1000).toISOString();
+  const cutoffDate = cutoff.slice(0, 10);
 
   try {
-    const { rows: series } = await query(`
-      WITH daily AS (
-        SELECT
-          ss.started_at::date AS day,
-          COUNT(*) FILTER (WHERE st.turn_role = 'assistant')::int AS "totalTurns",
-          COUNT(*) FILTER (WHERE st.turn_role = 'assistant' AND st.tool_error_flag)::int AS "errorTurns"
-        FROM session_turns st
-        JOIN sync_sessions ss ON ss.session_id = st.session_id
-                             AND st.org_id = ss.team_id::text
-                             AND st.user_id = ss.member_id::text
-                             AND st.tool = ss.source
-        WHERE ${seriesWhere}
-        GROUP BY 1
-      )
-      SELECT
-        day,
-        "totalTurns",
-        "errorTurns",
-        (CASE WHEN "totalTurns" = 0 THEN 0 ELSE "errorTurns"::float / "totalTurns" END) AS "errorRate",
-        AVG(CASE WHEN "totalTurns" = 0 THEN 0 ELSE "errorTurns"::float / "totalTurns" END)
-          OVER (ORDER BY day ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING) AS "rollingMean",
-        STDDEV(CASE WHEN "totalTurns" = 0 THEN 0 ELSE "errorTurns"::float / "totalTurns" END)
-          OVER (ORDER BY day ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING) AS "rollingStddev"
-      FROM daily
-      ORDER BY day ASC
-    `, seriesParams);
+    const [assistantTurns, syncSessions, toolErrors, userTurns] = await Promise.all([
+      queryCol<any>('session_turns', [{ type: 'where', field: 'turn_role', op: '==', value: 'assistant' }]),
+      queryCol<any>('sync_sessions'),
+      queryCol<any>('session_tool_errors'),
+      queryCol<any>('session_turns', [{ type: 'where', field: 'turn_role', op: '==', value: 'user' }]),
+    ]);
 
-    const withSpikes = series.map((r) => {
-      const mean = r.rollingMean == null ? null : Number(r.rollingMean);
-      const stddev = r.rollingStddev == null ? null : Number(r.rollingStddev);
-      const isSpike = mean != null && stddev != null && stddev > 0 && Number(r.errorRate) > mean + 2 * stddev;
-      return { ...r, isSpike };
+    const sessionMap = new Map(syncSessions.map((s: any) => [s.session_id || s.id, s]));
+
+    // Filter assistant turns
+    const filteredTurns = assistantTurns.filter((st: any) => {
+      const ss = sessionMap.get(st.session_id);
+      if (!ss || !ss.started_at || ss.started_at < cutoff) return false;
+      if (modelFilter && st.model !== modelFilter) return false;
+      if (toolFilter && st.tool !== toolFilter) return false;
+      if (orgFilter && st.org_id !== orgFilter) return false;
+      return true;
     });
 
-    const { rows: toolBreakdown } = await query(`
-      SELECT
-        ste.created_at::date AS day,
-        ste.tool_name AS "toolName",
-        COUNT(*)::int AS "errorCount"
-      FROM session_tool_errors ste
-      WHERE ${toolWhere}
-      GROUP BY 1, 2
-      ORDER BY 1 ASC, "errorCount" DESC
-    `, toolParams);
-
-    // Drill-down: for a selected spike day (?day=2026-08-01), surface the
-    // actual failing tool calls (args + the prompt that led to them).
-    const drilldownDay = searchParams.get('day');
-    let drilldown: unknown[] | null = null;
-    if (drilldownDay) {
-      const { whereClause: ddWhere, params: ddParams } = buildResearchFilters(
-        searchParams,
-        'ste.is_error = true AND ste.created_at::date = $1::date',
-        [drilldownDay],
-        [
-          { param: 'model', column: 'ste.model' },
-          { param: 'tool', column: 'ste.tool' },
-          { param: 'org', column: 'ste.org_id' },
-          { param: 'toolName', column: 'ste.tool_name' },
-        ],
-      );
-      const { rows } = await query(`
-        SELECT
-          ste.session_id AS "sessionId",
-          ste.tool_name AS "toolName",
-          ste.tool_args_summary AS "toolArgsSummary",
-          ste.created_at AS "createdAt",
-          ste.model,
-          ste.tool,
-          st.prompt_text_sanitized AS "promptText"
-        FROM session_tool_errors ste
-        LEFT JOIN session_turns st ON st.id = ste.turn_id
-        WHERE ${ddWhere}
-        ORDER BY ste.created_at DESC
-        LIMIT 200
-      `, ddParams);
-      drilldown = rows;
+    // 1. Group daily turns
+    const dailyMap = new Map<string, { day: string; totalTurns: number; errorTurns: number }>();
+    for (const st of filteredTurns) {
+      const ss = sessionMap.get(st.session_id)!;
+      const day = String(ss.started_at).slice(0, 10);
+      if (!dailyMap.has(day)) {
+        dailyMap.set(day, { day, totalTurns: 0, errorTurns: 0 });
+      }
+      const d = dailyMap.get(day)!;
+      d.totalTurns += 1;
+      if (st.tool_error_flag) d.errorTurns += 1;
     }
 
-    return NextResponse.json({ series: withSpikes, toolBreakdown, drilldown });
+    const sortedDays = Array.from(dailyMap.values()).sort((a, b) => a.day.localeCompare(b.day));
+
+    // Calculate rolling mean & stddev over 7 preceding days
+    const series = sortedDays.map((d, idx) => {
+      const errorRate = d.totalTurns > 0 ? d.errorTurns / d.totalTurns : 0;
+      const window = sortedDays.slice(Math.max(0, idx - 7), idx);
+      let rollingMean: number | null = null;
+      let rollingStddev: number | null = null;
+
+      if (window.length > 0) {
+        const rates = window.map(w => w.totalTurns > 0 ? w.errorTurns / w.totalTurns : 0);
+        const sum = rates.reduce((a, b) => a + b, 0);
+        rollingMean = sum / rates.length;
+        if (rates.length > 1) {
+          const variance = rates.reduce((a, b) => a + (b - rollingMean!) ** 2, 0) / rates.length;
+          rollingStddev = Math.sqrt(variance);
+        } else {
+          rollingStddev = 0;
+        }
+      }
+
+      const isSpike = rollingMean != null && rollingStddev != null && rollingStddev > 0 && errorRate > rollingMean + 2 * rollingStddev;
+
+      return {
+        day: d.day,
+        totalTurns: d.totalTurns,
+        errorTurns: d.errorTurns,
+        errorRate,
+        rollingMean,
+        rollingStddev,
+        isSpike,
+      };
+    });
+
+    // 2. Tool breakdown
+    const filteredToolErrors = toolErrors.filter((ste: any) => {
+      if (!ste.is_error || !ste.created_at || ste.created_at < cutoff) return false;
+      if (modelFilter && ste.model !== modelFilter) return false;
+      if (toolFilter && ste.tool !== toolFilter) return false;
+      if (orgFilter && ste.org_id !== orgFilter) return false;
+      return true;
+    });
+
+    const tbMap = new Map<string, { day: string; toolName: string; errorCount: number }>();
+    for (const ste of filteredToolErrors) {
+      const day = String(ste.created_at).slice(0, 10);
+      const toolName = ste.tool_name || 'unknown';
+      const key = `${day}_${toolName}`;
+      if (!tbMap.has(key)) {
+        tbMap.set(key, { day, toolName, errorCount: 0 });
+      }
+      tbMap.get(key)!.errorCount += 1;
+    }
+
+    const toolBreakdown = Array.from(tbMap.values()).sort((a, b) => a.day.localeCompare(b.day) || b.errorCount - a.errorCount);
+
+    // 3. Drilldown for a specific day
+    const drilldownDay = searchParams.get('day');
+    let drilldown: any[] | null = null;
+
+    if (drilldownDay) {
+      const toolNameFilter = searchParams.get('toolName');
+      const turnsById = new Map(userTurns.map((ut: any) => [ut.id, ut]));
+
+      const ddErrors = toolErrors.filter((ste: any) => {
+        if (!ste.is_error || !ste.created_at) return false;
+        if (String(ste.created_at).slice(0, 10) !== drilldownDay) return false;
+        if (modelFilter && ste.model !== modelFilter) return false;
+        if (toolFilter && ste.tool !== toolFilter) return false;
+        if (orgFilter && ste.org_id !== orgFilter) return false;
+        if (toolNameFilter && ste.tool_name !== toolNameFilter) return false;
+        return true;
+      });
+
+      drilldown = ddErrors
+        .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+        .slice(0, 200)
+        .map((ste: any) => {
+          const st = turnsById.get(ste.turn_id);
+          return {
+            sessionId: ste.session_id,
+            toolName: ste.tool_name,
+            toolArgsSummary: ste.tool_args_summary,
+            createdAt: ste.created_at,
+            model: ste.model,
+            tool: ste.tool,
+            promptText: st?.prompt_text_sanitized || null,
+          };
+        });
+    }
+
+    return NextResponse.json({ series, toolBreakdown, drilldown });
   } catch (err: any) {
     console.error('[research-error-spikes-error]', err);
     return NextResponse.json({ error: err.message }, { status: 500 });

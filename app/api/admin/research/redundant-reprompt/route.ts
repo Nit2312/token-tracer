@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { query } from '@/lib/team/db';
+import { queryCol } from '@/lib/team/db';
 import { parseRangeDays, requireSuperadminApi } from '@/lib/team/researchQuery';
 
 export const dynamic = 'force-dynamic';
@@ -16,53 +16,67 @@ export async function GET(req: NextRequest) {
 
   // Study 5 is gated strictly to the pilot org
   if (!pilotOrgId || org !== pilotOrgId) {
-    // Return pilot metadata for UI warning/labeling
     return NextResponse.json({
       pilotOnly: true,
       eligibleOrg: pilotOrgId || 'None configured (Set ENABLE_REPROMPT_ANALYSIS_ORG_ID)'
     });
   }
 
+  const cutoff = new Date(Date.now() - days * 86400 * 1000).toISOString();
+
   try {
-    const { rows } = await query(`
-      SELECT 
-        rre.session_id AS "sessionId",
-        rre.turn_index AS "turnIndex",
-        rre.similarity_score::float AS "similarityScore",
-        rre.tokens_cost_of_following_turn AS "tokensCost",
-        COALESCE((rre.tokens_cost_of_following_turn::float / NULLIF(ss.tokens_in + ss.tokens_out, 0)) * ss.api_cost, 0)::float AS "costWasted",
-        rre.created_at AS "createdAt",
-        ss.source AS tool,
-        ss.model,
-        COALESCE(m.display_name, 'Unknown User') AS "userName",
-        COALESCE(t.name, 'Unknown Team') AS "projectName",
-        st.prompt_text_sanitized AS "promptText",
-        prev_st.prompt_text_sanitized AS "prevPromptText"
-      FROM redundant_reprompt_events rre
-      JOIN sync_sessions ss ON ss.session_id = rre.session_id
-      LEFT JOIN members m ON m.id = ss.member_id
-      LEFT JOIN teams t ON t.id = ss.team_id
-      LEFT JOIN session_turns st ON st.session_id = rre.session_id 
-        AND st.org_id = ss.team_id::text
-        AND st.user_id = ss.member_id::text
-        AND st.tool = ss.source
-        AND st.turn_index = rre.turn_index 
-        AND st.turn_role = 'user'
-      LEFT JOIN session_turns prev_st ON prev_st.session_id = rre.session_id 
-        AND prev_st.org_id = ss.team_id::text
-        AND prev_st.user_id = ss.member_id::text
-        AND prev_st.tool = ss.source
-        AND prev_st.turn_index = rre.turn_index - 1 
-        AND prev_st.turn_role = 'user'
-      WHERE ss.team_id::text = $1
-        AND ss.started_at >= NOW() - $2::int * INTERVAL '1 day'
-      ORDER BY rre.tokens_cost_of_following_turn DESC
-    `, [org, days]);
+    const [repromptEvents, syncSessions, members, teams, userTurns] = await Promise.all([
+      queryCol<any>('redundant_reprompt_events'),
+      queryCol<any>('sync_sessions', [{ type: 'where', field: 'team_id', op: '==', value: org }]),
+      queryCol<any>('members'),
+      queryCol<any>('teams'),
+      queryCol<any>('session_turns', [{ type: 'where', field: 'turn_role', op: '==', value: 'user' }]),
+    ]);
+
+    const sessionMap = new Map(syncSessions.map((s: any) => [s.session_id || s.id, s]));
+    const memberMap = new Map(members.map((m: any) => [m.id, m]));
+    const teamMap = new Map(teams.map((t: any) => [t.id, t]));
+    const userTurnsByKey = new Map<string, any>();
+    for (const ut of userTurns) {
+      userTurnsByKey.set(`${ut.session_id}:${ut.turn_index}`, ut);
+    }
+
+    const filtered = repromptEvents.filter((rre: any) => {
+      const ss = sessionMap.get(rre.session_id);
+      if (!ss || !ss.started_at || ss.started_at < cutoff) return false;
+      return true;
+    });
+
+    const events = filtered.map((rre: any) => {
+      const ss = sessionMap.get(rre.session_id);
+      const m = ss ? memberMap.get(ss.member_id) : null;
+      const t = ss ? teamMap.get(ss.team_id) : null;
+      const st = userTurnsByKey.get(`${rre.session_id}:${rre.turn_index}`);
+      const prevSt = userTurnsByKey.get(`${rre.session_id}:${rre.turn_index - 1}`);
+
+      const totalSessionTokens = Number(ss?.tokens_in || 0) + Number(ss?.tokens_out || 0);
+      const costWasted = totalSessionTokens > 0 ? (Number(rre.tokens_cost_of_following_turn || 0) / totalSessionTokens) * Number(ss?.api_cost || 0) : 0;
+
+      return {
+        sessionId: rre.session_id,
+        turnIndex: rre.turn_index,
+        similarityScore: Number(rre.similarity_score || 0),
+        tokensCost: Number(rre.tokens_cost_of_following_turn || 0),
+        costWasted,
+        createdAt: rre.created_at,
+        tool: ss?.source || 'cursor',
+        model: ss?.model || 'default',
+        userName: m?.display_name || 'Unknown User',
+        projectName: t?.name || 'Unknown Team',
+        promptText: st?.prompt_text_sanitized || null,
+        prevPromptText: prevSt?.prompt_text_sanitized || null,
+      };
+    }).sort((a, b) => b.tokensCost - a.tokensCost);
 
     return NextResponse.json({
       pilotOnly: false,
       eligibleOrg: pilotOrgId,
-      events: rows
+      events,
     });
   } catch (err: any) {
     console.error('[research-reprompt-error]', err);

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { getSessionFromCookie } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { queryCol } from '@/lib/team/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,7 +9,7 @@ function parseDays(range: string | null): number {
   if (range === '7d') return 7;
   if (range === '90d') return 90;
   if (range === '60d') return 60;
-  return 30; // default 30d
+  return 30;
 }
 
 export async function GET(req: NextRequest) {
@@ -25,133 +25,112 @@ export async function GET(req: NextRequest) {
     const org = searchParams.get('org');
     const tool = searchParams.get('tool');
     const search = searchParams.get('search');
-    const members = searchParams.get('members');
-    
+    const membersFilter = searchParams.get('members');
+
     const page = Math.max(1, Number(searchParams.get('page') || 1));
     const limit = Math.max(1, Math.min(250, Number(searchParams.get('limit') || 50)));
-    const offset = (page - 1) * limit;
 
-    // Build filter conditions
-    const conditions = ["ss.started_at >= NOW() - $1::int * INTERVAL '1 day'"];
-    const params: any[] = [days];
-    let paramIdx = 2;
+    const cutoff = new Date(Date.now() - days * 86400 * 1000).toISOString();
 
-    if (org) {
-      conditions.push(`ss.team_id::text = $${paramIdx}`);
-      params.push(org);
-      paramIdx++;
-    }
-    if (tool) {
-      conditions.push(`st.tool = $${paramIdx}`);
-      params.push(tool);
-      paramIdx++;
-    }
-    if (search) {
-      conditions.push(`st.prompt_text_sanitized ILIKE $${paramIdx}`);
-      params.push(`%${search}%`);
-      paramIdx++;
-    }
-    if (members) {
-      const memberIds = members.split(',').filter(Boolean);
-      if (memberIds.length > 0) {
-        conditions.push(`ss.member_id::text = ANY($${paramIdx})`);
-        params.push(memberIds);
-        paramIdx++;
+    // Fetch session_turns from Firestore
+    const turnConstraints: Parameters<typeof queryCol>[1] = [
+      { type: 'where', field: 'turn_role', op: '==', value: 'user' },
+    ];
+    let allTurns = await queryCol<any>('session_turns', turnConstraints);
+
+    // Fetch sync_sessions to join
+    const sessionDocs = await queryCol<any>('sync_sessions', [
+      { type: 'where', field: 'started_at', op: '>=', value: cutoff },
+    ]);
+    const sessionBySessionId = new Map(sessionDocs.map((s: any) => [s.session_id || s.id, s]));
+
+    // Fetch member/team info for display
+    const memberDocs = await queryCol<any>('members');
+    const teamDocs = await queryCol<any>('teams');
+    const memberById = new Map(memberDocs.map((m: any) => [m.id, m]));
+    const teamById = new Map(teamDocs.map((t: any) => [t.id, t]));
+
+    // Filter turns
+    let filteredTurns = allTurns.filter((t: any) => {
+      const ss = sessionBySessionId.get(t.session_id);
+      if (!ss) return false;
+      if (ss.started_at < cutoff) return false;
+      if (org && ss.team_id !== org) return false;
+      if (tool && t.tool !== tool) return false;
+      if (search && !String(t.prompt_text_sanitized || '').toLowerCase().includes(search.toLowerCase())) return false;
+      if (membersFilter) {
+        const mIds = membersFilter.split(',').filter(Boolean);
+        if (!mIds.includes(ss.member_id)) return false;
       }
-    }
-
-    const whereClause = conditions.join(' AND ');
-
-    // 1. Fetch aggregates matching filters
-    const statsQuery = `
-      SELECT 
-        COUNT(*)::int AS "totalPrompts",
-        COALESCE(SUM(ast.input_tokens), 0)::bigint AS "totalInput",
-        COALESCE(SUM(ast.output_tokens), 0)::bigint AS "totalOutput",
-        COALESCE(SUM(ast.cache_read_tokens), 0)::bigint AS "totalCacheRead",
-        COALESCE(SUM(ast.cache_write_tokens), 0)::bigint AS "totalCacheWrite"
-      FROM session_turns st
-      JOIN sync_sessions ss ON ss.session_id = st.session_id
-                           AND st.org_id = ss.team_id::text
-                           AND st.user_id = ss.member_id::text
-                           AND st.tool = ss.source
-      LEFT JOIN session_turns ast ON ast.session_id = st.session_id 
-                                 AND ast.org_id = st.org_id
-                                 AND ast.user_id = st.user_id
-                                 AND ast.tool = st.tool
-                                 AND ast.turn_index = st.turn_index 
-                                 AND ast.turn_role = 'assistant'
-      WHERE st.turn_role = 'user' AND ${whereClause}
-    `;
-    const statsResult = await query(statsQuery, params);
-    const stats = statsResult.rows[0];
-
-    // 2. Fetch detailed prompt turns
-    const listParams = [...params, limit, offset];
-    const listQuery = `
-      SELECT 
-        st.id::text,
-        st.session_id AS "sessionId",
-        st.turn_index AS "turnIndex",
-        st.prompt_text_sanitized AS "promptText",
-        COALESCE(ast.input_tokens, 0) AS "inputTokens",
-        COALESCE(ast.output_tokens, 0) AS "outputTokens",
-        COALESCE(ast.cache_read_tokens, 0) AS "cacheRead",
-        COALESCE(ast.cache_write_tokens, 0) AS "cacheWrite",
-        st.model,
-        st.tool,
-        st.intent_category AS "intentCategory",
-        COALESCE(m.display_name, 'Unknown User') AS "userName",
-        COALESCE(t.name, 'Unknown Team') AS "projectName",
-        ss.started_at AS "createdAt"
-      FROM session_turns st
-      JOIN sync_sessions ss ON ss.session_id = st.session_id
-                           AND st.org_id = ss.team_id::text
-                           AND st.user_id = ss.member_id::text
-                           AND st.tool = ss.source
-      LEFT JOIN session_turns ast ON ast.session_id = st.session_id 
-                                 AND ast.org_id = st.org_id
-                                 AND ast.user_id = st.user_id
-                                 AND ast.tool = st.tool
-                                 AND ast.turn_index = st.turn_index 
-                                 AND ast.turn_role = 'assistant'
-      LEFT JOIN members m ON m.id = ss.member_id
-      LEFT JOIN teams t ON t.id = ss.team_id
-      WHERE st.turn_role = 'user' AND ${whereClause}
-      ORDER BY ss.started_at DESC, st.turn_index DESC
-      LIMIT $${paramIdx} OFFSET $${paramIdx + 1}
-    `;
-    const listResult = await query(listQuery, listParams);
-
-    // 3. Fetch scoped members matching current organization filter
-    let membersQuery = '';
-    let membersParams: any[] = [];
-    if (org) {
-      membersQuery = `
-        SELECT DISTINCT m.id::text, m.display_name AS name
-        FROM members m
-        JOIN team_members tm ON tm.member_id = m.id
-        WHERE tm.team_id::text = $1
-        ORDER BY name
-      `;
-      membersParams = [org];
-    } else {
-      membersQuery = `
-        SELECT id::text, display_name AS name
-        FROM members
-        ORDER BY name
-      `;
-    }
-    const membersResult = await query(membersQuery, membersParams);
-
-    return NextResponse.json({
-      stats,
-      prompts: listResult.rows,
-      page,
-      limit,
-      totalPages: Math.ceil((stats?.totalPrompts || 0) / limit),
-      members: membersResult.rows
+      return true;
     });
+
+    // Build assistant turns index for token lookups
+    const assistantTurns = await queryCol<any>('session_turns', [
+      { type: 'where', field: 'turn_role', op: '==', value: 'assistant' },
+    ]);
+    const assistantByKey = new Map<string, any>();
+    for (const at of assistantTurns) {
+      const key = `${at.session_id}:${at.turn_index}`;
+      assistantByKey.set(key, at);
+    }
+
+    // Aggregate stats
+    let totalInput = 0, totalOutput = 0, totalCacheRead = 0, totalCacheWrite = 0;
+    for (const t of filteredTurns) {
+      const at = assistantByKey.get(`${t.session_id}:${t.turn_index}`);
+      totalInput += Number(at?.input_tokens || 0);
+      totalOutput += Number(at?.output_tokens || 0);
+      totalCacheRead += Number(at?.cache_read_tokens || 0);
+      totalCacheWrite += Number(at?.cache_write_tokens || 0);
+    }
+    const stats = { totalPrompts: filteredTurns.length, totalInput, totalOutput, totalCacheRead, totalCacheWrite };
+
+    // Sort and paginate
+    filteredTurns.sort((a: any, b: any) => {
+      const ssA = sessionBySessionId.get(a.session_id);
+      const ssB = sessionBySessionId.get(b.session_id);
+      const ts = (String(ssB?.started_at || '') + String(b.turn_index || 0))
+        .localeCompare(String(ssA?.started_at || '') + String(a.turn_index || 0));
+      return ts;
+    });
+    const paginated = filteredTurns.slice((page - 1) * limit, page * limit);
+
+    const prompts = paginated.map((t: any) => {
+      const ss = sessionBySessionId.get(t.session_id);
+      const at = assistantByKey.get(`${t.session_id}:${t.turn_index}`);
+      const member = ss ? memberById.get(ss.member_id) : null;
+      const team = ss ? teamById.get(ss.team_id) : null;
+      return {
+        id: t.id,
+        sessionId: t.session_id,
+        turnIndex: t.turn_index,
+        promptText: t.prompt_text_sanitized,
+        inputTokens: Number(at?.input_tokens || 0),
+        outputTokens: Number(at?.output_tokens || 0),
+        cacheRead: Number(at?.cache_read_tokens || 0),
+        cacheWrite: Number(at?.cache_write_tokens || 0),
+        model: t.model,
+        tool: t.tool,
+        intentCategory: t.intent_category,
+        userName: member?.display_name || 'Unknown User',
+        projectName: team?.name || 'Unknown Team',
+        createdAt: ss?.started_at || null,
+      };
+    });
+
+    // Members for filter dropdown
+    let members: any[];
+    if (org) {
+      const tmDocs = await queryCol<any>('team_members', [{ type: 'where', field: 'team_id', op: '==', value: org }]);
+      const memberIdsInOrg = new Set(tmDocs.map((tm: any) => tm.member_id));
+      members = memberDocs.filter((m: any) => memberIdsInOrg.has(m.id)).map((m: any) => ({ id: m.id, name: m.display_name }));
+    } else {
+      members = memberDocs.map((m: any) => ({ id: m.id, name: m.display_name }));
+    }
+    members.sort((a: any, b: any) => String(a.name).localeCompare(String(b.name)));
+
+    return NextResponse.json({ stats, prompts, page, limit, totalPages: Math.ceil(filteredTurns.length / limit), members });
   } catch (err: any) {
     console.error('[admin-prompts-error]', err);
     return NextResponse.json({ error: err.message }, { status: 500 });

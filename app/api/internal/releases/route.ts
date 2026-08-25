@@ -1,19 +1,6 @@
-/**
- * /api/internal/releases — Admin CRUD for daemon releases.
- *
- * Protected by existing admin/superadmin cookie session (same as /team dashboard).
- * All routes require a valid session cookie.
- *
- * GET    ?teamId=   → list all releases (newest first)
- * POST              → create / activate a new release
- *   body: { version, downloadUrl, sha256, mandatory?, releaseNotes? }
- * PATCH             → activate or deactivate a release (rollback)
- *   body: { id, active }
- * DELETE ?id=       → permanently delete a release record
- */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { queryCol, setDocById, deleteDocById, newUuid } from '@/lib/team/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -34,18 +21,15 @@ function isSuperadmin(session: ReturnType<typeof getSessionFromCookie>) {
   return session && session.role === 'superadmin';
 }
 
-
 export async function GET(req: NextRequest) {
   const session = getSession(req);
   if (!isAdmin(session)) return unauthorized();
 
   try {
-    const { rows } = await query(
-      `SELECT id, version, download_url, sha256, mandatory, active, release_notes, released_at
-         FROM daemon_releases
-        ORDER BY released_at DESC`,
-    );
-    return NextResponse.json({ releases: rows });
+    const releases = await queryCol<any>('daemon_releases', [
+      { type: 'orderBy', field: 'released_at', direction: 'desc' },
+    ]);
+    return NextResponse.json({ releases });
   } catch (err) {
     console.error('[releases GET error]', err);
     return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
@@ -55,7 +39,6 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const session = getSession(req);
   if (!isSuperadmin(session)) return unauthorized();
-
 
   let body: Record<string, unknown> = {};
   try {
@@ -77,7 +60,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Validate sha256 looks like a hex string (64 chars)
   if (!/^[0-9a-f]{64}$/i.test(sha256)) {
     return NextResponse.json(
       { error: 'sha256 must be a 64-character hex string' },
@@ -85,7 +67,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Validate URL is HTTPS (security requirement)
   if (!downloadUrl.startsWith('https://')) {
     return NextResponse.json(
       { error: 'downloadUrl must use HTTPS' },
@@ -93,7 +74,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Domain whitelist check for security
   try {
     const parsedUrl = new URL(downloadUrl);
     const host = parsedUrl.hostname.toLowerCase();
@@ -124,20 +104,25 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { rows } = await query(
-      `INSERT INTO daemon_releases (version, download_url, sha256, mandatory, active, release_notes)
-       VALUES ($1, $2, $3, $4, true, $5)
-       ON CONFLICT (version) DO UPDATE
-         SET download_url = EXCLUDED.download_url,
-             sha256 = EXCLUDED.sha256,
-             mandatory = EXCLUDED.mandatory,
-             active = true,
-             release_notes = EXCLUDED.release_notes,
-             released_at = now()
-       RETURNING *`,
-      [version, downloadUrl, sha256, mandatory, releaseNotes],
-    );
-    return NextResponse.json({ release: rows[0] }, { status: 201 });
+    const existing = await queryCol<any>('daemon_releases', [
+      { type: 'where', field: 'version', op: '==', value: version },
+      { type: 'limit', n: 1 },
+    ]);
+
+    const id = existing[0]?.id || newUuid();
+    const doc = {
+      id,
+      version,
+      download_url: downloadUrl,
+      sha256,
+      mandatory,
+      active: true,
+      release_notes: releaseNotes,
+      released_at: new Date().toISOString(),
+    };
+
+    await setDocById('daemon_releases', id, doc, true);
+    return NextResponse.json({ release: doc }, { status: 201 });
   } catch (err) {
     console.error('[releases POST error]', err);
     return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
@@ -147,7 +132,6 @@ export async function POST(req: NextRequest) {
 export async function PATCH(req: NextRequest) {
   const session = getSession(req);
   if (!isSuperadmin(session)) return unauthorized();
-
 
   let body: Record<string, unknown> = {};
   try {
@@ -163,12 +147,13 @@ export async function PATCH(req: NextRequest) {
   }
 
   try {
-    const { rows } = await query(
-      `UPDATE daemon_releases SET active = $1 WHERE id = $2 RETURNING *`,
-      [body.active, id],
-    );
-    if (!rows.length) return NextResponse.json({ error: 'release not found' }, { status: 404 });
-    return NextResponse.json({ release: rows[0] });
+    const { getDocById } = await import('@/lib/team/db');
+    const existing = await getDocById('daemon_releases', id);
+    if (!existing) return NextResponse.json({ error: 'release not found' }, { status: 404 });
+
+    const updated = { ...existing, active: body.active, updated_at: new Date().toISOString() };
+    await setDocById('daemon_releases', id, updated, true);
+    return NextResponse.json({ release: updated });
   } catch (err) {
     console.error('[releases PATCH error]', err);
     return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
@@ -179,16 +164,11 @@ export async function DELETE(req: NextRequest) {
   const session = getSession(req);
   if (!isSuperadmin(session)) return unauthorized();
 
-
   const id = req.nextUrl.searchParams.get('id');
   if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
 
   try {
-    const { rowCount } = await query(
-      `DELETE FROM daemon_releases WHERE id = $1`,
-      [id],
-    );
-    if (!rowCount) return NextResponse.json({ error: 'release not found' }, { status: 404 });
+    await deleteDocById('daemon_releases', id);
     return NextResponse.json({ ok: true });
   } catch (err) {
     console.error('[releases DELETE error]', err);

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { query } from '@/lib/team/db';
-import { buildResearchFilters, parseRangeDays, requireSuperadminApi } from '@/lib/team/researchQuery';
+import { queryCol } from '@/lib/team/db';
+import { parseRangeDays, requireSuperadminApi } from '@/lib/team/researchQuery';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,64 +10,97 @@ export async function GET(req: NextRequest) {
 
   const searchParams = req.nextUrl.searchParams;
   const days = parseRangeDays(searchParams.get('range'));
+  const orgFilter = searchParams.get('org');
+  const toolFilter = searchParams.get('tool');
+  const modelFilter = searchParams.get('model');
 
-  const { whereClause, params } = buildResearchFilters(
-    searchParams,
-    "ss.started_at >= NOW() - $1::int * INTERVAL '1 day'",
-    [days],
-    [
-      { param: 'org', column: 'so.org_id' },
-      { param: 'tool', column: 'so.tool' },
-      { param: 'model', column: 'so.model' },
-    ],
-  );
+  const cutoff = new Date(Date.now() - days * 86400 * 1000).toISOString();
 
   try {
-    const { rows } = await query(`
-      WITH ranked_sessions AS (
-        SELECT 
-          so.session_id,
-          so.org_id,
-          so.tool,
-          so.had_rework,
-          so.had_revert,
-          so.total_input_tokens,
-          so.total_output_tokens,
-          so.lines_changed,
-          NTILE(3) OVER (ORDER BY so.complexity_score) AS complexity_bucket
-        FROM session_outcomes so
-        JOIN sync_sessions ss ON ss.session_id = so.session_id
-                             AND ss.team_id::text = so.org_id
-                             AND ss.source = so.tool
-        WHERE ${whereClause}
-      )
-      SELECT 
-        (CASE 
-           WHEN (CASE WHEN st.has_code_block THEN 1 ELSE 0 END +
-                 CASE WHEN st.has_file_path THEN 1 ELSE 0 END +
-                 CASE WHEN st.has_traceback THEN 1 ELSE 0 END) = 0 THEN 'vague'
-           WHEN (CASE WHEN st.has_code_block THEN 1 ELSE 0 END +
-                 CASE WHEN st.has_file_path THEN 1 ELSE 0 END +
-                 CASE WHEN st.has_traceback THEN 1 ELSE 0 END) = 1 THEN 'partial'
-           ELSE 'specific'
-         END) AS tier,
-        (CASE 
-           WHEN r.complexity_bucket = 1 THEN 'Low Complexity'
-           WHEN r.complexity_bucket = 2 THEN 'Medium Complexity'
-           ELSE 'High Complexity'
-         END) AS "complexityBucket",
-        COUNT(DISTINCT r.session_id)::int AS "sampleSize",
-        COALESCE(SUM(r.total_input_tokens + r.total_output_tokens)::float / NULLIF(SUM(r.lines_changed), 0), 0) AS "avgTokensPerLine",
-        COALESCE(COUNT(DISTINCT r.session_id) FILTER (WHERE r.had_rework)::float / NULLIF(COUNT(DISTINCT r.session_id), 0), 0) AS "reworkRate",
-        COALESCE(COUNT(DISTINCT r.session_id) FILTER (WHERE r.had_revert)::float / NULLIF(COUNT(DISTINCT r.session_id), 0), 0) AS "revertRate"
-      FROM session_turns st
-      JOIN ranked_sessions r ON r.session_id = st.session_id
-                           AND r.org_id = st.org_id
-                           AND r.tool = st.tool
-      WHERE st.turn_role = 'user'
-      GROUP BY tier, "complexityBucket"
-      ORDER BY tier, "complexityBucket"
-    `, params);
+    const [outcomes, syncSessions, userTurns] = await Promise.all([
+      queryCol<any>('session_outcomes'),
+      queryCol<any>('sync_sessions'),
+      queryCol<any>('session_turns', [{ type: 'where', field: 'turn_role', op: '==', value: 'user' }]),
+    ]);
+
+    const sessionMap = new Map(syncSessions.map((s: any) => [s.session_id || s.id, s]));
+
+    const filteredOutcomes = outcomes.filter((so: any) => {
+      const ss = sessionMap.get(so.session_id);
+      if (!ss || !ss.started_at || ss.started_at < cutoff) return false;
+      if (orgFilter && so.org_id !== orgFilter) return false;
+      if (toolFilter && so.tool !== toolFilter) return false;
+      if (modelFilter && so.model !== modelFilter) return false;
+      return true;
+    });
+
+    if (!filteredOutcomes.length) {
+      return NextResponse.json([]);
+    }
+
+    // Sort by complexity score to assign terciles (NTILE(3))
+    filteredOutcomes.sort((a, b) => Number(a.complexity_score || 0) - Number(b.complexity_score || 0));
+    const outcomeBucketMap = new Map<string, { bucket: number; so: any }>();
+    const n = filteredOutcomes.length;
+    filteredOutcomes.forEach((so, idx) => {
+      const bucket = idx < n / 3 ? 1 : idx < (2 * n) / 3 ? 2 : 3;
+      outcomeBucketMap.set(so.session_id, { bucket, so });
+    });
+
+    // Group user turns
+    const groupMap = new Map<string, { tier: string; complexityBucket: string; sessions: Set<string>; totalTokens: number; linesChanged: number; reworkCount: number; revertCount: number }>();
+
+    for (const ut of userTurns) {
+      const info = outcomeBucketMap.get(ut.session_id);
+      if (!info) continue;
+      const { bucket, so } = info;
+
+      let score = 0;
+      if (ut.has_code_block) score += 1;
+      if (ut.has_file_path) score += 1;
+      if (ut.has_traceback) score += 1;
+
+      const tier = score === 0 ? 'vague' : score === 1 ? 'partial' : 'specific';
+      const complexityBucket = bucket === 1 ? 'Low Complexity' : bucket === 2 ? 'Medium Complexity' : 'High Complexity';
+
+      const key = `${tier}_${complexityBucket}`;
+      if (!groupMap.has(key)) {
+        groupMap.set(key, {
+          tier,
+          complexityBucket,
+          sessions: new Set(),
+          totalTokens: 0,
+          linesChanged: 0,
+          reworkCount: 0,
+          revertCount: 0,
+        });
+      }
+      const g = groupMap.get(key)!;
+      if (!g.sessions.has(so.session_id)) {
+        g.sessions.add(so.session_id);
+        g.totalTokens += Number(so.total_input_tokens || 0) + Number(so.total_output_tokens || 0);
+        g.linesChanged += Number(so.lines_changed || 0);
+        if (so.had_rework) g.reworkCount += 1;
+        if (so.had_revert) g.revertCount += 1;
+      }
+    }
+
+    const tierOrder: Record<string, number> = { vague: 0, partial: 1, specific: 2 };
+    const bucketOrder: Record<string, number> = { 'Low Complexity': 0, 'Medium Complexity': 1, 'High Complexity': 2 };
+
+    const rows = Array.from(groupMap.values())
+      .map(g => {
+        const sampleSize = g.sessions.size;
+        return {
+          tier: g.tier,
+          complexityBucket: g.complexityBucket,
+          sampleSize,
+          avgTokensPerLine: g.linesChanged > 0 ? g.totalTokens / g.linesChanged : 0,
+          reworkRate: sampleSize > 0 ? g.reworkCount / sampleSize : 0,
+          revertRate: sampleSize > 0 ? g.revertCount / sampleSize : 0,
+        };
+      })
+      .sort((a, b) => (tierOrder[a.tier] - tierOrder[b.tier]) || (bucketOrder[a.complexityBucket] - bucketOrder[b.complexityBucket]));
 
     return NextResponse.json(rows);
   } catch (err: any) {

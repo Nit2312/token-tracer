@@ -4,7 +4,7 @@
  */
 import crypto from 'node:crypto';
 import { adminPassword, sessionSecret } from './env';
-import { query } from './db';
+import { queryCol, setDocById } from './db';
 
 const KEY_PREFIX = 'av_live_';
 
@@ -24,25 +24,51 @@ export async function memberFromAuthHeader(authHeader: string | undefined | null
   const key = authHeader.slice(7).trim();
   if (!key) return null;
   const keyHash = hashApiKey(key);
-  const { rows } = await query(
-    `SELECT m.id AS member_id,
-            COALESCE(
-              (SELECT tm.team_id 
-               FROM team_members tm 
-               WHERE tm.member_id = m.id 
-               ORDER BY tm.created_at ASC 
-               LIMIT 1),
-              m.team_id
-            ) AS team_id,
-            m.display_name, m.role
-     FROM member_keys k
-     JOIN members m ON m.id = k.member_id
-     WHERE k.key_hash = $1 AND k.revoked_at IS NULL`,
-    [keyHash],
-  );
-  if (!rows[0]) return null;
-  await query('UPDATE member_keys SET last_used_at = now() WHERE key_hash = $1', [keyHash]);
-  return rows[0] as { member_id: string; team_id: string; display_name: string; role: string };
+
+  // Look up the member_key doc
+  const keyDocs = await queryCol<{
+    member_id: string;
+    revoked_at: string | null;
+  }>('member_keys', [
+    { type: 'where', field: 'key_hash', op: '==', value: keyHash },
+    { type: 'limit', n: 1 },
+  ]);
+
+  const keyDoc = keyDocs[0];
+  if (!keyDoc || keyDoc.revoked_at) return null;
+
+  // Look up the member doc
+  const memberDocs = await queryCol<{
+    team_id: string | null;
+    display_name: string;
+    role: string;
+  }>('members', [
+    { type: 'where', field: '__name__', op: '==', value: keyDoc.member_id },
+    { type: 'limit', n: 1 },
+  ]);
+
+  // Firestore doesn't support __name__ in queryCol — fetch directly
+  const { getDocById } = await import('./db');
+  const memberDoc = await getDocById('members', keyDoc.member_id);
+  if (!memberDoc) return null;
+
+  // Resolve team_id: prefer team_members junction, fall back to member.team_id
+  const teamMemberDocs = await queryCol<{ team_id: string }>('team_members', [
+    { type: 'where', field: 'member_id', op: '==', value: keyDoc.member_id },
+    { type: 'orderBy', field: 'created_at', direction: 'asc' },
+    { type: 'limit', n: 1 },
+  ]);
+  const teamId = teamMemberDocs[0]?.team_id ?? memberDoc.team_id ?? null;
+
+  // Update last_used_at
+  await setDocById('member_keys', keyDoc.id, { last_used_at: new Date().toISOString() }, true);
+
+  return {
+    member_id: keyDoc.member_id,
+    team_id: teamId as string,
+    display_name: memberDoc.display_name as string,
+    role: memberDoc.role as string,
+  };
 }
 
 /** Issue admin session token (stateless HMAC). */

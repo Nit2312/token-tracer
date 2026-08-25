@@ -1,4 +1,4 @@
-import { query, insertMany } from './db';
+import { queryCol, setDocById, addDocToCol, batchWrite, newUuid, getDocById } from './db';
 
 const EDIT_TOOLS = new Set([
   'edit', 'write', 'notebookedit', 'str_replace_editor', 'apply_patch', 'multiedit'
@@ -108,7 +108,12 @@ export async function saveSessionTurns(
   }
 
   // Clean old turns for idempotency
-  await query('DELETE FROM session_turns WHERE session_id = $1', [sessionId]);
+  const oldTurns = await queryCol('session_turns', [
+    { type: 'where', field: 'session_id', op: '==', value: sessionId },
+  ]);
+  if (oldTurns.length) {
+    await batchWrite(oldTurns.map((d) => ({ type: 'delete' as const, col: 'session_turns', id: d.id })));
+  }
 
   // Group events into turns starting with each user message
   const turns: any[] = [];
@@ -136,22 +141,24 @@ export async function saveSessionTurns(
   }
 
   // Fetch session totals for allocation if turn-level usage is missing/null
-  const { rows: sessionInfo } = await query(
-    `SELECT 
-      tokens_in, tokens_out, tool_calls, tool_errors, 
-      rework_loops, corrections, additions, deletions, 
-      files_touched, changed_lines 
-     FROM sync_sessions WHERE session_id = $1`,
-    [sessionId]
-  );
-  const sessionTokensIn = sessionInfo[0]?.tokens_in || 0;
-  const sessionTokensOut = sessionInfo[0]?.tokens_out || 0;
-  const sessionToolCalls = sessionInfo[0]?.tool_calls || 0;
-  const sessionToolErrors = sessionInfo[0]?.tool_errors || 0;
-  const sessionReworkLoops = sessionInfo[0]?.rework_loops || 0;
-  const sessionAdditions = sessionInfo[0]?.additions || 0;
-  const sessionDeletions = sessionInfo[0]?.deletions || 0;
-  const sessionFilesTouched = sessionInfo[0]?.files_touched || 0;
+  // Session is identified by session_id field on sync_sessions docs
+  const sessionDocs = await queryCol<{
+    tokens_in: number; tokens_out: number; tool_calls: number; tool_errors: number;
+    rework_loops: number; corrections: number; additions: number; deletions: number;
+    files_touched: number; changed_lines: number;
+  }>('sync_sessions', [
+    { type: 'where', field: 'session_id', op: '==', value: sessionId },
+    { type: 'limit', n: 1 },
+  ]);
+  const sessionInfo = sessionDocs[0];
+  const sessionTokensIn = sessionInfo?.tokens_in || 0;
+  const sessionTokensOut = sessionInfo?.tokens_out || 0;
+  const sessionToolCalls = sessionInfo?.tool_calls || 0;
+  const sessionToolErrors = sessionInfo?.tool_errors || 0;
+  const sessionReworkLoops = sessionInfo?.rework_loops || 0;
+  const sessionAdditions = sessionInfo?.additions || 0;
+  const sessionDeletions = sessionInfo?.deletions || 0;
+  const sessionFilesTouched = sessionInfo?.files_touched || 0;
 
   let totalPromptWeight = 0;
   let totalResponseWeight = 0;
@@ -171,12 +178,11 @@ export async function saveSessionTurns(
   const previouslyEditedFiles = new Set<string>();
   let cumulativeInputTokens = 0;
 
-  const userRows: unknown[][] = [];
-  const assistantRows: unknown[][] = [];
-  // Tool-error rows keyed by turn index — resolved to real turn ids once the
-  // assistant rows are bulk-inserted and their generated ids come back.
-  const pendingToolErrors: Array<{ turnIndex: number; rows: Array<[string, string | null]> }> = [];
-  const repromptRows: unknown[][] = [];
+  // Collect all turn docs to batch-insert
+  const turnDocs: Array<{ id: string; data: Record<string, any> }> = [];
+  const toolErrorDocs: Array<{ turnId: string; data: Record<string, any> }> = [];
+  const repromptDocs: Array<Record<string, any>> = [];
+
   let fallbackToolsUsedCache: Array<{ tool_name: string; call_count: number }> | null = null;
 
   for (let idx = 0; idx < turns.length; idx++) {
@@ -190,11 +196,19 @@ export async function saveSessionTurns(
     const intentCategory = classifyIntent(userText);
     const userRevert = /\b(revert|undo|go back|reset)\b/i.test(userText);
 
-    userRows.push([
-      sessionId, teamId, memberId, source, model, idx, 'user',
-      userText, userText.length, hasCodeBlock, hasFilePath, hasTraceback,
-      intentCategory, userRevert,
-    ]);
+    const userTurnId = newUuid();
+    turnDocs.push({
+      id: userTurnId,
+      data: {
+        session_id: sessionId, org_id: teamId, user_id: memberId,
+        tool: source, model, turn_index: idx, turn_role: 'user',
+        prompt_text_sanitized: userText, prompt_char_len: userText.length,
+        has_code_block: hasCodeBlock, has_file_path: hasFilePath,
+        has_traceback: hasTraceback, intent_category: intentCategory,
+        revert_flag: userRevert,
+        created_at: new Date().toISOString(),
+      },
+    });
 
     // Extract stats from assistant response & tool calls
     const usage = t.assistantEvent?.usage;
@@ -216,7 +230,6 @@ export async function saveSessionTurns(
 
     cumulativeInputTokens += inputTokens;
 
-    // Process tool edits
     let filesTouchedInTurn = new Set<string>();
     let linesAdded = 0;
     let linesRemoved = 0;
@@ -234,23 +247,59 @@ export async function saveSessionTurns(
       linesRemoved = sessionDeletions;
       toolErrors = sessionToolErrors;
       reworkFlag = sessionReworkLoops > 0;
-      turnRevert = sessionReworkLoops > 0 || (sessionInfo[0]?.corrections || 0) > 0;
+      turnRevert = sessionReworkLoops > 0 || (sessionInfo?.corrections || 0) > 0;
       toolCallCount = sessionToolCalls;
       toolCallValidCount = sessionFilesTouched;
-    } else {
-      for (const toolEv of t.tools) {
-        if (toolEv.tool?.isError) {
-          toolErrors++;
-        }
-        
-        // Git command revert checks
-        if (toolEv.tool?.name === 'run_command' || toolEv.tool?.name === 'command') {
-          const cmd = String(toolEv.tool?.args?.command || '').toLowerCase();
-          if (/\b(checkout|reset|revert)\b/.test(cmd)) {
-            turnRevert = true;
+
+      if (toolErrors > 0) {
+        if (!fallbackToolsUsedCache) {
+          // Find sync_session_tools for this session
+          const sessionDocs2 = await queryCol<{ id: string }>('sync_sessions', [
+            { type: 'where', field: 'session_id', op: '==', value: sessionId },
+            { type: 'limit', n: 1 },
+          ]);
+          const syncSessionDocId = sessionDocs2[0]?.id;
+          if (syncSessionDocId) {
+            const toolsUsed = await queryCol<{ tool_name: string; call_count: number }>('sync_session_tools', [
+              { type: 'where', field: 'sync_session_id', op: '==', value: syncSessionDocId },
+            ]);
+            fallbackToolsUsedCache = toolsUsed;
+          } else {
+            fallbackToolsUsedCache = [];
           }
         }
-
+        const toolList: string[] = [];
+        for (const tRow of fallbackToolsUsedCache!) {
+          const name = tRow.tool_name || 'unknown';
+          const count = Number(tRow.call_count || 1);
+          for (let c = 0; c < count; c++) toolList.push(name);
+        }
+        if (!toolList.length) {
+          for (let c = 0; c < toolCallCount; c++) toolList.push('unknown');
+        }
+        let errorInserted = 0;
+        for (const toolName of toolList) {
+          if (errorInserted >= toolErrors) break;
+          toolErrorDocs.push({
+            turnId: userTurnId, // will be paired with assistant turn below
+            data: {
+              session_id: sessionId, org_id: teamId, tool: source, model,
+              tool_name: toolName,
+              tool_args_summary: 'Mocked tool call from trajectory totals',
+              is_error: true,
+              created_at: new Date().toISOString(),
+            },
+          });
+          errorInserted++;
+        }
+      }
+    } else {
+      for (const toolEv of t.tools) {
+        if (toolEv.tool?.isError) toolErrors++;
+        if (toolEv.tool?.name === 'run_command' || toolEv.tool?.name === 'command') {
+          const cmd = String(toolEv.tool?.args?.command || '').toLowerCase();
+          if (/\b(checkout|reset|revert)\b/.test(cmd)) turnRevert = true;
+        }
         const edits = extractEditOperations(toolEv);
         for (const op of edits) {
           filesTouchedInTurn.add(op.path);
@@ -258,130 +307,80 @@ export async function saveSessionTurns(
           linesRemoved += op.deletions;
         }
       }
-
-      // Check Rework: editing a file already touched in a previous turn
       for (const file of filesTouchedInTurn) {
-        if (previouslyEditedFiles.has(file)) {
-          reworkFlag = true;
-        }
+        if (previouslyEditedFiles.has(file)) reworkFlag = true;
         previouslyEditedFiles.add(file);
       }
-
       toolCallCount = t.tools.length;
-      toolCallValidCount = Array.from(filesTouchedInTurn).length; // tools that referenced real files/lines
+      toolCallValidCount = Array.from(filesTouchedInTurn).length;
+
+      if (t.tools.length) {
+        for (const toolEv of t.tools) {
+          if (!toolEv.tool?.isError) continue;
+          toolErrorDocs.push({
+            turnId: userTurnId,
+            data: {
+              session_id: sessionId, org_id: teamId, tool: source, model,
+              tool_name: String(toolEv.tool?.name ?? 'unknown'),
+              tool_args_summary: summarizeToolArgs(toolEv.tool?.args),
+              is_error: true,
+              created_at: new Date().toISOString(),
+            },
+          });
+        }
+      }
     }
 
-    assistantRows.push([
-      sessionId, teamId, memberId, source, model, idx, 'assistant',
-      inputTokens, outputTokens, cacheRead, cacheWrite, cumulativeInputTokens,
-      filesTouchedInTurn.size, linesAdded, linesRemoved, toolCallCount, toolCallValidCount,
-      toolErrors > 0, reworkFlag, turnRevert,
-    ]);
-
-    if (isFallback) {
-      if (toolErrors > 0) {
-        if (!fallbackToolsUsedCache) {
-          const { rows: toolsUsed } = await query<{ tool_name: string; call_count: number }>(
-            `SELECT tool_name, call_count
-             FROM sync_session_tools
-             WHERE sync_session_id = (SELECT id FROM sync_sessions WHERE session_id = $1)`,
-            [sessionId]
-          );
-          fallbackToolsUsedCache = toolsUsed;
-        }
-        const toolList: string[] = [];
-        for (const tRow of fallbackToolsUsedCache!) {
-          const name = tRow.tool_name || 'unknown';
-          const count = Number(tRow.call_count || 1);
-          for (let c = 0; c < count; c++) {
-            toolList.push(name);
-          }
-        }
-        if (!toolList.length) {
-          for (let c = 0; c < toolCallCount; c++) {
-            toolList.push('unknown');
-          }
-        }
-        const errorRows: Array<[string, string | null]> = [];
-        let errorInserted = 0;
-        for (const toolName of toolList) {
-          if (errorInserted >= toolErrors) break;
-          errorRows.push([toolName, 'Mocked tool call from trajectory totals']);
-          errorInserted++;
-        }
-        if (errorRows.length) pendingToolErrors.push({ turnIndex: idx, rows: errorRows });
-      }
-    } else if (t.tools.length) {
-      const errorRows: Array<[string, string | null]> = [];
-      for (const toolEv of t.tools) {
-        if (!toolEv.tool?.isError) continue;
-        const toolName = String(toolEv.tool?.name ?? 'unknown');
-        errorRows.push([toolName, summarizeToolArgs(toolEv.tool?.args)]);
-      }
-      if (errorRows.length) pendingToolErrors.push({ turnIndex: idx, rows: errorRows });
-    }
+    const assistantTurnId = newUuid();
+    turnDocs.push({
+      id: assistantTurnId,
+      data: {
+        session_id: sessionId, org_id: teamId, user_id: memberId,
+        tool: source, model, turn_index: idx, turn_role: 'assistant',
+        input_tokens: inputTokens, output_tokens: outputTokens,
+        cache_read_tokens: cacheRead, cache_write_tokens: cacheWrite,
+        cumulative_input_tokens: cumulativeInputTokens,
+        files_touched: filesTouchedInTurn.size, lines_added: linesAdded,
+        lines_removed: linesRemoved, tool_call_count: toolCallCount,
+        tool_call_valid_count: toolCallValidCount,
+        tool_error_flag: toolErrors > 0, rework_flag: reworkFlag, revert_flag: turnRevert,
+        created_at: new Date().toISOString(),
+      },
+    });
 
     // ── Pilot reprompt similarity checks (Study 5) ──
     const pilotOrgId = process.env.ENABLE_REPROMPT_ANALYSIS_ORG_ID;
     if (pilotOrgId && teamId === pilotOrgId && idx > 0) {
       const prevUserText = turns[idx - 1].userEvent?.text || '';
       const similarity = calculateCosineSimilarity(prevUserText, userText);
-
       if (similarity >= 0.85) {
-        repromptRows.push([sessionId, idx, similarity, inputTokens + outputTokens]);
+        repromptDocs.push({
+          session_id: sessionId, turn_index: idx,
+          similarity_score: similarity,
+          tokens_cost_of_following_turn: inputTokens + outputTokens,
+          created_at: new Date().toISOString(),
+        });
       }
     }
   }
 
-  await insertMany(
-    'session_turns',
-    ['session_id', 'org_id', 'user_id', 'tool', 'model', 'turn_index', 'turn_role',
-      'prompt_text_sanitized', 'prompt_char_len', 'has_code_block', 'has_file_path', 'has_traceback',
-      'intent_category', 'revert_flag'],
-    ['text', 'text', 'text', 'text', 'text', 'int', 'text',
-      'text', 'int', 'boolean', 'boolean', 'boolean',
-      'text', 'boolean'],
-    userRows,
-  );
+  // Batch-insert all turn docs
+  const turnBatchOps = turnDocs.map((d) => ({
+    type: 'set' as const, col: 'session_turns', id: d.id, data: d.data,
+  }));
+  if (turnBatchOps.length) await batchWrite(turnBatchOps);
 
-  const { rows: insertedAssistantRows } = await insertMany<{ id: string; turn_index: number }>(
-    'session_turns',
-    ['session_id', 'org_id', 'user_id', 'tool', 'model', 'turn_index', 'turn_role',
-      'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'cumulative_input_tokens',
-      'files_touched', 'lines_added', 'lines_removed', 'tool_call_count', 'tool_call_valid_count',
-      'tool_error_flag', 'rework_flag', 'revert_flag'],
-    ['text', 'text', 'text', 'text', 'text', 'int', 'text',
-      'int', 'int', 'int', 'int', 'int',
-      'int', 'int', 'int', 'int', 'int',
-      'boolean', 'boolean', 'boolean'],
-    assistantRows,
-    { returning: 'id, turn_index' },
-  );
+  // Batch-insert tool error docs
+  const errorBatchOps = toolErrorDocs.map((e) => ({
+    type: 'set' as const, col: 'session_tool_errors', id: newUuid(), data: e.data,
+  }));
+  if (errorBatchOps.length) await batchWrite(errorBatchOps);
 
-  const turnIdByIndex = new Map<number, string>();
-  for (const row of insertedAssistantRows) turnIdByIndex.set(Number(row.turn_index), String(row.id));
-
-  const toolErrorRows: unknown[][] = [];
-  for (const pending of pendingToolErrors) {
-    const turnId = turnIdByIndex.get(pending.turnIndex);
-    if (!turnId) continue;
-    for (const [toolName, argsSummary] of pending.rows) {
-      toolErrorRows.push([turnId, sessionId, teamId, source, model, toolName, argsSummary, true]);
-    }
-  }
-  await insertMany(
-    'session_tool_errors',
-    ['turn_id', 'session_id', 'org_id', 'tool', 'model', 'tool_name', 'tool_args_summary', 'is_error'],
-    ['bigint', 'text', 'text', 'text', 'text', 'text', 'text', 'boolean'],
-    toolErrorRows,
-  );
-
-  await insertMany(
-    'redundant_reprompt_events',
-    ['session_id', 'turn_index', 'similarity_score', 'tokens_cost_of_following_turn'],
-    ['text', 'int', 'numeric', 'int'],
-    repromptRows,
-  );
+  // Batch-insert reprompt docs
+  const repromptBatchOps = repromptDocs.map((r) => ({
+    type: 'set' as const, col: 'redundant_reprompt_events', id: newUuid(), data: r,
+  }));
+  if (repromptBatchOps.length) await batchWrite(repromptBatchOps);
 }
 
 function summarizeToolArgs(args: any): string | null {
@@ -406,19 +405,10 @@ export function calculateCosineSimilarity(text1: string, text2: string): number 
   const freq2: Record<string, number> = {};
   const allWords = new Set<string>();
 
-  for (const w of tokens1) {
-    freq1[w] = (freq1[w] || 0) + 1;
-    allWords.add(w);
-  }
-  for (const w of tokens2) {
-    freq2[w] = (freq2[w] || 0) + 1;
-    allWords.add(w);
-  }
+  for (const w of tokens1) { freq1[w] = (freq1[w] || 0) + 1; allWords.add(w); }
+  for (const w of tokens2) { freq2[w] = (freq2[w] || 0) + 1; allWords.add(w); }
 
-  let dotProduct = 0;
-  let mag1 = 0;
-  let mag2 = 0;
-
+  let dotProduct = 0, mag1 = 0, mag2 = 0;
   for (const w of allWords) {
     const val1 = freq1[w] || 0;
     const val2 = freq2[w] || 0;
@@ -435,113 +425,142 @@ export function calculateCosineSimilarity(text1: string, text2: string): number 
  * Runs nightly calculations to sync session_turns to session_outcomes rollups
  */
 export async function runResearchRollup(): Promise<void> {
-  // Aggregate turns into session outcomes
-  await query(`
-    INSERT INTO session_outcomes (
-      session_id, org_id, tool, model, intent_category,
-      total_input_tokens, total_output_tokens, total_cost,
-      files_touched, lines_changed, tool_call_count,
-      had_rework, had_revert, had_tool_error, success
-    )
-    SELECT 
-      st.session_id,
-      st.org_id,
-      st.tool,
-      st.model,
-      (SELECT intent_category FROM session_turns WHERE session_id = st.session_id AND intent_category IS NOT NULL LIMIT 1) AS intent_category,
-      SUM(st.input_tokens)::int AS total_input_tokens,
-      SUM(st.output_tokens)::int AS total_output_tokens,
-      COALESCE(ss.api_cost, 0)::numeric(12,4) AS total_cost,
-      COALESCE((SELECT COUNT(DISTINCT path)::int FROM sync_session_files WHERE sync_session_id = ss.id), 0) AS files_touched,
-      SUM(st.lines_added + st.lines_removed)::int AS lines_changed,
-      SUM(st.tool_call_count)::int AS tool_call_count,
-      BOOL_OR(st.rework_flag) AS had_rework,
-      BOOL_OR(st.revert_flag) AS had_revert,
-      BOOL_OR(st.tool_error_flag) AS had_tool_error,
-      NOT (BOOL_OR(st.rework_flag) OR BOOL_OR(st.revert_flag) OR BOOL_OR(st.tool_error_flag)) AS success
-    FROM session_turns st
-    LEFT JOIN sync_sessions ss ON ss.session_id = st.session_id
-                              AND ss.team_id::text = st.org_id
-                              AND ss.member_id::text = st.user_id
-                              AND ss.source = st.tool
-    GROUP BY st.session_id, st.org_id, st.tool, st.model, ss.id, ss.api_cost
-    ON CONFLICT (session_id) DO UPDATE SET
-      org_id = EXCLUDED.org_id,
-      tool = EXCLUDED.tool,
-      model = EXCLUDED.model,
-      intent_category = EXCLUDED.intent_category,
-      total_input_tokens = EXCLUDED.total_input_tokens,
-      total_output_tokens = EXCLUDED.total_output_tokens,
-      total_cost = EXCLUDED.total_cost,
-      files_touched = EXCLUDED.files_touched,
-      lines_changed = EXCLUDED.lines_changed,
-      tool_call_count = EXCLUDED.tool_call_count,
-      had_rework = EXCLUDED.had_rework,
-      had_revert = EXCLUDED.had_revert,
-      had_tool_error = EXCLUDED.had_tool_error,
-      success = EXCLUDED.success
-  `);
+  // Fetch all session_turns and aggregate into session_outcomes
+  const turns = await queryCol<{
+    session_id: string; org_id: string; tool: string; model: string;
+    turn_role: string; input_tokens: number; output_tokens: number;
+    files_touched: number; lines_added: number; lines_removed: number;
+    tool_call_count: number; rework_flag: boolean; revert_flag: boolean;
+    tool_error_flag: boolean; intent_category?: string;
+  }>('session_turns');
 
-  // Calculate task complexity scores
-  await query(`
-    WITH stats AS (
-      SELECT 
-        AVG(files_touched)::float AS avg_files,
-        COALESCE(NULLIF(STDDEV(files_touched)::float, 0), 1) AS stddev_files,
-        AVG(lines_changed)::float AS avg_lines,
-        COALESCE(NULLIF(STDDEV(lines_changed)::float, 0), 1) AS stddev_lines,
-        AVG(tool_call_count)::float AS avg_tools,
-        COALESCE(NULLIF(STDDEV(tool_call_count)::float, 0), 1) AS stddev_tools
-      FROM session_outcomes
-    )
-    UPDATE session_outcomes
-    SET complexity_score = (
-      (files_touched - (SELECT avg_files FROM stats)) / (SELECT stddev_files FROM stats) +
-      (lines_changed - (SELECT avg_lines FROM stats)) / (SELECT stddev_lines FROM stats) +
-      (tool_call_count - (SELECT avg_tools FROM stats)) / (SELECT stddev_tools FROM stats)
-    );
-  `);
+  // Group turns by session_id
+  const bySession = new Map<string, typeof turns>();
+  for (const t of turns) {
+    if (!bySession.has(t.session_id)) bySession.set(t.session_id, []);
+    bySession.get(t.session_id)!.push(t);
+  }
+
+  const outcomeOps: Array<{ type: 'set'; col: string; id: string; data: object; merge?: boolean }> = [];
+
+  for (const [sessionId, sessionTurns] of bySession) {
+    const first = sessionTurns[0];
+    if (!first) continue;
+
+    const totalInput = sessionTurns.reduce((s, t) => s + (t.input_tokens || 0), 0);
+    const totalOutput = sessionTurns.reduce((s, t) => s + (t.output_tokens || 0), 0);
+    const totalFiles = sessionTurns.reduce((s, t) => s + (t.files_touched || 0), 0);
+    const totalLines = sessionTurns.reduce((s, t) => s + (t.lines_added || 0) + (t.lines_removed || 0), 0);
+    const totalTools = sessionTurns.reduce((s, t) => s + (t.tool_call_count || 0), 0);
+    const hadRework = sessionTurns.some((t) => t.rework_flag);
+    const hadRevert = sessionTurns.some((t) => t.revert_flag);
+    const hadToolError = sessionTurns.some((t) => t.tool_error_flag);
+    const intentCategory = sessionTurns.find((t) => t.intent_category)?.intent_category || null;
+
+    // Get cost from sync_sessions
+    const syncDocs = await queryCol<{ api_cost: number }>('sync_sessions', [
+      { type: 'where', field: 'session_id', op: '==', value: sessionId },
+      { type: 'limit', n: 1 },
+    ]);
+    const totalCost = syncDocs[0]?.api_cost || 0;
+
+    outcomeOps.push({
+      type: 'set',
+      col: 'session_outcomes',
+      id: sessionId,
+      data: {
+        session_id: sessionId,
+        org_id: first.org_id,
+        tool: first.tool,
+        model: first.model,
+        intent_category: intentCategory,
+        total_input_tokens: totalInput,
+        total_output_tokens: totalOutput,
+        total_cost: totalCost,
+        files_touched: totalFiles,
+        lines_changed: totalLines,
+        tool_call_count: totalTools,
+        had_rework: hadRework,
+        had_revert: hadRevert,
+        had_tool_error: hadToolError,
+        success: !hadRework && !hadRevert && !hadToolError,
+      },
+      merge: true,
+    });
+  }
+
+  if (outcomeOps.length) await batchWrite(outcomeOps);
+
+  // Calculate complexity scores (z-score normalization)
+  const outcomes = await queryCol<{
+    session_id: string;
+    files_touched: number;
+    lines_changed: number;
+    tool_call_count: number;
+  }>('session_outcomes');
+
+  if (!outcomes.length) return;
+
+  const avgFiles = outcomes.reduce((s, o) => s + (o.files_touched || 0), 0) / outcomes.length;
+  const avgLines = outcomes.reduce((s, o) => s + (o.lines_changed || 0), 0) / outcomes.length;
+  const avgTools = outcomes.reduce((s, o) => s + (o.tool_call_count || 0), 0) / outcomes.length;
+
+  const stddev = (arr: number[], avg: number) => {
+    const variance = arr.reduce((s, v) => s + (v - avg) ** 2, 0) / arr.length;
+    return Math.sqrt(variance) || 1;
+  };
+
+  const stdFiles = stddev(outcomes.map((o) => o.files_touched || 0), avgFiles);
+  const stdLines = stddev(outcomes.map((o) => o.lines_changed || 0), avgLines);
+  const stdTools = stddev(outcomes.map((o) => o.tool_call_count || 0), avgTools);
+
+  const complexityOps = outcomes.map((o) => ({
+    type: 'set' as const,
+    col: 'session_outcomes',
+    id: o.session_id,
+    data: {
+      complexity_score:
+        ((o.files_touched || 0) - avgFiles) / stdFiles +
+        ((o.lines_changed || 0) - avgLines) / stdLines +
+        ((o.tool_call_count || 0) - avgTools) / stdTools,
+    },
+    merge: true,
+  }));
+
+  if (complexityOps.length) await batchWrite(complexityOps);
 }
 
 export async function backfillResearchAnalytics(limit?: number, offset?: number): Promise<{ processed: number }> {
-  // Fetch all sync_sessions to backfill turn analytics
-  const limitClause = limit ? `LIMIT ${limit} OFFSET ${offset || 0}` : '';
-  const { rows } = await query(`
-    SELECT team_id::text AS org_id, member_id::text AS user_id, source AS tool, model, session_id, events
-    FROM sync_sessions
-    ORDER BY id
-    ${limitClause}
-  `);
+  const constraints: Parameters<typeof queryCol>[1] = [
+    { type: 'orderBy', field: 'synced_at', direction: 'asc' },
+  ];
+  if (limit) constraints.push({ type: 'limit', n: limit });
+
+  const rows = await queryCol<{
+    team_id: string; member_id: string; source: string;
+    model: string; session_id: string; events: any;
+  }>('sync_sessions', constraints);
 
   let processed = 0;
   for (const row of rows) {
-    if ((globalThis as any).abortBackfill) {
-      throw new Error('Backfill aborted');
-    }
+    if ((globalThis as any).abortBackfill) throw new Error('Backfill aborted');
     let parsedEvents: any[] = [];
     try {
-      if (typeof row.events === 'string') {
-        parsedEvents = JSON.parse(row.events);
-      } else if (Array.isArray(row.events)) {
-        parsedEvents = row.events;
-      }
-    } catch {
-      continue;
-    }
+      if (typeof row.events === 'string') parsedEvents = JSON.parse(row.events);
+      else if (Array.isArray(row.events)) parsedEvents = row.events;
+    } catch { continue; }
 
     await saveSessionTurns(
-      row.org_id || 'unknown_org',
-      row.user_id || 'unknown_member',
-      row.tool || 'cursor',
+      row.team_id || 'unknown_org',
+      row.member_id || 'unknown_member',
+      row.source || 'cursor',
       row.model || 'default',
       row.session_id,
-      parsedEvents
+      parsedEvents,
     );
     processed++;
   }
 
-  // Run outcome rollups
   await runResearchRollup();
-
   return { processed };
 }

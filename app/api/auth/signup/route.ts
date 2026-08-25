@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { hashPassword } from '@/lib/auth';
 import { generateApiKey, hashApiKey } from '@/lib/team/auth';
-import { query } from '@/lib/team/db';
+import { queryCol, setDocById, newUuid } from '@/lib/team/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -32,7 +32,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'invalid role' }, { status: 400 });
     }
 
-    // Validate username format
     if (username.length < 2) {
       return NextResponse.json({ error: 'Username must be at least 2 characters long' }, { status: 400 });
     }
@@ -40,14 +39,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Username can only contain letters, numbers, dots, hyphens, and underscores' }, { status: 400 });
     }
 
-    // Reserved usernames check
     const reservedUsernames = ['team', 'superadmin', 'admin', 'root', 'api', 'system', 'dashboard'];
     if (reservedUsernames.includes(username)) {
       return NextResponse.json({ error: 'This username is reserved. Please choose another username.' }, { status: 409 });
     }
 
-    // Check if username already exists (case-insensitive)
-    const { rows: existingUsers } = await query('SELECT id FROM users WHERE LOWER(username) = $1', [username]);
+    // Check if username already exists (case-insensitive via stored lowercase)
+    const existingUsers = await queryCol('users', [
+      { type: 'where', field: 'username', op: '==', value: username },
+      { type: 'limit', n: 1 },
+    ]);
     if (existingUsers.length > 0) {
       return NextResponse.json({ error: 'Username already exists. Please choose a different username.' }, { status: 409 });
     }
@@ -61,52 +62,77 @@ export async function POST(req: NextRequest) {
       if (!teamName) {
         return NextResponse.json({ error: 'teamName is required for admins' }, { status: 400 });
       }
-      const { rows: teamRows } = await query(
-        'INSERT INTO teams (name) VALUES ($1) RETURNING id',
-        [teamName]
-      );
-      finalTeamId = teamRows[0].id;
+      finalTeamId = newUuid();
+      await setDocById('teams', finalTeamId, {
+        name: teamName,
+        created_at: new Date().toISOString(),
+      });
     } else {
       // Find or create default Independent team
-      let teamRes = await query("SELECT id FROM teams WHERE name = 'Independent' LIMIT 1");
-      let independentTeamId = teamRes.rows[0]?.id;
+      const indepTeams = await queryCol<{ id: string }>('teams', [
+        { type: 'where', field: 'name', op: '==', value: 'Independent' },
+        { type: 'limit', n: 1 },
+      ]);
+      let independentTeamId = indepTeams[0]?.id;
       if (!independentTeamId) {
-        const newTeamRes = await query("INSERT INTO teams (name) VALUES ('Independent') RETURNING id");
-        independentTeamId = newTeamRes.rows[0].id;
+        independentTeamId = newUuid();
+        await setDocById('teams', independentTeamId, {
+          name: 'Independent',
+          created_at: new Date().toISOString(),
+        });
       }
 
-      // Member signup: create member record
-      const { rows: memberRows } = await query(
-        "INSERT INTO members (team_id, display_name, role) VALUES ($1, $2, 'member') RETURNING id",
-        [independentTeamId, displayName]
-      );
-      finalMemberId = memberRows[0].id;
+      // Create member record
+      finalMemberId = newUuid();
+      await setDocById('members', finalMemberId, {
+        id: finalMemberId,
+        team_id: independentTeamId,
+        display_name: displayName,
+        role: 'member',
+        created_at: new Date().toISOString(),
+      });
 
-      // Associate in team_members junction table
-      await query(
-        `INSERT INTO team_members (team_id, member_id, role)
-         VALUES ($1, $2, 'member')
-         ON CONFLICT (team_id, member_id) DO NOTHING`,
-        [independentTeamId, finalMemberId]
-      );
+      // Associate in team_members junction
+      const tmId = `${independentTeamId}_${finalMemberId}`;
+      await setDocById('team_members', tmId, {
+        team_id: independentTeamId,
+        member_id: finalMemberId,
+        role: 'member',
+        created_at: new Date().toISOString(),
+      }, true);
 
       // Generate API key for Member
       rawApiKey = generateApiKey();
       const apiKeyHash = hashApiKey(rawApiKey);
-
-      await query(
-        `INSERT INTO member_keys (member_id, key_hash, label)
-         VALUES ($1, $2, 'default')`,
-        [finalMemberId, apiKeyHash]
-      );
+      const keyId = newUuid();
+      await setDocById('member_keys', keyId, {
+        id: keyId,
+        member_id: finalMemberId,
+        key_hash: apiKeyHash,
+        label: 'default',
+        created_at: new Date().toISOString(),
+        revoked_at: null,
+        last_used_at: null,
+      });
     }
 
-    const { rows: userRows } = await query(
-      `INSERT INTO users (username, password_hash, display_name, member_id, team_id, role, api_key)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, username, display_name, role, member_id, team_id`,
-      [username, passwordHash, displayName, finalMemberId, finalTeamId, role, rawApiKey]
-    );
+    const userId = newUuid();
+    const userDoc = {
+      id: userId,
+      username,
+      password_hash: passwordHash,
+      display_name: displayName,
+      member_id: finalMemberId,
+      team_id: finalTeamId,
+      role,
+      api_key: rawApiKey,
+      active: true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      failed_login_attempts: 0,
+      locked_until: null,
+    };
+    await setDocById('users', userId, userDoc);
 
     const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || 'https://token-tracer-three.vercel.app';
     let installCommandMac = null;
@@ -118,10 +144,10 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       ok: true,
-      user: userRows[0],
+      user: { id: userId, username, display_name: displayName, role, member_id: finalMemberId, team_id: finalTeamId },
       apiKey: rawApiKey,
       installCommandMac,
-      installCommandWin
+      installCommandWin,
     }, { status: 201 });
   } catch (err: any) {
     console.error('[auth/signup error]', err);

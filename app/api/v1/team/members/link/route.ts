@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthorizedTeamId } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { queryCol, getDocById, setDocById } from '@/lib/team/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,23 +10,35 @@ export async function GET(req: NextRequest) {
     const teamId = getAuthorizedTeamId(req, rawTeamId);
     if (!teamId) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
 
-    // Find members that do not belong to the current team
-    const { rows: members } = await query(
-      `SELECT m.id, m.display_name,
-              COALESCE(
-                (SELECT string_agg(t.name, ', ')
-                 FROM team_members tm
-                 JOIN teams t ON t.id = tm.team_id
-                 WHERE tm.member_id = m.id),
-                'Independent'
-              ) AS existing_teams
-       FROM members m
-       WHERE m.id NOT IN (
-         SELECT member_id FROM team_members WHERE team_id = $1
-       )
-       ORDER BY m.display_name`,
-      [teamId],
+    const [allMembers, allTeamMembers, allTeams] = await Promise.all([
+      queryCol<any>('members'),
+      queryCol<any>('team_members'),
+      queryCol<any>('teams'),
+    ]);
+
+    const teamById = new Map(allTeams.map((t: any) => [t.id, t]));
+    const teamIdsByMember = new Map<string, string[]>();
+    for (const tm of allTeamMembers) {
+      if (!teamIdsByMember.has(tm.member_id)) teamIdsByMember.set(tm.member_id, []);
+      teamIdsByMember.get(tm.member_id)!.push(tm.team_id);
+    }
+
+    const currentTeamMemberIds = new Set(
+      allTeamMembers.filter((tm: any) => tm.team_id === teamId).map((tm: any) => tm.member_id)
     );
+
+    const members = allMembers
+      .filter((m: any) => !currentTeamMemberIds.has(m.id))
+      .map((m: any) => {
+        const tIds = teamIdsByMember.get(m.id) || [];
+        const tNames = tIds.map((tid) => teamById.get(tid)?.name).filter(Boolean);
+        return {
+          id: m.id,
+          display_name: m.display_name,
+          existing_teams: tNames.length > 0 ? tNames.join(', ') : 'Independent',
+        };
+      })
+      .sort((a, b) => String(a.display_name).localeCompare(String(b.display_name)));
 
     return NextResponse.json({ members });
   } catch (err) {
@@ -51,19 +63,20 @@ export async function POST(req: NextRequest) {
     const memberId = body.memberId ? String(body.memberId) : null;
     if (!memberId) return NextResponse.json({ error: 'memberId required' }, { status: 400 });
 
-    // Link the member into the new team via team_members junction table
-    await query(
-      `INSERT INTO team_members (team_id, member_id, role)
-       VALUES ($1, $2, 'member')
-       ON CONFLICT (team_id, member_id) DO NOTHING`,
-      [teamId, memberId],
-    );
+    // Link the member into the new team via team_members
+    const tmId = `${teamId}_${memberId}`;
+    await setDocById('team_members', tmId, {
+      team_id: teamId,
+      member_id: memberId,
+      role: 'member',
+      created_at: new Date().toISOString(),
+    }, true);
 
     // If members.team_id is unset, populate it
-    await query(
-      `UPDATE members SET team_id = COALESCE(team_id, $1) WHERE id = $2`,
-      [teamId, memberId],
-    );
+    const member = await getDocById('members', memberId);
+    if (member && !member.team_id) {
+      await setDocById('members', memberId, { team_id: teamId }, true);
+    }
 
     return NextResponse.json({ ok: true });
   } catch (err) {

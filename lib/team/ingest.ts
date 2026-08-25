@@ -1,9 +1,9 @@
 /**
  * Session ingest logic — upserts sanitized session summaries for one member.
- * Calculates session costs inline using database pricing rules for instant and
+ * Calculates session costs inline using Firestore pricing rules for instant and
  * concurrency-safe pricing without timeouts.
  */
-import { query, insertMany } from './db';
+import { queryCol, getCachedCollection, setDocById, addDocToCol, batchWrite, newUuid } from './db';
 import { recalculateTeamCosts, matchesModelPattern } from './stats';
 import { saveSessionTurns } from './research';
 import { statsCache } from './cache';
@@ -54,14 +54,18 @@ export async function ingestSessions(
     return { accepted: 0, total: 0 };
   }
 
-  // 1. Fetch custom pricing rules (team-specific overrides first, then global overrides)
-  const { rows: customRules } = await query(
-    `SELECT model_pattern, cost_in_per_m, cost_out_per_m, cost_cache_read_per_m
-     FROM model_pricing
-     WHERE team_id = $1 OR team_id IN (SELECT team_id FROM team_members WHERE member_id = $2) OR team_id IS NULL
-     ORDER BY (team_id IS NOT NULL) DESC`,
-    [member.team_id || null, member.member_id],
-  );
+  // 1. Fetch custom pricing rules (served from cached collection)
+  const allPricingDocs = await getCachedCollection<{
+    model_pattern: string;
+    cost_in_per_m: number;
+    cost_out_per_m: number;
+    cost_cache_read_per_m: number;
+    team_id: string | null;
+  }>('model_pricing', [], 300);
+
+  const teamPricingDocs = allPricingDocs.filter((p) => p.team_id === (member.team_id || null));
+  const globalPricingDocs = allPricingDocs.filter((p) => !p.team_id);
+  const customRules = [...teamPricingDocs, ...globalPricingDocs];
 
   const defaultRules = [
     { model_pattern: 'claude-3-7-sonnet', cost_in_per_m: 3.0, cost_out_per_m: 15.0, cost_cache_read_per_m: 0.3 },
@@ -110,76 +114,50 @@ export async function ingestSessions(
       (tokensCacheRead / 1_000_000) * Number(rule.cost_cache_read_per_m || 0) +
       (tokensCacheWrite / 1_000_000) * Number(((rule as any).cost_cache_write_per_m ?? rule.cost_in_per_m) || 0);
 
-    const { rows } = await query(
-      `INSERT INTO sync_sessions (
-        team_id, member_id, source, session_id, agent, label, model,
-        started_at, ended_at, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write,
-        api_cost, priced, edits, additions, deletions, changed_lines, files_touched,
-        tool_calls, tool_errors, rework_loops, corrections, abandoned, payload_hash, events, synced_at
-      ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27, now()
-      )
-      ON CONFLICT (team_id, member_id, source, session_id) DO UPDATE SET
-        agent = EXCLUDED.agent,
-        model = EXCLUDED.model,
-        started_at = EXCLUDED.started_at,
-        ended_at = EXCLUDED.ended_at,
-        tokens_in = EXCLUDED.tokens_in,
-        tokens_out = EXCLUDED.tokens_out,
-        tokens_cache_read = EXCLUDED.tokens_cache_read,
-        tokens_cache_write = EXCLUDED.tokens_cache_write,
-        api_cost = EXCLUDED.api_cost,
-        priced = EXCLUDED.priced,
-        edits = EXCLUDED.edits,
-        additions = EXCLUDED.additions,
-        deletions = EXCLUDED.deletions,
-        changed_lines = EXCLUDED.changed_lines,
-        files_touched = EXCLUDED.files_touched,
-        tool_calls = EXCLUDED.tool_calls,
-        tool_errors = EXCLUDED.tool_errors,
-        rework_loops = EXCLUDED.rework_loops,
-        corrections = EXCLUDED.corrections,
-        abandoned = EXCLUDED.abandoned,
-        payload_hash = EXCLUDED.payload_hash,
-        events = EXCLUDED.events,
-        synced_at = now()
-      RETURNING id`,
-      [
-        member.team_id,
-        member.member_id,
-        source,
-        sessionId,
-        s.agent ?? null,
-        null,
-        model,
-        s.startedAt ?? s.started_at ?? null,
-        s.endedAt ?? s.ended_at ?? null,
-        tokensIn,
-        tokensOut,
-        tokensCacheRead,
-        tokensCacheWrite,
-        cost, // Inline Server-Calculated Cost
-        true, // Inline Marked as Priced
-        edits,
-        Number(s.additions || 0),
-        Number(s.deletions || 0),
-        changedLines,
-        Number(s.filesTouched || s.files_touched || 0),
-        toolCalls,
-        Number(s.toolErrors || s.tool_errors || 0),
-        Number(s.reworkLoops || s.rework_loops || 0),
-        Number(s.corrections || 0),
-        Boolean(s.abandoned),
-        s.payloadHash || s.payload_hash || `hash_${Date.now()}_${Math.random()}`,
-        s.events ? JSON.stringify(s.events) : null,
-      ],
-    );
+    // 3. Upsert the sync_session document
+    // Use a composite doc ID for uniqueness: team_member_source_sessionId (hashed)
+    const crypto = await import('node:crypto');
+    const docId = crypto.createHash('sha256')
+      .update(`${member.team_id}:${member.member_id}:${source}:${sessionId}`)
+      .digest('hex')
+      .slice(0, 40);
 
-    const syncSessionId = rows[0]?.id;
-    if (!syncSessionId) continue;
+    const syncSessionData = {
+      doc_id: docId,
+      team_id: member.team_id,
+      member_id: member.member_id,
+      source,
+      session_id: sessionId,
+      agent: s.agent ?? null,
+      label: null,
+      model,
+      started_at: s.startedAt ?? s.started_at ?? null,
+      ended_at: s.endedAt ?? s.ended_at ?? null,
+      tokens_in: tokensIn,
+      tokens_out: tokensOut,
+      tokens_cache_read: tokensCacheRead,
+      tokens_cache_write: tokensCacheWrite,
+      api_cost: cost,
+      priced: true,
+      edits,
+      additions: Number(s.additions || 0),
+      deletions: Number(s.deletions || 0),
+      changed_lines: changedLines,
+      files_touched: Number(s.filesTouched || s.files_touched || 0),
+      tool_calls: toolCalls,
+      tool_errors: Number(s.toolErrors || s.tool_errors || 0),
+      rework_loops: Number(s.reworkLoops || s.rework_loops || 0),
+      corrections: Number(s.corrections || 0),
+      abandoned: Boolean(s.abandoned),
+      payload_hash: s.payloadHash || s.payload_hash || `hash_${Date.now()}_${Math.random()}`,
+      events: s.events ? s.events : null,
+      synced_at: new Date().toISOString(),
+    };
+
+    await setDocById('sync_sessions', docId, syncSessionData, true);
     accepted++;
 
-    // Hook into session turns research calculations
+    // 4. Hook into session turns research calculations
     if (s.events) {
       try {
         await saveSessionTurns(
@@ -188,45 +166,67 @@ export async function ingestSessions(
           source,
           model,
           sessionId,
-          s.events
+          s.events,
         );
       } catch (err) {
         console.error('[ingest-turns-research-notice]', err);
       }
     }
 
+    // 5. Replace session tools and files (delete-then-batch-insert pattern)
     const tools: NonNullable<SessionPayload['tools']> = s.tools ?? [];
     const files: NonNullable<SessionPayload['files']> = s.files ?? [];
 
-    await Promise.all([
-      tools.length
-        ? query('DELETE FROM sync_session_tools WHERE sync_session_id = $1', [syncSessionId]).then(() =>
-            insertMany(
-              'sync_session_tools',
-              ['sync_session_id', 'tool_name', 'call_count'],
-              ['uuid', 'text', 'int'],
-              tools.map((t) => [syncSessionId, t.name, t.count]),
-            )
-          )
-        : query('DELETE FROM sync_session_tools WHERE sync_session_id = $1', [syncSessionId]),
-
-      files.length
-        ? query('DELETE FROM sync_session_files WHERE sync_session_id = $1', [syncSessionId]).then(() =>
-            insertMany(
-              'sync_session_files',
-              ['sync_session_id', 'path', 'edits', 'additions', 'deletions'],
-              ['uuid', 'text', 'int', 'int', 'int'],
-              files.map((f) => [syncSessionId, f.path, f.edits ?? 0, f.additions ?? 0, f.deletions ?? 0]),
-            )
-          )
-        : query('DELETE FROM sync_session_files WHERE sync_session_id = $1', [syncSessionId]),
+    // Delete existing tool/file sub-docs for this session
+    const [existingTools, existingFiles] = await Promise.all([
+      queryCol('sync_session_tools', [
+        { type: 'where', field: 'sync_session_id', op: '==', value: docId },
+      ]),
+      queryCol('sync_session_files', [
+        { type: 'where', field: 'sync_session_id', op: '==', value: docId },
+      ]),
     ]);
+
+    const deleteOps = [
+      ...existingTools.map((d) => ({ type: 'delete' as const, col: 'sync_session_tools', id: d.id })),
+      ...existingFiles.map((d) => ({ type: 'delete' as const, col: 'sync_session_files', id: d.id })),
+    ];
+    if (deleteOps.length) await batchWrite(deleteOps);
+
+    // Insert fresh tool/file docs
+    const insertOps = [
+      ...tools.map((t) => ({
+        type: 'set' as const,
+        col: 'sync_session_tools',
+        id: newUuid(),
+        data: { sync_session_id: docId, tool_name: t.name, call_count: t.count },
+      })),
+      ...files.map((f) => ({
+        type: 'set' as const,
+        col: 'sync_session_files',
+        id: newUuid(),
+        data: {
+          sync_session_id: docId,
+          path: f.path,
+          edits: f.edits ?? 0,
+          additions: f.additions ?? 0,
+          deletions: f.deletions ?? 0,
+        },
+      })),
+    ];
+    if (insertOps.length) await batchWrite(insertOps);
   }
 
-  await query(
-    'INSERT INTO ingest_events (team_id, member_id, session_count, accepted, status) VALUES ($1, $2, $3, $4, $5)',
-    [member.team_id, member.member_id, sessions.length, accepted, 'ok'],
-  );
+  // 6. Record ingest event
+  await addDocToCol('ingest_events', {
+    id: newUuid(),
+    team_id: member.team_id,
+    member_id: member.member_id,
+    session_count: sessions.length,
+    accepted,
+    status: 'ok',
+    created_at: new Date().toISOString(),
+  });
 
   if (accepted > 0) {
     statsCache.clear();

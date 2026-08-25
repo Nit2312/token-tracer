@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
 import { verifyAdminToken, adminTokenFromCookie } from '@/lib/team/auth';
-import { query } from '@/lib/team/db';
+import { queryCol, getCachedCollection, setDocById, newUuid } from '@/lib/team/db';
+
+import { statsCache } from '@/lib/team/cache';
 
 export const dynamic = 'force-dynamic';
 
@@ -26,24 +28,33 @@ export async function GET(req: NextRequest) {
     const isUuid = (val: string | null | undefined): boolean =>
       Boolean(val && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val));
 
-    if (session && (session.role === 'admin' || session.role === 'user')) {
-      const hasTeam = isUuid(session.teamId);
-      const hasUser = isUuid(session.userId);
-      if (hasTeam || hasUser) {
-        const { rows } = await query(
-          `SELECT DISTINCT t.id, t.name, t.created_at
-           FROM teams t
-           WHERE ($1::uuid IS NOT NULL AND t.id = $1::uuid)
-              OR ($2::uuid IS NOT NULL AND t.id IN (SELECT tm.team_id FROM team_members tm JOIN users u ON u.member_id = tm.member_id WHERE u.id = $2::uuid))
-           ORDER BY t.created_at DESC`,
-          [hasTeam ? session.teamId : null, hasUser ? session.userId : null],
-        );
-        return NextResponse.json({ teams: rows });
-      }
-    }
+    const cacheKey = `teams_list_${session?.userId || 'anon'}_${session?.role || 'none'}`;
+    const result = await statsCache.getOrSet(cacheKey, 120, async () => {
+      const teamDocs = await getCachedCollection<any>('teams', [], 300);
+      if (session && (session.role === 'admin' || session.role === 'user')) {
+        let filteredTeams: any[] = teamDocs;
 
-    const { rows } = await query('SELECT id, name, created_at FROM teams ORDER BY created_at DESC');
-    return NextResponse.json({ teams: rows });
+        if (isUuid(session.teamId)) {
+          filteredTeams = teamDocs.filter((t: any) => t.id === session.teamId);
+        } else if (isUuid(session.userId)) {
+          // Find member's team_members
+          const userDocs = await queryCol<any>('users', [{ type: 'where', field: 'id', op: '==', value: session.userId }, { type: 'limit', n: 1 }]);
+          const memberId = userDocs[0]?.member_id;
+          if (memberId) {
+            const tmDocs = await getCachedCollection<any>('team_members', [{ type: 'where', field: 'member_id', op: '==', value: memberId }], 180);
+            const teamIds = new Set(tmDocs.map((tm: any) => tm.team_id));
+            filteredTeams = teamDocs.filter((t: any) => teamIds.has(t.id));
+          }
+        }
+
+        filteredTeams.sort((a: any, b: any) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+        return { teams: filteredTeams };
+      }
+
+      return { teams: teamDocs.sort((a: any, b: any) => String(b.created_at || '').localeCompare(String(a.created_at || ''))) };
+    });
+
+    return NextResponse.json(result);
   } catch (err) {
     console.error('[teams GET error]', err);
     return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
@@ -60,11 +71,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'invalid JSON' }, { status: 400 });
     }
     if (!body.name) return NextResponse.json({ error: 'name required' }, { status: 400 });
-    const { rows } = await query(
-      'INSERT INTO teams (name) VALUES ($1) RETURNING id, name, created_at',
-      [body.name],
-    );
-    return NextResponse.json({ team: rows[0] }, { status: 201 });
+    const id = newUuid();
+    const teamDoc = { id, name: String(body.name), created_at: new Date().toISOString() };
+    await setDocById('teams', id, teamDoc);
+    return NextResponse.json({ team: teamDoc }, { status: 201 });
   } catch (err) {
     console.error('[teams POST error]', err);
     return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });

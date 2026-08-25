@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthorizedTeamId } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { queryCol, setDocById, deleteDocById, newUuid } from '@/lib/team/db';
 import { recalculateTeamCosts } from '@/lib/team/stats';
 
 export const dynamic = 'force-dynamic';
@@ -18,11 +18,21 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ pricing: [] });
     }
 
-    const { rows: pricing } = await query(
-      'SELECT id, model_pattern, cost_in_per_m, cost_out_per_m, cost_cache_read_per_m, created_at FROM model_pricing WHERE team_id = $1 ORDER BY model_pattern',
-      [teamId],
-    );
-    return NextResponse.json({ pricing });
+    const pricingDocs = await queryCol<any>('model_pricing', [
+      { type: 'where', field: 'team_id', op: '==', value: teamId },
+    ]);
+    pricingDocs.sort((a, b) => String(a.model_pattern).localeCompare(String(b.model_pattern)));
+
+    return NextResponse.json({
+      pricing: pricingDocs.map(p => ({
+        id: p.id,
+        model_pattern: p.model_pattern,
+        cost_in_per_m: p.cost_in_per_m,
+        cost_out_per_m: p.cost_out_per_m,
+        cost_cache_read_per_m: p.cost_cache_read_per_m,
+        created_at: p.created_at,
+      })),
+    });
   } catch (err) {
     console.error('[team/pricing GET error]', err);
     return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
@@ -40,27 +50,33 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'modelPattern required' }, { status: 400 });
     }
 
-    const { rows } = await query(
-      `INSERT INTO model_pricing (team_id, model_pattern, cost_in_per_m, cost_out_per_m, cost_cache_read_per_m)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (team_id, model_pattern) DO UPDATE SET
-         cost_in_per_m = EXCLUDED.cost_in_per_m,
-         cost_out_per_m = EXCLUDED.cost_out_per_m,
-         cost_cache_read_per_m = EXCLUDED.cost_cache_read_per_m
-       RETURNING id, model_pattern, cost_in_per_m, cost_out_per_m, cost_cache_read_per_m`,
-      [
-        teamId,
-        String(modelPattern).trim().toLowerCase(),
-        Number(costInPerM || 0),
-        Number(costOutPerM || 0),
-        Number(costCacheReadPerM || 0),
-      ],
-    );
+    const pattern = String(modelPattern).trim().toLowerCase();
+
+    // Check if rule already exists for this team & pattern
+    const existing = await queryCol<any>('model_pricing', [
+      { type: 'where', field: 'team_id', op: '==', value: teamId },
+      { type: 'where', field: 'model_pattern', op: '==', value: pattern },
+      { type: 'limit', n: 1 },
+    ]);
+
+    const id = existing[0]?.id || newUuid();
+    const item = {
+      id,
+      team_id: teamId,
+      model_pattern: pattern,
+      cost_in_per_m: Number(costInPerM || 0),
+      cost_out_per_m: Number(costOutPerM || 0),
+      cost_cache_read_per_m: Number(costCacheReadPerM || 0),
+      created_at: existing[0]?.created_at || new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    await setDocById('model_pricing', id, item, true);
 
     // Automatically recalculate costs for all synced sessions of this team
     const recalc = await recalculateTeamCosts(teamId, true);
 
-    return NextResponse.json({ item: rows[0], recalc }, { status: 201 });
+    return NextResponse.json({ item, recalc }, { status: 201 });
   } catch (err) {
     console.error('[team/pricing POST error]', err);
     return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
@@ -75,14 +91,11 @@ export async function DELETE(req: NextRequest) {
     if (!teamId) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
     if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
 
-    const { rowCount } = await query('DELETE FROM model_pricing WHERE id = $1 AND team_id = $2', [id, teamId]);
-    if (rowCount && rowCount > 0) {
-      await recalculateTeamCosts(teamId, true);
-    }
-    return NextResponse.json({ ok: true, deleted: (rowCount || 0) > 0 });
+    await deleteDocById('model_pricing', id);
+    await recalculateTeamCosts(teamId, true);
+    return NextResponse.json({ ok: true, deleted: true });
   } catch (err) {
     console.error('[team/pricing DELETE error]', err);
     return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
   }
 }
-

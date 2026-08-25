@@ -1,13 +1,10 @@
 /**
  * Personal dashboard state endpoint — DB-backed.
  * GET /api/state?from=YYYY-MM-DD&to=YYYY-MM-DD&source=cursor&all=1
- *
- * Requires valid app_session cookie. Returns session list for the logged-in member.
- * Falls back to local filesystem scan if no session (backward compat for local-only mode).
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
-import { query } from '@/lib/team/db';
+import { getDocById, queryCol } from '@/lib/team/db';
 import { normalizeDateParam } from '@/lib/analytics.mjs';
 
 export const dynamic = 'force-dynamic';
@@ -25,10 +22,8 @@ export async function GET(req: NextRequest) {
 
   let memberId = session.memberId;
   try {
-    const { rows: userRows } = await query('SELECT member_id FROM users WHERE id = $1', [session.userId]);
-    if (userRows[0]?.member_id) {
-      memberId = userRows[0].member_id;
-    }
+    const userDoc = await getDocById('users', session.userId);
+    if (userDoc?.member_id) memberId = userDoc.member_id;
   } catch (err) {
     console.warn('[state route member lookup failed]', err);
   }
@@ -47,9 +42,8 @@ export async function GET(req: NextRequest) {
     if (from && to && from > to) { const tmp = from; from = to; to = tmp; }
     const useAll = all || (!from && !to);
 
-    // If running locally without a database, try to read from local filesystem first
-    if (process.env.VERCEL !== '1' && !process.env.DATABASE_URL && !process.env.NEON_CONNECTION_STRING) {
-
+    // If running locally without Firebase, try to read from local filesystem first
+    if (process.env.VERCEL !== '1' && !process.env.FIREBASE_PROJECT_ID) {
       try {
         const { scanSessions } = await import('@/lib/scan.mjs');
         const { roots, sessions: localSessions } = scanSessions({ sources: src ? [src] : null });
@@ -65,11 +59,9 @@ export async function GET(req: NextRequest) {
             });
           }
 
-          // Count per source
           const counts: Record<string, number> = {};
           for (const s of filtered as any[]) counts[s.source] = (counts[s.source] || 0) + 1;
           
-          // Map to expected shape
           const sessionRows = filtered.map((s: any) => ({
             id: s.id,
             source: s.source,
@@ -86,14 +78,10 @@ export async function GET(req: NextRequest) {
           }));
 
           return NextResponse.json({
-            roots,
-            counts,
-            from: from ?? null,
-            to: to ?? null,
-            all: useAll,
+            roots, counts,
+            from: from ?? null, to: to ?? null, all: useAll,
             generatedAt: new Date().toISOString(),
-            sessions: sessionRows,
-            sessionCount: filtered.length,
+            sessions: sessionRows, sessionCount: filtered.length,
           });
         }
       } catch (err) {
@@ -101,32 +89,36 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    const params: unknown[] = [memberId];
-    let dateFilter = '';
-    if (!useAll) {
-      if (from) { params.push(from); dateFilter += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date >= $${params.length}::date`; }
-      if (to)   { params.push(to);   dateFilter += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date <= $${params.length}::date`; }
-    }
-    if (src && src !== 'all') { params.push(src); dateFilter += ` AND s.source = $${params.length}`; }
+    // Fetch sessions from Firestore
+    const constraints: Parameters<typeof queryCol>[1] = [
+      { type: 'where', field: 'member_id', op: '==', value: memberId },
+      { type: 'orderBy', field: 'synced_at', direction: 'desc' },
+      { type: 'limit', n: 500 },
+    ];
+    if (src && src !== 'all') constraints.push({ type: 'where', field: 'source', op: '==', value: src });
 
-    const { rows: sessions } = await query(`
-      SELECT s.id, s.session_id, s.source, s.agent, s.label, s.model,
-             s.started_at, s.ended_at, s.synced_at,
-             s.tokens_in, s.tokens_out, s.tokens_cache_read, s.tokens_cache_write,
-             s.api_cost, s.edits, s.additions, s.deletions, s.changed_lines,
-             s.files_touched, s.tool_calls, s.tool_errors, s.rework_loops,
-             s.corrections, s.abandoned
-      FROM sync_sessions s
-      WHERE s.member_id = $1 ${dateFilter}
-      ORDER BY COALESCE(s.ended_at, s.started_at, s.synced_at) DESC
-      LIMIT 500
-    `, params);
+    const allSessionDocs = await queryCol<any>('sync_sessions', [
+      { type: 'where', field: 'member_id', op: '==', value: memberId },
+    ]);
 
-    // Count per source
+    const sessions = (useAll ? allSessionDocs : allSessionDocs.filter((s: any) => {
+      const ts = s.ended_at || s.started_at || s.synced_at;
+      if (!ts) return false;
+      const dateStr = String(ts).slice(0, 10);
+      if (from && dateStr < from) return false;
+      if (to && dateStr > to) return false;
+      return true;
+    })).filter((s: any) => !src || src === 'all' || s.source === src)
+      .sort((a: any, b: any) => {
+        const ta = a.ended_at || a.started_at || a.synced_at || '';
+        const tb = b.ended_at || b.started_at || b.synced_at || '';
+        return tb.localeCompare(ta);
+      })
+      .slice(0, 500);
+
     const counts: Record<string, number> = {};
     for (const s of sessions) counts[s.source] = (counts[s.source] || 0) + 1;
 
-    // Map to shape expected by app.js (sessionSummary-compatible)
     const sessionRows = sessions.map((s: any) => ({
       id: s.session_id || s.id,
       source: s.source,
@@ -137,25 +129,17 @@ export async function GET(req: NextRequest) {
       endedAt: s.ended_at,
       eventCount: s.tool_calls + (s.edits || 0),
       intelligence: {
-        edits: s.edits,
-        additions: s.additions,
-        deletions: s.deletions,
-        changedLines: s.changed_lines,
-        filesTouched: s.files_touched,
-        toolCalls: s.tool_calls,
-        toolErrors: s.tool_errors,
-        reworkLoops: s.rework_loops,
-        corrections: s.corrections,
-        abandoned: s.abandoned,
-        apiCost: s.api_cost,
+        edits: s.edits, additions: s.additions, deletions: s.deletions,
+        changedLines: s.changed_lines, filesTouched: s.files_touched,
+        toolCalls: s.tool_calls, toolErrors: s.tool_errors,
+        reworkLoops: s.rework_loops, corrections: s.corrections,
+        abandoned: s.abandoned, apiCost: s.api_cost,
       },
       stats: {
-        tokensIn: Number(s.tokens_in),
-        tokensOut: Number(s.tokens_out),
+        tokensIn: Number(s.tokens_in), tokensOut: Number(s.tokens_out),
         tokensCacheRead: Number(s.tokens_cache_read),
         tokensCacheWrite: Number(s.tokens_cache_write),
-        toolCounts: {},
-        errors: s.tool_errors || 0,
+        toolCounts: {}, errors: s.tool_errors || 0,
       },
       children: [],
       parent: null,
@@ -163,13 +147,9 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       roots: [`DB: ${session.displayName}`],
-      counts,
-      from: from ?? null,
-      to: to ?? null,
-      all: useAll,
+      counts, from: from ?? null, to: to ?? null, all: useAll,
       generatedAt: new Date().toISOString(),
-      sessions: sessionRows,
-      sessionCount: sessions.length,
+      sessions: sessionRows, sessionCount: sessions.length,
     });
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
