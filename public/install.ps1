@@ -11,7 +11,7 @@
 param(
   [string]$ApiKey = $env:TOKEN_TRACER_KEY,
   [string]$ServerUrl = "https://token-tracer-three.vercel.app",
-  [int]$IntervalMin = 10
+  [int]$IntervalMin = 60
 )
 
 # Also accept bare $ApiKey / $key variables set in the calling scope

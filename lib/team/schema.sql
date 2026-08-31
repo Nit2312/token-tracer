@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS members (
   team_id UUID REFERENCES teams(id) ON DELETE SET NULL,
   display_name TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member')),
+  daemon_version TEXT,
+  daemon_last_seen_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   sync_requested_at TIMESTAMPTZ
 );
@@ -120,10 +122,20 @@ CREATE TABLE IF NOT EXISTS users (
   role          TEXT NOT NULL DEFAULT 'user'
                   CHECK (role IN ('user', 'admin', 'superadmin')),
   active        BOOLEAN NOT NULL DEFAULT true,
+  api_key       TEXT,
   last_login_at TIMESTAMPTZ,
+  failed_login_attempts INT NOT NULL DEFAULT 0,
+  locked_until          TIMESTAMPTZ,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Idempotent column migrations for existing databases
+ALTER TABLE members ADD COLUMN IF NOT EXISTS daemon_version TEXT;
+ALTER TABLE members ADD COLUMN IF NOT EXISTS daemon_last_seen_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS api_key TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_sync_sessions_team_member ON sync_sessions(team_id, member_id);
 CREATE INDEX IF NOT EXISTS idx_sync_sessions_ended ON sync_sessions(ended_at);

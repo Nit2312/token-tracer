@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "db:migrate": "node scripts/migrate.js"
+    "db:migrate": "node scripts/migrate.js",
+    "db:prune": "node scripts/run-rollup-prune.js"
   },
   "dependencies": {
     "@tailwindcss/postcss": "^4.3.3",

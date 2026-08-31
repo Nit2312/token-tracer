@@ -1316,11 +1316,22 @@ addEventListener('resize', () => {
   await loadState(true, { soft: false });
 
   let lastLoadTime = Date.now();
-  const POLL_INTERVAL_MS = 60_000;
+  let lastUserActivity = Date.now();
+  const POLL_INTERVAL_MS = 300_000; // 5 minutes (prevents Neon DB compute exhaustion)
+  const IDLE_TIMEOUT_MS = 300_000;  // 5 minutes of inactivity pauses polling
 
-  // Poll only when page is visible
+  const markActive = () => {
+    lastUserActivity = Date.now();
+  };
+  ['mousedown', 'keydown', 'scroll', 'touchstart'].forEach((evt) => {
+    window.addEventListener(evt, markActive, { passive: true });
+  });
+
+  // Poll only when page is visible AND user has been active recently
   setInterval(() => {
-    if (document.visibilityState === 'visible') {
+    const isVisible = document.visibilityState === 'visible';
+    const isUserActive = (Date.now() - lastUserActivity) < IDLE_TIMEOUT_MS;
+    if (isVisible && isUserActive) {
       lastLoadTime = Date.now();
       loadState(false, { soft: false });
     }
@@ -1330,6 +1341,7 @@ addEventListener('resize', () => {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && Date.now() - lastLoadTime >= POLL_INTERVAL_MS) {
       lastLoadTime = Date.now();
+      lastUserActivity = Date.now();
       loadState(false, { soft: false });
     }
   });

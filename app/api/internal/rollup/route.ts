@@ -13,6 +13,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/team/db';
 import { cronSecret } from '@/lib/team/env';
 import { getSessionFromCookie } from '@/lib/auth';
+import { runResearchRollup } from '@/lib/team/research';
 
 function isCronAuthorized(req: NextRequest): boolean {
   const cookieHeader = req.headers.get('cookie') || '';
@@ -357,27 +358,39 @@ async function runRollup(): Promise<NextResponse> {
     errors.push(`daily_punch_card: ${(err as Error).message}`);
   }
 
-  // ── 4. Rolling Retention & Data Pruning (Keeps Database < 250 MB) ──────────
+  // ── 3f. Research Rollup (Combined into single cron execution) ───────────
+  try {
+    await runResearchRollup();
+  } catch (err) {
+    errors.push(`research_rollup: ${(err as Error).message}`);
+  }
+
+  // ── 4. Rolling Retention & Data Pruning (Keeps Database < 50 MB on Neon) ────
   let nullifiedEvents = 0;
   let deletedErrors = 0;
   let deletedTurns = 0;
   let deletedSessions = 0;
+  let deletedIngestEvents = 0;
 
   try {
-    // A. Clear raw events JSONB payload older than 7 days
-    const eventsRes = await query(`UPDATE sync_sessions SET events = NULL WHERE synced_at < NOW() - INTERVAL '7 days' AND events IS NOT NULL`);
+    // A. Clear raw events JSONB payload older than 2 days (events take ~80% of storage)
+    const eventsRes = await query(`UPDATE sync_sessions SET events = NULL WHERE synced_at < NOW() - INTERVAL '2 days' AND events IS NOT NULL`);
     nullifiedEvents = eventsRes.rowCount ?? 0;
 
-    // B. Prune granular turn and tool error logs older than 14 days
-    const errorsRes = await query(`DELETE FROM session_tool_errors WHERE created_at < NOW() - INTERVAL '14 days'`);
+    // B. Prune granular turn and tool error logs older than 7 days
+    const errorsRes = await query(`DELETE FROM session_tool_errors WHERE created_at < NOW() - INTERVAL '7 days'`);
     deletedErrors = errorsRes.rowCount ?? 0;
 
-    const turnsRes = await query(`DELETE FROM session_turns WHERE created_at < NOW() - INTERVAL '14 days'`);
+    const turnsRes = await query(`DELETE FROM session_turns WHERE created_at < NOW() - INTERVAL '7 days'`);
     deletedTurns = turnsRes.rowCount ?? 0;
 
-    // C. Prune raw sync_sessions older than 30 days (pre-computed rollups retain 100% of historical analytics)
-    const sessionsRes = await query(`DELETE FROM sync_sessions WHERE synced_at < NOW() - INTERVAL '30 days'`);
+    // C. Prune raw sync_sessions older than 14 days (daily rollups preserve 100% of historical stats)
+    const sessionsRes = await query(`DELETE FROM sync_sessions WHERE synced_at < NOW() - INTERVAL '14 days'`);
     deletedSessions = sessionsRes.rowCount ?? 0;
+
+    // D. Prune ingest audit logs older than 7 days (prevents infinite growth)
+    const ingestRes = await query(`DELETE FROM ingest_events WHERE created_at < NOW() - INTERVAL '7 days'`);
+    deletedIngestEvents = ingestRes.rowCount ?? 0;
   } catch (err) {
     errors.push(`data_pruning: ${(err as Error).message}`);
   }
@@ -396,10 +409,11 @@ async function runRollup(): Promise<NextResponse> {
     ok: true,
     elapsed_ms: elapsed,
     pruning: {
-      nullifiedEventsOlderThan7d: nullifiedEvents,
-      deletedToolErrorsOlderThan14d: deletedErrors,
-      deletedTurnsOlderThan14d: deletedTurns,
-      deletedSessionsOlderThan30d: deletedSessions,
+      nullifiedEventsOlderThan2d: nullifiedEvents,
+      deletedToolErrorsOlderThan7d: deletedErrors,
+      deletedTurnsOlderThan7d: deletedTurns,
+      deletedSessionsOlderThan14d: deletedSessions,
+      deletedIngestEventsOlderThan7d: deletedIngestEvents,
     }
   });
 }

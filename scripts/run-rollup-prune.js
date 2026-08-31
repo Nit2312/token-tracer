@@ -47,8 +47,10 @@ if (!dbUrl) {
   process.exit(1);
 }
 
+const parsed = new URL(dbUrl);
+parsed.searchParams.delete('sslmode');
 const pool = new pg.Pool({
-  connectionString: dbUrl,
+  connectionString: parsed.toString(),
   ssl: { rejectUnauthorized: false },
 });
 
@@ -58,7 +60,14 @@ async function main() {
 
   const client = await pool.connect();
   try {
-    // 0. Ensure rollup tables exist
+    // 0. Ensure base schema exists (teams, members, sync_sessions, etc.)
+    const schemaPath = path.join(__dirname, '..', 'lib', 'team', 'schema.sql');
+    if (fs.existsSync(schemaPath)) {
+      console.log('📦 Step 0: Ensuring core schema (teams, members, sync_sessions)...');
+      await client.query(fs.readFileSync(schemaPath, 'utf8'));
+    }
+
+    // 1. Ensure rollup tables exist
     console.log('📦 Step 1: Verifying rollup tables schema...');
     await client.query(`
       CREATE TABLE IF NOT EXISTS daily_member_usage (
@@ -123,6 +132,31 @@ async function main() {
         PRIMARY KEY (day, team_id, member_id, weekday, hour)
       );
       CREATE INDEX IF NOT EXISTS idx_daily_punch_card_team ON daily_punch_card(team_id, day DESC);
+
+      CREATE TABLE IF NOT EXISTS daily_org_usage (
+        day DATE NOT NULL,
+        org_id TEXT NOT NULL,
+        tool TEXT NOT NULL,
+        model TEXT NOT NULL,
+        input_tokens BIGINT DEFAULT 0,
+        output_tokens BIGINT DEFAULT 0,
+        cache_read_tokens BIGINT DEFAULT 0,
+        cache_write_tokens BIGINT DEFAULT 0,
+        list_price_cost NUMERIC(12,4) DEFAULT 0,
+        actual_cost NUMERIC(12,4) DEFAULT 0,
+        session_count INT DEFAULT 0,
+        PRIMARY KEY (day, org_id, tool, model)
+      );
+
+      CREATE TABLE IF NOT EXISTS daily_behavior_rollup (
+        day DATE NOT NULL,
+        org_id TEXT NOT NULL,
+        tool TEXT NOT NULL,
+        rework_loop_count INT DEFAULT 0,
+        tool_error_count INT DEFAULT 0,
+        total_turns INT DEFAULT 0,
+        PRIMARY KEY (day, org_id, tool)
+      );
     `);
 
     // Initial database size
@@ -299,33 +333,50 @@ async function main() {
     `);
     console.log('   ✅ Org & Behavior rollups synchronized.\n');
 
-    // ── 6. Execute Rolling Retention Pruning ──────────────────────────────────
+    // ── 6. Execute Rolling Retention Pruning (Neon Free Tier Budget < 50 MB) ─
     console.log('🧹 Step 7: Executing Rolling Retention Pruning...');
 
-    // A. Nullify events JSONB older than 7 days
+    // A. Nullify events JSONB older than 2 days (events account for ~80% of DB storage)
     const pruneEventsRes = await client.query(`
       UPDATE sync_sessions
       SET events = NULL
-      WHERE synced_at < NOW() - INTERVAL '7 days' AND events IS NOT NULL
+      WHERE synced_at < NOW() - INTERVAL '2 days' AND events IS NOT NULL
     `);
-    console.log(`   ✂️  Nullified raw events JSONB on ${pruneEventsRes.rowCount} sessions (> 7 days old)`);
+    console.log(`   ✂️  Nullified raw events JSONB on ${pruneEventsRes.rowCount} sessions (> 2 days old)`);
 
-    // B. Prune debug turns and errors older than 14 days
+    // B. Prune debug turns and errors older than 7 days
     const pruneErrorsRes = await client.query(`
-      DELETE FROM session_tool_errors WHERE created_at < NOW() - INTERVAL '14 days'
+      DELETE FROM session_tool_errors WHERE created_at < NOW() - INTERVAL '7 days'
     `);
-    console.log(`   ✂️  Deleted ${pruneErrorsRes.rowCount} tool error logs (> 14 days old)`);
+    console.log(`   ✂️  Deleted ${pruneErrorsRes.rowCount} tool error logs (> 7 days old)`);
 
     const pruneTurnsRes = await client.query(`
-      DELETE FROM session_turns WHERE created_at < NOW() - INTERVAL '14 days'
+      DELETE FROM session_turns WHERE created_at < NOW() - INTERVAL '7 days'
     `);
-    console.log(`   ✂️  Deleted ${pruneTurnsRes.rowCount} session turn logs (> 14 days old)`);
+    console.log(`   ✂️  Deleted ${pruneTurnsRes.rowCount} session turn logs (> 7 days old)`);
 
-    // C. Prune raw sessions older than 30 days
+    // C. Prune raw sessions older than 14 days (daily rollups retain 100% of historical analytics)
     const pruneSessionsRes = await client.query(`
-      DELETE FROM sync_sessions WHERE synced_at < NOW() - INTERVAL '30 days'
+      DELETE FROM sync_sessions WHERE synced_at < NOW() - INTERVAL '14 days'
     `);
-    console.log(`   ✂️  Deleted ${pruneSessionsRes.rowCount} raw sessions (> 30 days old)`);
+    console.log(`   ✂️  Deleted ${pruneSessionsRes.rowCount} raw sessions (> 14 days old)`);
+
+    // D. Prune ingest audit logs older than 7 days
+    const pruneIngestRes = await client.query(`
+      DELETE FROM ingest_events WHERE created_at < NOW() - INTERVAL '7 days'
+    `);
+    console.log(`   ✂️  Deleted ${pruneIngestRes.rowCount} ingest log events (> 7 days old)`);
+
+    // E. Reclaim space with VACUUM ANALYZE
+    console.log('🧹 Step 8: Reclaiming disk space via VACUUM ANALYZE...');
+    try {
+      await client.query('VACUUM ANALYZE sync_sessions');
+      await client.query('VACUUM ANALYZE session_turns');
+      await client.query('VACUUM ANALYZE ingest_events');
+      console.log('   ✅ VACUUM ANALYZE completed successfully');
+    } catch (vErr) {
+      console.warn('   ⚠️  VACUUM skipped or limited by permission:', vErr.message);
+    }
 
     // Final database size
     const finalSizeRes = await client.query(`SELECT pg_size_pretty(pg_database_size(current_database())) as size`);

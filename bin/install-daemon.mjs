@@ -23,11 +23,11 @@ const arg = (name) => {
 const apiUrl = arg('--api-url') || process.env.TEAM_API_URL;
 const apiKey = arg('--api-key') || process.env.TEAM_API_KEY;
 const serviceName = arg('--service-name') || 'com.company.devmetrics';
-const intervalMin = Number(arg('--interval-min') || 20);
+const intervalMin = Number(arg('--interval-min') || 60);
 const nodeBin = arg('--node') || process.execPath;
 
 if (!apiUrl || !apiKey) {
-  console.error('Usage: node bin/install-daemon.mjs --api-url URL --api-key KEY [--service-name LABEL] [--interval-min 10]');
+  console.error('Usage: node bin/install-daemon.mjs --api-url URL --api-key KEY [--service-name LABEL] [--interval-min 60]');
   process.exit(1);
 }
 

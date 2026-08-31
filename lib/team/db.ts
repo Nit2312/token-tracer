@@ -127,6 +127,13 @@ export async function ensureSchema(): Promise<void> {
           WHERE u.team_id IS NOT NULL AND u.member_id IS NOT NULL
           ON CONFLICT (team_id, member_id) DO NOTHING;
 
+          -- Ensure missing columns exist on existing users/members tables
+          ALTER TABLE members ADD COLUMN IF NOT EXISTS daemon_version TEXT;
+          ALTER TABLE members ADD COLUMN IF NOT EXISTS daemon_last_seen_at TIMESTAMPTZ;
+          ALTER TABLE users ADD COLUMN IF NOT EXISTS api_key TEXT;
+          ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_attempts INT NOT NULL DEFAULT 0;
+          ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
+
           -- Add events JSONB column if not present
           ALTER TABLE sync_sessions ADD COLUMN IF NOT EXISTS events JSONB;
 
