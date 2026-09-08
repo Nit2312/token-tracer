@@ -6,6 +6,7 @@ import FilterBar from '@/components/admin/research/FilterBar';
 import ChartTooltip from '@/components/admin/research/charts/ChartTooltip';
 import { useVerbosityElasticity } from '@/lib/admin/research/queries';
 import { useResearchFilters } from '@/lib/admin/research/useResearchFilters';
+import ResearchQuestionBanner from '@/components/admin/research/ResearchQuestionBanner';
 
 interface Stat {
   model: string;
@@ -51,7 +52,15 @@ export default function VerbosityElasticityPage() {
   }, [activeStat, filteredPoints]);
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-6">
+      <ResearchQuestionBanner
+        category="Token Elasticity & Output Verbosity"
+        categoryColor="#38bdf8"
+        question="How does token output volume scale relative to input context across models and task types?"
+        hypothesis="Certain models exhibit super-linear verbosity growth on simple bug-fixes, inflating output costs without generating net usable code changes."
+        formula="d(ln Tokens_out) / d(ln Tokens_in)"
+      />
+
       <FilterBar />
 
       {error && (
@@ -59,12 +68,6 @@ export default function VerbosityElasticityPage() {
           {(error as Error).message}
         </div>
       )}
-
-      <p className="max-w-2xl text-sm text-muted">
-        How much does output length scale with input length — and does that ratio hold across task
-        intents? A higher slope means the model gets more verbose per input token; R² tells you how
-        reliable that relationship is.
-      </p>
 
       <div className="flex flex-wrap items-center gap-2">
         <select

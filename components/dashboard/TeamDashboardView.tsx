@@ -282,11 +282,15 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
 
   const handleLogout = async () => {
     try {
-      await fetch('/api/v1/auth/login', { method: 'DELETE' });
+      await fetch('/api/auth/me', { method: 'POST', credentials: 'same-origin' });
+      await fetch('/api/v1/auth/login', { method: 'DELETE', credentials: 'same-origin' });
     } catch {
       // ignore
     }
-    window.location.href = '/login';
+    document.cookie = 'app_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;';
+    document.cookie = 'sa_original_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;';
+    document.cookie = 'team_admin=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;';
+    window.location.replace('/');
   };
 
   const handleTriggerSync = async (memberId: string, memberName: string) => {

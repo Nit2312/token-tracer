@@ -18,6 +18,8 @@ interface DrilldownRow {
   promptText: string | null;
 }
 
+import ResearchQuestionBanner from '@/components/admin/research/ResearchQuestionBanner';
+
 export default function ErrorSpikesPage() {
   const { filters } = useResearchFilters();
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
@@ -39,7 +41,15 @@ export default function ErrorSpikesPage() {
   const rawDayFor = (label: string) => data?.series.find((r) => String(r.day).slice(5, 10) === label)?.day ?? null;
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-6">
+      <ResearchQuestionBanner
+        category="Operational Health & Tool Diagnostics"
+        categoryColor="#ef4444"
+        question="Why did tool failure rates spike on specific dates, and which tool arguments or prompt payloads triggered anomalous breakdowns?"
+        hypothesis="Spikes exceeding 2.5σ baseline indicate model context confusion, deprecated tool interfaces, or fragile multi-file edit loops that require immediate admin intervention."
+        formula="σ > 2.5 Baseline"
+      />
+
       <FilterBar showOrg />
 
       {error && (

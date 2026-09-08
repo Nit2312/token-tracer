@@ -20,9 +20,9 @@ import { recordAuditEvent } from '@/lib/team/audit';
 export const dynamic = 'force-dynamic';
 
 function isSecure(req: NextRequest): boolean {
-  return process.env.VERCEL === '1' ||
-    req.headers.get('x-forwarded-proto') === 'https' ||
-    process.env.NODE_ENV === 'production';
+  const host = req.headers.get('host') || '';
+  const isLocalhost = host.includes('localhost') || host.includes('127.0.0.1');
+  return !isLocalhost && (process.env.VERCEL === '1' || req.headers.get('x-forwarded-proto') === 'https');
 }
 
 export async function POST(req: NextRequest) {

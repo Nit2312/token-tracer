@@ -114,12 +114,48 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const { clearImpersonationCookie } = await import('@/lib/auth');
-  const secure = process.env.VERCEL === '1' ||
-    req.headers.get('x-forwarded-proto') === 'https' ||
-    process.env.NODE_ENV === 'production';
+  return handleLogoutResponse(req);
+}
+
+export async function DELETE(req: NextRequest) {
+  return handleLogoutResponse(req);
+}
+
+function handleLogoutResponse(req: NextRequest) {
+  const host = req.headers.get('host') || '';
+  const isLocalhost = host.includes('localhost') || host.includes('127.0.0.1');
+  const secure = !isLocalhost && (process.env.VERCEL === '1' || req.headers.get('x-forwarded-proto') === 'https');
+  
   const res = NextResponse.json({ ok: true });
-  res.headers.append('Set-Cookie', clearSessionCookie(secure));
-  res.headers.append('Set-Cookie', clearImpersonationCookie(secure));
+  
+  // Explicitly clear all auth cookies using NextResponse cookie API
+  res.cookies.set('app_session', '', {
+    path: '/',
+    httpOnly: true,
+    sameSite: 'lax',
+    maxAge: 0,
+    expires: new Date(0),
+    secure,
+  });
+  
+  res.cookies.set('sa_original_session', '', {
+    path: '/',
+    httpOnly: true,
+    sameSite: 'lax',
+    maxAge: 0,
+    expires: new Date(0),
+    secure,
+  });
+
+  res.cookies.set('team_admin', '', {
+    path: '/',
+    httpOnly: true,
+    sameSite: 'lax',
+    maxAge: 0,
+    expires: new Date(0),
+    secure,
+  });
+
   return res;
 }
+

@@ -4,6 +4,7 @@ import FilterBar from '@/components/admin/research/FilterBar';
 import Heatmap, { type HeatmapCell } from '@/components/admin/research/charts/Heatmap';
 import { usePromptSpecificity } from '@/lib/admin/research/queries';
 import { useResearchFilters } from '@/lib/admin/research/useResearchFilters';
+import ResearchQuestionBanner from '@/components/admin/research/ResearchQuestionBanner';
 
 interface SpecificityRow {
   tier: 'vague' | 'partial' | 'specific';
@@ -36,7 +37,15 @@ export default function PromptSpecificityPage() {
   }));
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-6">
+      <ResearchQuestionBanner
+        category="Prompt Engineering & Human Friction"
+        categoryColor="#10b981"
+        question="How much does prompt specificity (code snippets, stack traces, file paths) reduce developer rework and turn cascades?"
+        hypothesis="Prompts with explicit stack traces and file targets achieve 73% first-turn resolution and reduce multi-turn rework loops by 3.8x compared to ambiguous instructions."
+        formula="RevertRate(vague) vs RevertRate(specific)"
+      />
+
       <FilterBar showOrg />
 
       {error && (

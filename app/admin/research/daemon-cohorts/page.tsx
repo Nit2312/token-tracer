@@ -4,6 +4,7 @@ import FilterBar from '@/components/admin/research/FilterBar';
 import Histogram, { type HistogramBar } from '@/components/admin/research/charts/Histogram';
 import { useDaemonCohorts } from '@/lib/admin/research/queries';
 import { useResearchFilters } from '@/lib/admin/research/useResearchFilters';
+import ResearchQuestionBanner from '@/components/admin/research/ResearchQuestionBanner';
 
 export default function DaemonCohortsPage() {
   const { filters } = useResearchFilters();
@@ -17,7 +18,15 @@ export default function DaemonCohortsPage() {
   }));
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-6">
+      <ResearchQuestionBanner
+        category="Daemon Reliability & Sync Health"
+        categoryColor="#34d399"
+        question="Are specific daemon versions or client environments causing disproportionate telemetry sync errors?"
+        hypothesis="Daemon updates with altered heartbeat protocols or socket timeouts can trigger batch retry storms, consuming Vercel invocation budgets."
+        formula="ErrRate(Cohort_v) vs Cohort_{v-1}"
+      />
+
       <FilterBar showOrg toolOptions={[]} />
 
       {error && (
@@ -25,11 +34,6 @@ export default function DaemonCohortsPage() {
           {(error as Error).message}
         </div>
       )}
-
-      <p className="max-w-2xl text-sm text-muted">
-        Tool-error rate grouped by daemon version — if a specific release introduced a regression,
-        its cohort should stand out from the rest.
-      </p>
 
       <div className="rounded-lg border border-border bg-surface p-4">
         <div className="mb-3 text-sm font-medium text-ink">Error rate by daemon version</div>

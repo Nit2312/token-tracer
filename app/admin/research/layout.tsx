@@ -4,6 +4,7 @@ import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { getSessionFromCookie } from '@/lib/auth';
 import ResearchQueryProvider from '@/lib/admin/research/QueryProvider';
+import { SignOutButton } from '@/components/admin/SignOutButton';
 import './research-tailwind.css';
 
 export const metadata: Metadata = {
@@ -42,11 +43,21 @@ export default async function ResearchLayout({ children }: { children: React.Rea
               <span>🔬</span> Research Analytics
             </span>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-brand/10 px-2.5 py-0.5 text-[11px] font-medium text-brand border border-brand/20">
+          <div className="flex items-center gap-3">
+            <span className="hidden sm:inline-flex items-center gap-1.5 rounded-full bg-brand/10 px-2.5 py-0.5 text-[11px] font-medium text-brand border border-brand/20">
               <span className="h-1.5 w-1.5 rounded-full bg-brand animate-pulse" />
               Real-time Agent Telemetry
             </span>
+            <div className="flex items-center gap-2 border-l border-border pl-3">
+              <span className="text-xs font-mono text-muted hidden md:inline">
+                {session.displayName || session.username}
+              </span>
+              <SignOutButton
+                variant="outline"
+                size="sm"
+                className="border-red-500/30 text-red-400 hover:text-white hover:bg-red-500/20 bg-surface text-xs"
+              />
+            </div>
           </div>
         </div>
         <div className="mx-auto flex max-w-[1400px] gap-1 overflow-x-auto px-6 pb-2.5 pt-1 scrollbar-none">

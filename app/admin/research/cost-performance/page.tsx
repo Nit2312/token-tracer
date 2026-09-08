@@ -6,6 +6,7 @@ import FilterBar from '@/components/admin/research/FilterBar';
 import ChartTooltip from '@/components/admin/research/charts/ChartTooltip';
 import { useCostPerformanceFrontier } from '@/lib/admin/research/queries';
 import { useResearchFilters } from '@/lib/admin/research/useResearchFilters';
+import ResearchQuestionBanner from '@/components/admin/research/ResearchQuestionBanner';
 
 interface OutcomePoint {
   model: string;
@@ -29,7 +30,15 @@ export default function CostPerformancePage() {
   const dominated = points.filter((p) => !p.isPareto);
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-6">
+      <ResearchQuestionBanner
+        category="Pareto Economics & Model Selection"
+        categoryColor="#a855f7"
+        question="Which LLM delivers the highest code yield per dollar spent on the multi-objective Pareto efficiency frontier?"
+        hypothesis="Models on the Pareto frontier maximize code acceptance rate per $1.00 token spend, while dominated models waste up to 45% budget without improving solution correctness."
+        formula="min(Cost) ∧ max(Quality)"
+      />
+
       <FilterBar />
 
       {error && (
@@ -37,12 +46,6 @@ export default function CostPerformancePage() {
           {(error as Error).message}
         </div>
       )}
-
-      <p className="max-w-2xl text-sm text-muted">
-        Which models sit on the cost/success Pareto frontier for a given task intent — cheaper AND
-        more successful than any alternative? A dominated model is beaten outright by something on
-        the frontier.
-      </p>
 
       <select
         value={activeIntent ?? ''}

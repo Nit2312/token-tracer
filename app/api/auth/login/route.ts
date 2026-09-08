@@ -20,9 +20,42 @@ import {
 export const dynamic = 'force-dynamic';
 
 function isSecure(req: NextRequest): boolean {
-  return process.env.VERCEL === '1' ||
-    req.headers.get('x-forwarded-proto') === 'https' ||
-    process.env.NODE_ENV === 'production';
+  const host = req.headers.get('host') || '';
+  const isLocalhost = host.includes('localhost') || host.includes('127.0.0.1');
+  return !isLocalhost && (
+    process.env.VERCEL === '1' ||
+    req.headers.get('x-forwarded-proto') === 'https'
+  );
+}
+
+export async function DELETE(req: NextRequest) {
+  const secure = isSecure(req);
+  const res = NextResponse.json({ ok: true });
+  res.cookies.set('app_session', '', {
+    path: '/',
+    httpOnly: true,
+    sameSite: 'lax',
+    maxAge: 0,
+    expires: new Date(0),
+    secure,
+  });
+  res.cookies.set('sa_original_session', '', {
+    path: '/',
+    httpOnly: true,
+    sameSite: 'lax',
+    maxAge: 0,
+    expires: new Date(0),
+    secure,
+  });
+  res.cookies.set('team_admin', '', {
+    path: '/',
+    httpOnly: true,
+    sameSite: 'lax',
+    maxAge: 0,
+    expires: new Date(0),
+    secure,
+  });
+  return res;
 }
 
 export async function POST(req: NextRequest) {

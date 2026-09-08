@@ -5,6 +5,7 @@ import StatTile from '@/components/admin/research/StatTile';
 import DrilldownTable from '@/components/admin/research/DrilldownTable';
 import { useRedundantReprompt } from '@/lib/admin/research/queries';
 import { useResearchFilters } from '@/lib/admin/research/useResearchFilters';
+import ResearchQuestionBanner from '@/components/admin/research/ResearchQuestionBanner';
 
 interface ReprompEvent {
   sessionId: string;
@@ -24,7 +25,15 @@ export default function RedundantRepromptPage() {
   const { data, isLoading, error } = useRedundantReprompt(filters);
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-6">
+      <ResearchQuestionBanner
+        category="Compute Waste & Developer Frustration"
+        categoryColor="#f59e0b"
+        question="How much token spend and compute time is wasted on near-duplicate developer re-prompts?"
+        hypothesis="When developer prompts fail to elicit changes, users re-send ≥85% identical prompts with minor punctuation changes, burning avoidable inference tokens."
+        formula="Jaccard(P_t, P_{t-1}) ≥ 0.85"
+      />
+
       <FilterBar showOrg />
 
       {error && (
@@ -32,12 +41,6 @@ export default function RedundantRepromptPage() {
           {(error as Error).message}
         </div>
       )}
-
-      <p className="max-w-2xl text-sm text-muted">
-        Cost wasted on near-duplicate re-prompts — when a user re-sends a prompt that&apos;s
-        semantically ≥85% similar to their previous one, the tokens spent on the follow-up turn are
-        counted as waste.
-      </p>
 
       {isLoading ? (
         <div className="h-24 animate-pulse rounded bg-wash" />

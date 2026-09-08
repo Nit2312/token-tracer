@@ -6,6 +6,7 @@ import Histogram, { type HistogramBar } from '@/components/admin/research/charts
 import ScatterPlot, { type ScatterPoint } from '@/components/admin/research/charts/ScatterPlot';
 import { useContextSaturation } from '@/lib/admin/research/queries';
 import { useResearchFilters } from '@/lib/admin/research/useResearchFilters';
+import ResearchQuestionBanner from '@/components/admin/research/ResearchQuestionBanner';
 
 export default function ContextSaturationPage() {
   const { filters } = useResearchFilters();
@@ -14,7 +15,15 @@ export default function ContextSaturationPage() {
   const models = useMemo(() => [...new Set((data?.rows ?? []).map((r) => r.model))], [data]);
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-6">
+      <ResearchQuestionBanner
+        category="Context Efficiency & Attentional Degradation"
+        categoryColor="#e2a355"
+        question="At what % of a model's context window does tool execution reliability and reasoning accuracy begin degrading?"
+        hypothesis="As context fill approaches 60-80%, prompt attentional dilution causes a 2.4x surge in parameter misconfigurations and hallucinations. Finding model-specific inflection thresholds prevents high-cost failure cascades."
+        formula="η(Context_t) = f(k / WindowSize)"
+      />
+
       <FilterBar />
 
       {error && (
@@ -22,13 +31,6 @@ export default function ContextSaturationPage() {
           {(error as Error).message}
         </div>
       )}
-
-      <p className="max-w-2xl text-sm text-muted">
-        At what % of a model&apos;s context window does tool-error rate start climbing? Each bar
-        buckets turns by context fill (0–100%, in 10% steps); the histogram tells you where the
-        model starts to degrade. An inflection point is flagged when a bucket&apos;s error rate
-        exceeds 1.5× the 0–20%-fill baseline.
-      </p>
 
       {isLoading ? (
         <div className="h-64 animate-pulse rounded bg-wash" />

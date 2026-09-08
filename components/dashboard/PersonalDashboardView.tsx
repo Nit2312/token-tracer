@@ -193,11 +193,15 @@ export function PersonalDashboardView({ user }: PersonalDashboardProps) {
 
   const handleLogout = async () => {
     try {
-      await fetch('/api/auth/me', { method: 'POST' });
-      window.location.href = '/';
+      await fetch('/api/auth/me', { method: 'POST', credentials: 'same-origin' });
+      await fetch('/api/auth/login', { method: 'DELETE', credentials: 'same-origin' });
     } catch {
-      window.location.href = '/';
+      // ignore
     }
+    document.cookie = 'app_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;';
+    document.cookie = 'sa_original_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;';
+    document.cookie = 'team_admin=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;';
+    window.location.replace('/');
   };
 
   const filteredPrompts = prompts.filter(p => 
