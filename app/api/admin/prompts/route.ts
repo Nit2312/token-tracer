@@ -52,9 +52,10 @@ export async function GET(req: NextRequest) {
       paramIdx++;
     }
     if (members) {
-      const memberIds = members.split(',').filter(Boolean);
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const memberIds = members.split(',').filter((id) => id && UUID_RE.test(id.trim()));
       if (memberIds.length > 0) {
-        conditions.push(`ss.member_id::text = ANY($${paramIdx})`);
+        conditions.push(`ss.member_id = ANY($${paramIdx}::uuid[])`);
         params.push(memberIds);
         paramIdx++;
       }

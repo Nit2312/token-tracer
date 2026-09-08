@@ -324,6 +324,8 @@ export async function buildMemberUsageDeepDive(
 ) {
   const { range = 'all', from = null, to = null, source = null, model = null, teamId = null } = options;
 
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
   let memberIds: string[] = [];
   if (Array.isArray(memberInput)) {
     memberIds = memberInput.map((id) => String(id).trim()).filter(Boolean);
@@ -331,7 +333,11 @@ export async function buildMemberUsageDeepDive(
     memberIds = memberInput.split(',').map((id) => id.trim()).filter(Boolean);
   }
 
-  const isAll = memberIds.includes('all') || memberIds.length === 0;
+  // Filter out 'all' token and any non-UUID values to prevent PostgreSQL cast errors
+  const hasAll = memberIds.includes('all') || memberIds.length === 0;
+  memberIds = memberIds.filter((id) => UUID_RE.test(id));
+
+  const isAll = hasAll || memberIds.length === 0;
   const sortedIdsKey = isAll ? 'all' : [...memberIds].sort().join('_');
   const cacheKey = `member_deep_dive_pg_${sortedIdsKey}_${teamId || 'any'}_${range}_${from || ''}_${to || ''}_${source || ''}_${model || ''}`;
 

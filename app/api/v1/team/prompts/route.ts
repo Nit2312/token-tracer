@@ -33,17 +33,18 @@ export async function GET(req: NextRequest) {
     const params: any[] = [teamId];
     let paramIdx = 2;
 
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     let memberIdsArr: string[] = [];
     if (memberId && memberId !== 'all') {
-      memberIdsArr = memberId.split(',').map((id) => id.trim()).filter((id) => Boolean(id) && id !== 'all');
+      memberIdsArr = memberId.split(',').map((id) => id.trim()).filter((id) => Boolean(id) && id !== 'all' && UUID_RE.test(id));
     }
 
     if (memberIdsArr.length === 1) {
-      conditions.push(`ss.member_id = $${paramIdx}`);
+      conditions.push(`ss.member_id = $${paramIdx}::uuid`);
       params.push(memberIdsArr[0]);
       paramIdx++;
     } else if (memberIdsArr.length > 1) {
-      conditions.push(`ss.member_id = ANY($${paramIdx}::text[])`);
+      conditions.push(`ss.member_id = ANY($${paramIdx}::uuid[])`);
       params.push(memberIdsArr);
       paramIdx++;
     }

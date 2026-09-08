@@ -58,11 +58,12 @@ export async function buildTeamStats(
     };
   }
 
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   let memberIdsArr: string[] = [];
   if (Array.isArray(memberId)) {
-    memberIdsArr = memberId.map((id) => String(id).trim()).filter(Boolean);
+    memberIdsArr = memberId.map((id) => String(id).trim()).filter((id) => Boolean(id) && UUID_RE.test(id));
   } else if (typeof memberId === 'string' && memberId.trim()) {
-    memberIdsArr = memberId.split(',').map((id) => id.trim()).filter((id) => Boolean(id) && id !== 'all');
+    memberIdsArr = memberId.split(',').map((id) => id.trim()).filter((id) => Boolean(id) && id !== 'all' && UUID_RE.test(id));
   }
   const isAllMembers = memberIdsArr.length === 0;
 
@@ -83,10 +84,10 @@ export async function buildTeamStats(
   if (!isAllMembers) {
     if (memberIdsArr.length === 1) {
       params.push(memberIdsArr[0]);
-      dateFilter += ` AND s.member_id = $${params.length}`;
+      dateFilter += ` AND s.member_id = $${params.length}::uuid`;
     } else {
       params.push(memberIdsArr);
-      dateFilter += ` AND s.member_id = ANY($${params.length}::text[])`;
+      dateFilter += ` AND s.member_id = ANY($${params.length}::uuid[])`;
     }
   }
   if (source && source !== 'all') {
@@ -118,10 +119,10 @@ export async function buildTeamStats(
   if (!isAllMembers) {
     if (memberIdsArr.length === 1) {
       memberStatsParams.push(memberIdsArr[0]);
-      memberFilterCondition = `AND m.id = $${memberStatsParams.length}`;
+      memberFilterCondition = `AND m.id = $${memberStatsParams.length}::uuid`;
     } else {
       memberStatsParams.push(memberIdsArr);
-      memberFilterCondition = `AND m.id = ANY($${memberStatsParams.length}::text[])`;
+      memberFilterCondition = `AND m.id = ANY($${memberStatsParams.length}::uuid[])`;
     }
   }
 
