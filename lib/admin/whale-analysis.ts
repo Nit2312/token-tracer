@@ -52,7 +52,7 @@ export async function getPlatformWhales(options: WhaleFilterOptions = {}) {
     let teamWhere = '';
     if (teamId) {
       params.push(teamId);
-      teamWhere = ` AND s.team_id = $${params.length}`;
+      teamWhere = ` AND (s.team_id = $${params.length} OR s.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $${params.length}))`;
     }
 
     // 1. Fetch per-member stats with SQL aggregates
@@ -349,12 +349,13 @@ export async function buildMemberUsageDeepDive(
 
     if (isAll && teamId) {
       params.push(teamId);
-      memberWhere = `s.team_id = $1`;
+      memberWhere = `(s.team_id = $1 OR s.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $1))`;
       memberRes = await query(
         `SELECT m.id, m.display_name, m.created_at, m.team_id, t.name AS team_name
-         FROM members m
-         LEFT JOIN teams t ON t.id = m.team_id
-         WHERE m.team_id = $1
+         FROM team_members tm
+         JOIN members m ON m.id = tm.member_id
+         LEFT JOIN teams t ON t.id = tm.team_id
+         WHERE tm.team_id = $1
          ORDER BY m.display_name ASC`,
         [teamId]
       );

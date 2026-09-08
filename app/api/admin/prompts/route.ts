@@ -37,7 +37,7 @@ export async function GET(req: NextRequest) {
     let paramIdx = 2;
 
     if (org) {
-      conditions.push(`ss.team_id::text = $${paramIdx}`);
+      conditions.push(`(ss.team_id::text = $${paramIdx} OR ss.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id::text = $${paramIdx}))`);
       params.push(org);
       paramIdx++;
     }
@@ -73,13 +73,7 @@ export async function GET(req: NextRequest) {
         COALESCE(SUM(ast.cache_write_tokens), 0)::bigint AS "totalCacheWrite"
       FROM session_turns st
       JOIN sync_sessions ss ON ss.session_id = st.session_id
-                           AND st.org_id = ss.team_id::text
-                           AND st.user_id = ss.member_id::text
-                           AND st.tool = ss.source
       LEFT JOIN session_turns ast ON ast.session_id = st.session_id 
-                                 AND ast.org_id = st.org_id
-                                 AND ast.user_id = st.user_id
-                                 AND ast.tool = st.tool
                                  AND ast.turn_index = st.turn_index 
                                  AND ast.turn_role = 'assistant'
       WHERE st.turn_role = 'user' AND ${whereClause}
@@ -107,13 +101,7 @@ export async function GET(req: NextRequest) {
         ss.started_at AS "createdAt"
       FROM session_turns st
       JOIN sync_sessions ss ON ss.session_id = st.session_id
-                           AND st.org_id = ss.team_id::text
-                           AND st.user_id = ss.member_id::text
-                           AND st.tool = ss.source
       LEFT JOIN session_turns ast ON ast.session_id = st.session_id 
-                                 AND ast.org_id = st.org_id
-                                 AND ast.user_id = st.user_id
-                                 AND ast.tool = st.tool
                                  AND ast.turn_index = st.turn_index 
                                  AND ast.turn_role = 'assistant'
       LEFT JOIN members m ON m.id = ss.member_id

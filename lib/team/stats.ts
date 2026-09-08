@@ -142,235 +142,235 @@ export async function buildTeamStats(
             coalesce(sum(CASE WHEN s.abandoned THEN 1 ELSE 0 END), 0)::int AS abandoned,
             coalesce(sum(${EFF_IN}), 0)::bigint AS tokens_in,
             coalesce(sum(${EFF_OUT}), 0)::bigint AS tokens_out,
-            coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
-            coalesce(sum(s.tokens_cache_write), 0)::bigint AS tokens_cache_write,
-            coalesce(sum(s.api_cost), 0)::float AS api_cost,
-            coalesce(sum(CASE WHEN s.priced THEN 1 ELSE 0 END), 0)::int AS priced_sessions
-     FROM team_members tm
-     JOIN members m ON m.id = tm.member_id
-     LEFT JOIN sync_sessions s ON s.member_id = m.id AND s.team_id = tm.team_id ${dateFilter}
-     WHERE tm.team_id = $1 ${memberFilterCondition}
-     GROUP BY m.id, m.display_name
-     ORDER BY api_cost DESC, edits DESC, sessions DESC`,
-    memberStatsParams,
-  );
+             coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
+             coalesce(sum(s.tokens_cache_write), 0)::bigint AS tokens_cache_write,
+             coalesce(sum(s.api_cost), 0)::float AS api_cost,
+             coalesce(sum(CASE WHEN s.priced THEN 1 ELSE 0 END), 0)::int AS priced_sessions
+      FROM team_members tm
+      JOIN members m ON m.id = tm.member_id
+      LEFT JOIN sync_sessions s ON s.member_id = m.id ${dateFilter}
+      WHERE tm.team_id = $1 ${memberFilterCondition}
+      GROUP BY m.id, m.display_name
+      ORDER BY api_cost DESC, edits DESC, sessions DESC`,
+     memberStatsParams,
+   );
 
-  // 3. Per-member breakdown by agent source
-  const { rows: memberSources } = await query(
-    `SELECT s.member_id,
-            s.source,
-            count(s.id)::int AS sessions,
-            coalesce(sum(${EFF_IN}), 0)::bigint AS tokens_in,
-            coalesce(sum(${EFF_OUT}), 0)::bigint AS tokens_out,
-            coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
-            coalesce(sum(s.api_cost), 0)::float AS api_cost,
-            coalesce(sum(s.edits), 0)::int AS edits,
-            coalesce(sum(s.changed_lines), 0)::int AS changed_lines
-     FROM sync_sessions s
-     WHERE s.team_id = $1 ${dateFilter}
-     GROUP BY s.member_id, s.source
-     ORDER BY api_cost DESC`,
-    params,
-  );
+   // 3. Per-member breakdown by agent source
+   const { rows: memberSources } = await query(
+     `SELECT s.member_id,
+             s.source,
+             count(s.id)::int AS sessions,
+             coalesce(sum(${EFF_IN}), 0)::bigint AS tokens_in,
+             coalesce(sum(${EFF_OUT}), 0)::bigint AS tokens_out,
+             coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
+             coalesce(sum(s.api_cost), 0)::float AS api_cost,
+             coalesce(sum(s.edits), 0)::int AS edits,
+             coalesce(sum(s.changed_lines), 0)::int AS changed_lines
+      FROM sync_sessions s
+      WHERE (s.team_id = $1 OR s.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $1)) ${dateFilter}
+      GROUP BY s.member_id, s.source
+      ORDER BY api_cost DESC`,
+     params,
+   );
 
-  // 4. Per-member breakdown by project / workspace (agent)
-  const { rows: memberProjects } = await query(
-    `SELECT s.member_id,
-            COALESCE(s.agent, 'default') AS project,
-            s.source,
-            count(s.id)::int AS sessions,
-            coalesce(sum(${EFF_IN}), 0)::bigint AS tokens_in,
-            coalesce(sum(${EFF_OUT}), 0)::bigint AS tokens_out,
-            coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
-            coalesce(sum(s.api_cost), 0)::float AS api_cost,
-            coalesce(sum(s.edits), 0)::int AS edits,
-            coalesce(sum(s.changed_lines), 0)::int AS changed_lines,
-            max(COALESCE(s.ended_at, s.started_at, s.synced_at)) AS last_activity
-     FROM sync_sessions s
-     WHERE s.team_id = $1 ${dateFilter}
-     GROUP BY s.member_id, COALESCE(s.agent, 'default'), s.source
-     ORDER BY api_cost DESC, sessions DESC`,
-    params,
-  );
+   // 4. Per-member breakdown by project / workspace (agent)
+   const { rows: memberProjects } = await query(
+     `SELECT s.member_id,
+             COALESCE(s.agent, 'default') AS project,
+             s.source,
+             count(s.id)::int AS sessions,
+             coalesce(sum(${EFF_IN}), 0)::bigint AS tokens_in,
+             coalesce(sum(${EFF_OUT}), 0)::bigint AS tokens_out,
+             coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
+             coalesce(sum(s.api_cost), 0)::float AS api_cost,
+             coalesce(sum(s.edits), 0)::int AS edits,
+             coalesce(sum(s.changed_lines), 0)::int AS changed_lines,
+             max(COALESCE(s.ended_at, s.started_at, s.synced_at)) AS last_activity
+      FROM sync_sessions s
+      WHERE (s.team_id = $1 OR s.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $1)) ${dateFilter}
+      GROUP BY s.member_id, COALESCE(s.agent, 'default'), s.source
+      ORDER BY api_cost DESC, sessions DESC`,
+     params,
+   );
 
-  // 5. Per-member top files touched
-  const { rows: memberFiles } = await query(
-    `SELECT s.member_id,
-            f.path,
-            sum(f.edits)::int AS edits,
-            sum(f.additions)::int AS additions,
-            sum(f.deletions)::int AS deletions,
-            sum(f.additions + f.deletions)::int AS changed_lines
-     FROM sync_session_files f
-     JOIN sync_sessions s ON s.id = f.sync_session_id
-     WHERE s.team_id = $1 ${dateFilter}
-     GROUP BY s.member_id, f.path
-     ORDER BY changed_lines DESC`,
-    params,
-  );
+   // 5. Per-member top files touched
+   const { rows: memberFiles } = await query(
+     `SELECT s.member_id,
+             f.path,
+             sum(f.edits)::int AS edits,
+             sum(f.additions)::int AS additions,
+             sum(f.deletions)::int AS deletions,
+             sum(f.additions + f.deletions)::int AS changed_lines
+      FROM sync_session_files f
+      JOIN sync_sessions s ON s.id = f.sync_session_id
+      WHERE (s.team_id = $1 OR s.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $1)) ${dateFilter}
+      GROUP BY s.member_id, f.path
+      ORDER BY changed_lines DESC`,
+     params,
+   );
 
-  // 5b. Per-member breakdown by LLM model used
-  const { rows: memberModels } = await query(
-    `SELECT s.member_id,
-            m.display_name AS member_name,
-            COALESCE(s.model, 'default') AS model,
-            s.source,
-            count(s.id)::int AS sessions,
-            coalesce(sum(s.tokens_in), 0)::bigint AS tokens_in,
-            coalesce(sum(s.tokens_out), 0)::bigint AS tokens_out,
-            coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
-            coalesce(sum(s.api_cost), 0)::float AS api_cost
-     FROM sync_sessions s
-     JOIN members m ON m.id = s.member_id
-     WHERE s.team_id = $1 ${dateFilter}
-     GROUP BY s.member_id, m.display_name, COALESCE(s.model, 'default'), s.source
-     ORDER BY api_cost DESC, sessions DESC`,
-    params,
-  );
+   // 5b. Per-member breakdown by LLM model used
+   const { rows: memberModels } = await query(
+     `SELECT s.member_id,
+             m.display_name AS member_name,
+             COALESCE(s.model, 'default') AS model,
+             s.source,
+             count(s.id)::int AS sessions,
+             coalesce(sum(s.tokens_in), 0)::bigint AS tokens_in,
+             coalesce(sum(s.tokens_out), 0)::bigint AS tokens_out,
+             coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
+             coalesce(sum(s.api_cost), 0)::float AS api_cost
+      FROM sync_sessions s
+      JOIN members m ON m.id = s.member_id
+      WHERE (s.team_id = $1 OR s.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $1)) ${dateFilter}
+      GROUP BY s.member_id, m.display_name, COALESCE(s.model, 'default'), s.source
+      ORDER BY api_cost DESC, sessions DESC`,
+     params,
+   );
 
-  // 6. Project-level rollup (across the team)
-  const { rows: projectRollup } = await query(
-    `SELECT COALESCE(s.agent, 'default') AS project,
-            count(DISTINCT s.member_id)::int AS member_count,
-            count(DISTINCT s.source)::int AS source_count,
-            count(s.id)::int AS sessions,
-            coalesce(sum(s.tokens_in), 0)::bigint AS tokens_in,
-            coalesce(sum(s.tokens_out), 0)::bigint AS tokens_out,
-            coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
-            coalesce(sum(s.api_cost), 0)::float AS api_cost,
-            coalesce(sum(s.edits), 0)::int AS edits,
-            coalesce(sum(s.changed_lines), 0)::int AS changed_lines,
-            max(COALESCE(s.ended_at, s.started_at, s.synced_at)) AS last_activity
-     FROM sync_sessions s
-     WHERE s.team_id = $1 ${dateFilter}
-     GROUP BY COALESCE(s.agent, 'default')
-     ORDER BY api_cost DESC, sessions DESC`,
-    params,
-  );
+   // 6. Project-level rollup (across the team)
+   const { rows: projectRollup } = await query(
+     `SELECT COALESCE(s.agent, 'default') AS project,
+             count(DISTINCT s.member_id)::int AS member_count,
+             count(DISTINCT s.source)::int AS source_count,
+             count(s.id)::int AS sessions,
+             coalesce(sum(s.tokens_in), 0)::bigint AS tokens_in,
+             coalesce(sum(s.tokens_out), 0)::bigint AS tokens_out,
+             coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
+             coalesce(sum(s.api_cost), 0)::float AS api_cost,
+             coalesce(sum(s.edits), 0)::int AS edits,
+             coalesce(sum(s.changed_lines), 0)::int AS changed_lines,
+             max(COALESCE(s.ended_at, s.started_at, s.synced_at)) AS last_activity
+      FROM sync_sessions s
+      WHERE (s.team_id = $1 OR s.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $1)) ${dateFilter}
+      GROUP BY COALESCE(s.agent, 'default')
+      ORDER BY api_cost DESC, sessions DESC`,
+     params,
+   );
 
-  // 7. Team-wide source breakdown (Cursor, Claude Code, etc.)
-  const { rows: bySource } = await query(
-    `SELECT s.source,
-            count(*)::int AS sessions,
-            count(DISTINCT s.member_id)::int AS member_count,
-            coalesce(sum(${EFF_IN}), 0)::bigint AS tokens_in,
-            coalesce(sum(${EFF_OUT}), 0)::bigint AS tokens_out,
-            coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
-            coalesce(sum(s.edits), 0)::int AS edits,
-            coalesce(sum(s.api_cost), 0)::float AS api_cost
-     FROM sync_sessions s
-     WHERE s.team_id = $1 ${dateFilter}
-     GROUP BY s.source ORDER BY api_cost DESC, edits DESC`,
-    params,
-  );
+   // 7. Team-wide source breakdown (Cursor, Claude Code, etc.)
+   const { rows: bySource } = await query(
+     `SELECT s.source,
+             count(*)::int AS sessions,
+             count(DISTINCT s.member_id)::int AS member_count,
+             coalesce(sum(${EFF_IN}), 0)::bigint AS tokens_in,
+             coalesce(sum(${EFF_OUT}), 0)::bigint AS tokens_out,
+             coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
+             coalesce(sum(s.edits), 0)::int AS edits,
+             coalesce(sum(s.api_cost), 0)::float AS api_cost
+      FROM sync_sessions s
+      WHERE (s.team_id = $1 OR s.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $1)) ${dateFilter}
+      GROUP BY s.source ORDER BY api_cost DESC, edits DESC`,
+     params,
+   );
 
-  // 8. Daily activity flow
-  const { rows: byDay } = await query(
-    `SELECT to_char(COALESCE(s.ended_at, s.started_at, s.synced_at)::date, 'YYYY-MM-DD') AS date,
-            count(*)::int AS sessions,
-            coalesce(sum(${EFF_IN}), 0)::bigint AS tokens_in,
-            coalesce(sum(${EFF_OUT}), 0)::bigint AS tokens_out,
-            coalesce(sum(s.edits), 0)::int AS edits,
-            coalesce(sum(s.api_cost), 0)::float AS api_cost
-     FROM sync_sessions s
-     WHERE s.team_id = $1 ${dateFilter}
-     GROUP BY 1 ORDER BY 1 DESC`,
-    params,
-  );
+   // 8. Daily activity flow
+   const { rows: byDay } = await query(
+     `SELECT to_char(COALESCE(s.ended_at, s.started_at, s.synced_at)::date, 'YYYY-MM-DD') AS date,
+             count(*)::int AS sessions,
+             coalesce(sum(${EFF_IN}), 0)::bigint AS tokens_in,
+             coalesce(sum(${EFF_OUT}), 0)::bigint AS tokens_out,
+             coalesce(sum(s.edits), 0)::int AS edits,
+             coalesce(sum(s.api_cost), 0)::float AS api_cost
+      FROM sync_sessions s
+      WHERE (s.team_id = $1 OR s.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $1)) ${dateFilter}
+      GROUP BY 1 ORDER BY 1 DESC`,
+     params,
+   );
 
-  // 8b. Hourly activity punch-card (weekday 0-6, hour 0-23) — same shape/window as dateFilter above
-  const { rows: punchRows } = await query(
-    `SELECT
-       EXTRACT(DOW FROM COALESCE(s.ended_at, s.started_at, s.synced_at))::int AS weekday,
-       EXTRACT(HOUR FROM COALESCE(s.ended_at, s.started_at, s.synced_at))::int AS hour,
-       count(*)::int AS n
-     FROM sync_sessions s
-     WHERE s.team_id = $1 ${dateFilter}
-     GROUP BY 1, 2`,
-    params,
-  );
-  const punch: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
-  for (const r of punchRows) {
-    const w = Number(r.weekday);
-    const h = Number(r.hour);
-    if (w >= 0 && w < 7 && h >= 0 && h < 24) punch[w][h] += Number(r.n);
-  }
-  let peakHour = { weekday: 0, hour: 0, n: 0 };
-  for (let w = 0; w < 7; w++) for (let h = 0; h < 24; h++) if (punch[w][h] > peakHour.n) peakHour = { weekday: w, hour: h, n: punch[w][h] };
+   // 8b. Hourly activity punch-card (weekday 0-6, hour 0-23) — same shape/window as dateFilter above
+   const { rows: punchRows } = await query(
+     `SELECT
+        EXTRACT(DOW FROM COALESCE(s.ended_at, s.started_at, s.synced_at))::int AS weekday,
+        EXTRACT(HOUR FROM COALESCE(s.ended_at, s.started_at, s.synced_at))::int AS hour,
+        count(*)::int AS n
+      FROM sync_sessions s
+      WHERE (s.team_id = $1 OR s.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $1)) ${dateFilter}
+      GROUP BY 1, 2`,
+     params,
+   );
+   const punch: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
+   for (const r of punchRows) {
+     const w = Number(r.weekday);
+     const h = Number(r.hour);
+     if (w >= 0 && w < 7 && h >= 0 && h < 24) punch[w][h] += Number(r.n);
+   }
+   let peakHour = { weekday: 0, hour: 0, n: 0 };
+   for (let w = 0; w < 7; w++) for (let h = 0; h < 24; h++) if (punch[w][h] > peakHour.n) peakHour = { weekday: w, hour: h, n: punch[w][h] };
 
-  // Activity streak & active-day count, derived from byDay (a day only appears there if it had sessions).
-  const activeDayKeys = byDay.map((d) => String(d.date)).sort();
-  let streak = 0;
-  if (activeDayKeys.length) {
-    let cursor = new Date(`${activeDayKeys[activeDayKeys.length - 1]}T00:00:00Z`);
-    const daySet = new Set(activeDayKeys);
-    while (daySet.has(cursor.toISOString().slice(0, 10))) {
-      streak++;
-      cursor.setUTCDate(cursor.getUTCDate() - 1);
-    }
-  }
-  const busiestDay = byDay.reduce(
-    (m: any, d: any) => (Number(d.tokens_in) + Number(d.tokens_out) > (m ? Number(m.tokens_in) + Number(m.tokens_out) : -1) ? d : m),
-    null,
-  );
-  const activity = {
-    activeDays: byDay.length,
-    streak,
-    peakHour,
-    busiestDay: busiestDay ? { date: busiestDay.date, sessions: busiestDay.sessions, tokensIn: Number(busiestDay.tokens_in), tokensOut: Number(busiestDay.tokens_out) } : null,
-  };
+   // Activity streak & active-day count, derived from byDay (a day only appears there if it had sessions).
+   const activeDayKeys = byDay.map((d) => String(d.date)).sort();
+   let streak = 0;
+   if (activeDayKeys.length) {
+     let cursor = new Date(`${activeDayKeys[activeDayKeys.length - 1]}T00:00:00Z`);
+     const daySet = new Set(activeDayKeys);
+     while (daySet.has(cursor.toISOString().slice(0, 10))) {
+       streak++;
+       cursor.setUTCDate(cursor.getUTCDate() - 1);
+     }
+   }
+   const busiestDay = byDay.reduce(
+     (m: any, d: any) => (Number(d.tokens_in) + Number(d.tokens_out) > (m ? Number(m.tokens_in) + Number(m.tokens_out) : -1) ? d : m),
+     null,
+   );
+   const activity = {
+     activeDays: byDay.length,
+     streak,
+     peakHour,
+     busiestDay: busiestDay ? { date: busiestDay.date, sessions: busiestDay.sessions, tokensIn: Number(busiestDay.tokens_in), tokensOut: Number(busiestDay.tokens_out) } : null,
+   };
 
-  // 9. Top tools used team-wide
-  const { rows: topTools } = await query(
-    `SELECT t.tool_name AS name, sum(t.call_count)::int AS count
-     FROM sync_session_tools t
-     JOIN sync_sessions s ON s.id = t.sync_session_id
-     WHERE s.team_id = $1 ${dateFilter}
-     GROUP BY t.tool_name ORDER BY count DESC LIMIT 20`,
-    params,
-  );
+   // 9. Top tools used team-wide
+   const { rows: topTools } = await query(
+     `SELECT t.tool_name AS name, sum(t.call_count)::int AS count
+      FROM sync_session_tools t
+      JOIN sync_sessions s ON s.id = t.sync_session_id
+      WHERE (s.team_id = $1 OR s.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $1)) ${dateFilter}
+      GROUP BY t.tool_name ORDER BY count DESC LIMIT 20`,
+     params,
+   );
 
-  // 10. Top files team-wide
-  const { rows: topFiles } = await query(
-    `SELECT f.path,
-            sum(f.edits)::int AS edits,
-            sum(f.additions)::int AS additions,
-            sum(f.deletions)::int AS deletions,
-            sum(f.additions + f.deletions)::int AS changed_lines,
-            count(DISTINCT s.member_id)::int AS member_count
-     FROM sync_session_files f
-     JOIN sync_sessions s ON s.id = f.sync_session_id
-     WHERE s.team_id = $1 ${dateFilter}
-     GROUP BY f.path ORDER BY changed_lines DESC LIMIT 40`,
-    params,
-  );
+   // 10. Top files team-wide
+   const { rows: topFiles } = await query(
+     `SELECT f.path,
+             sum(f.edits)::int AS edits,
+             sum(f.additions)::int AS additions,
+             sum(f.deletions)::int AS deletions,
+             sum(f.additions + f.deletions)::int AS changed_lines,
+             count(DISTINCT s.member_id)::int AS member_count
+      FROM sync_session_files f
+      JOIN sync_sessions s ON s.id = f.sync_session_id
+      WHERE (s.team_id = $1 OR s.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $1)) ${dateFilter}
+      GROUP BY f.path ORDER BY changed_lines DESC LIMIT 40`,
+     params,
+   );
 
-  // 11. Recent session log
-  const { rows: recentLogs } = await query(
-    `SELECT s.id,
-            s.source,
-            COALESCE(s.agent, 'default') AS project,
-            s.model,
-            s.member_id,
-            m.display_name AS member_name,
-            s.tokens_in,
-            s.tokens_out,
-            s.tokens_cache_read,
-            s.api_cost,
-            s.edits,
-            s.additions,
-            s.deletions,
-            s.changed_lines,
-            s.tool_calls,
-            s.tool_errors,
-            COALESCE(s.ended_at, s.started_at, s.synced_at) AS timestamp
-     FROM sync_sessions s
-     JOIN members m ON m.id = s.member_id
-     WHERE s.team_id = $1 ${dateFilter}
-     ORDER BY timestamp DESC
-     LIMIT 50`,
-    params,
-  );
+   // 11. Recent session log
+   const { rows: recentLogs } = await query(
+     `SELECT s.id,
+             s.source,
+             COALESCE(s.agent, 'default') AS project,
+             s.model,
+             s.member_id,
+             m.display_name AS member_name,
+             s.tokens_in,
+             s.tokens_out,
+             s.tokens_cache_read,
+             s.api_cost,
+             s.edits,
+             s.additions,
+             s.deletions,
+             s.changed_lines,
+             s.tool_calls,
+             s.tool_errors,
+             COALESCE(s.ended_at, s.started_at, s.synced_at) AS timestamp
+      FROM sync_sessions s
+      JOIN members m ON m.id = s.member_id
+      WHERE (s.team_id = $1 OR s.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $1)) ${dateFilter}
+      ORDER BY timestamp DESC
+      LIMIT 50`,
+     params,
+   );
 
   // 12. Model Pricing Rates Table (team overrides first, then global overrides)
   const { rows: modelPricing } = await query(
