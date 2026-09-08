@@ -798,7 +798,6 @@ window.deletePricingRule = async function (id) {
 function renderMembersTable(rows) {
   currentMembersList = rows || [];
   populateGlobalMemberCheckboxes();
-  populateDeepDiveMemberCheckboxes();
   const select = document.getElementById('global-member-filter');
   if (select) {
     const currentVal = select.value;
@@ -937,7 +936,6 @@ async function loadStats({ soft = true } = {}) {
     renderModelPricingTable(stats.modelPricing);
     renderMemberModelsTable(stats.memberModels);
     populateGlobalMemberCheckboxes();
-    populateDeepDiveMemberCheckboxes();
     loadPrompts().catch(console.error);
   } finally {
     if (useSoft) softLoading(false);
@@ -1028,7 +1026,6 @@ async function loadMembers() {
   if (!teamId) return;
   const { members } = await api(`/api/v1/team/members?teamId=${teamId}`);
   renderMembersTable(members);
-  populateDeepDiveMemberCheckboxes();
 }
 
 async function loadTeams() {
