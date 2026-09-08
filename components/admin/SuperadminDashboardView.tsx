@@ -2270,16 +2270,16 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
               </div>
 
               {/* Users Data Table */}
-              <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl overflow-hidden">
-                <table className="w-full text-left text-xs font-mono">
+              <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl overflow-x-auto">
+                <table className="w-full text-left text-xs font-mono min-w-[1060px]">
                   <thead>
                     <tr className="border-b border-[rgba(242,236,223,0.08)] bg-[#1c1712] text-[#8e8473]">
-                      <th className="py-3 px-4">User</th>
-                      <th className="py-3 px-4">Role</th>
-                      <th className="py-3 px-4">Assigned Teams</th>
-                      <th className="py-3 px-4">Telemetry &amp; Daemon</th>
-                      <th className="py-3 px-4">Status</th>
-                      <th className="py-3 px-4 text-right">Actions</th>
+                      <th className="py-3.5 px-5 min-w-[220px]">User</th>
+                      <th className="py-3.5 px-4 min-w-[120px]">Role</th>
+                      <th className="py-3.5 px-4 min-w-[180px]">Assigned Teams</th>
+                      <th className="py-3.5 px-4 min-w-[200px]">Telemetry &amp; Daemon</th>
+                      <th className="py-3.5 px-4 min-w-[120px]">Status</th>
+                      <th className="py-3.5 px-5 text-right whitespace-nowrap min-w-[240px]">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[rgba(242,236,223,0.05)]">
@@ -2299,9 +2299,9 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
                         return (
                           <tr key={u.id} className="hover:bg-[rgba(226,163,85,0.04)] transition-all group">
                             {/* User details */}
-                            <td className="py-3.5 px-4">
+                            <td className="py-3.5 px-5">
                               <div className="flex items-center gap-3">
-                                <div className="relative">
+                                <div className="relative shrink-0">
                                   <div className={`flex h-8 w-8 items-center justify-center rounded-xl text-xs font-bold font-mono border ${
                                     isSuperadmin
                                       ? 'bg-red-500/15 text-red-400 border-red-500/30'
@@ -2418,15 +2418,15 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
                             </td>
 
                             {/* Actions */}
-                            <td className="py-3.5 px-4 text-right">
-                              <div className="flex items-center justify-end gap-1.5">
+                            <td className="py-3.5 px-5 text-right whitespace-nowrap">
+                              <div className="flex items-center justify-end gap-1.5 flex-nowrap">
                                 {/* Impersonate */}
                                 {!isSelf && isActive && (
                                   <Button
                                     variant="ghost"
                                     size="sm"
                                     onClick={() => handleImpersonateUser(u)}
-                                    className="h-7 px-2 text-[11px] text-[#38bdf8] hover:bg-[#38bdf8]/10 hover:text-[#38bdf8] border border-transparent hover:border-[#38bdf8]/20"
+                                    className="h-7 px-2.5 text-[11px] text-[#38bdf8] bg-[#38bdf8]/10 hover:bg-[#38bdf8]/20 hover:text-[#38bdf8] border border-[#38bdf8]/30 rounded-lg shrink-0"
                                     title="Impersonate User"
                                   >
                                     <Eye className="h-3.5 w-3.5 mr-1" />
@@ -2439,7 +2439,7 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
                                   variant="ghost"
                                   size="sm"
                                   onClick={() => handleOpenSetupModal(u)}
-                                  className="h-7 w-7 p-0 text-[#8e8473] hover:text-[#f5c485] hover:bg-[rgba(226,163,85,0.1)]"
+                                  className="h-7 w-7 p-0 text-[#8e8473] hover:text-[#f5c485] bg-[#1c1712] hover:bg-[rgba(226,163,85,0.15)] border border-[rgba(242,236,223,0.08)] hover:border-[#e2a355]/40 rounded-lg shrink-0"
                                   title="View Ingest Setup Commands"
                                 >
                                   <Terminal className="h-3.5 w-3.5" />
@@ -2450,7 +2450,7 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
                                   variant="ghost"
                                   size="sm"
                                   onClick={() => handleOpenResetModal(u)}
-                                  className="h-7 w-7 p-0 text-[#8e8473] hover:text-[#f5c485] hover:bg-[rgba(226,163,85,0.1)]"
+                                  className="h-7 w-7 p-0 text-[#8e8473] hover:text-[#f5c485] bg-[#1c1712] hover:bg-[rgba(226,163,85,0.15)] border border-[rgba(242,236,223,0.08)] hover:border-[#e2a355]/40 rounded-lg shrink-0"
                                   title="Reset Password"
                                 >
                                   <KeyRound className="h-3.5 w-3.5" />
@@ -2461,7 +2461,7 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
                                   variant="ghost"
                                   size="sm"
                                   onClick={() => handleOpenEditModal(u)}
-                                  className="h-7 w-7 p-0 text-[#8e8473] hover:text-white hover:bg-[#1c1712]"
+                                  className="h-7 w-7 p-0 text-[#8e8473] hover:text-white bg-[#1c1712] hover:bg-[#251f18] border border-[rgba(242,236,223,0.08)] hover:border-[#e2a355]/40 rounded-lg shrink-0"
                                   title="Edit User"
                                 >
                                   <Edit3 className="h-3.5 w-3.5" />
@@ -2473,7 +2473,7 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
                                   size="sm"
                                   disabled={isSelf}
                                   onClick={() => setDeleteConfirmModal(u)}
-                                  className={`h-7 w-7 p-0 text-[#8e8473] hover:text-[#ef4444] hover:bg-red-500/10 ${
+                                  className={`h-7 w-7 p-0 text-[#8e8473] hover:text-[#ef4444] bg-[#1c1712] hover:bg-red-500/15 border border-[rgba(242,236,223,0.08)] hover:border-red-500/30 rounded-lg shrink-0 ${
                                     isSelf ? 'opacity-30 cursor-not-allowed' : ''
                                   }`}
                                   title={isSelf ? 'Cannot delete own superadmin account' : 'Delete User'}

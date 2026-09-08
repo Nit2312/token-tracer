@@ -50,7 +50,17 @@ import {
   Server,
   Calendar,
   CalendarDays,
-  Check
+  Check,
+  Edit2,
+  Trash2,
+  Lock,
+  Eye,
+  EyeOff,
+  UserCheck,
+  UserX,
+  ShieldAlert,
+  ExternalLink,
+  MoreVertical
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -108,6 +118,29 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
   const [inspectingPrompt, setInspectingPrompt] = React.useState<any | null>(null);
   const [inspectingError, setInspectingError] = React.useState<any | null>(null);
 
+  // User Management & Direct CRUD States for Team Admin
+  const [showCreateUserModal, setShowCreateUserModal] = React.useState(false);
+  const [createUserForm, setCreateUserForm] = React.useState({
+    displayName: '',
+    username: '',
+    role: 'member',
+    passwordOption: 'auto' as 'auto' | 'custom',
+    customPassword: '',
+  });
+  const [isCreatingUser, setIsCreatingUser] = React.useState(false);
+  const [createdUserResult, setCreatedUserResult] = React.useState<any | null>(null);
+
+  const [editingMember, setEditingMember] = React.useState<any | null>(null);
+  const [isUpdatingMember, setIsUpdatingMember] = React.useState(false);
+
+  const [resetPasswordModal, setResetPasswordModal] = React.useState<any | null>(null);
+  const [isResettingPassword, setIsResettingPassword] = React.useState(false);
+
+  const [deleteMemberModal, setDeleteMemberModal] = React.useState<{ id: string; displayName: string; hardDelete: boolean } | null>(null);
+  const [isDeletingMember, setIsDeletingMember] = React.useState(false);
+
+  const [viewCliModal, setViewCliModal] = React.useState<any | null>(null);
+
   // New Pricing Rule Form State
   const [newPricingForm, setNewPricingForm] = React.useState({
     modelName: '',
@@ -148,6 +181,149 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
 
   const clearDailyMembers = () => {
     setDailySelectedMemberIds([]);
+  };
+
+  // ── USER MANAGEMENT CRUD HANDLERS ──────────────────────────────────────────
+  const handleCreateTeamMember = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!createUserForm.displayName.trim()) {
+      toast.error('Display Name is required');
+      return;
+    }
+    setIsCreatingUser(true);
+    try {
+      const payload: any = {
+        teamId: selectedTeamId,
+        displayName: createUserForm.displayName.trim(),
+        role: createUserForm.role,
+      };
+      if (createUserForm.username.trim()) {
+        payload.username = createUserForm.username.trim().toLowerCase();
+      }
+      if (createUserForm.passwordOption === 'custom' && createUserForm.customPassword.trim()) {
+        payload.password = createUserForm.customPassword.trim();
+      }
+
+      const res = await fetch('/api/v1/team/members', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || 'Failed to create user');
+        return;
+      }
+
+      toast.success(`User "${data.member?.display_name || createUserForm.displayName}" created!`);
+      setShowCreateUserModal(false);
+      setCreatedUserResult(data);
+      setCreateUserForm({
+        displayName: '',
+        username: '',
+        role: 'member',
+        passwordOption: 'auto',
+        customPassword: '',
+      });
+      await fetchTeamData();
+    } catch (err: any) {
+      toast.error(err?.message || 'Error creating user');
+    } finally {
+      setIsCreatingUser(false);
+    }
+  };
+
+  const handleUpdateTeamMember = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingMember) return;
+    setIsUpdatingMember(true);
+    try {
+      const res = await fetch('/api/v1/team/members', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          teamId: selectedTeamId,
+          id: editingMember.id,
+          displayName: editingMember.displayName.trim(),
+          username: editingMember.username ? editingMember.username.trim().toLowerCase() : undefined,
+          role: editingMember.role,
+          active: editingMember.active,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || 'Failed to update member');
+        return;
+      }
+      toast.success('Team member updated successfully');
+      setEditingMember(null);
+      await fetchTeamData();
+    } catch (err: any) {
+      toast.error(err?.message || 'Error updating member');
+    } finally {
+      setIsUpdatingMember(false);
+    }
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resetPasswordModal) return;
+    setIsResettingPassword(true);
+    try {
+      const payload: any = {
+        teamId: selectedTeamId,
+        memberId: resetPasswordModal.memberId,
+      };
+      if (resetPasswordModal.newPasswordOption === 'custom' && resetPasswordModal.customPassword.trim()) {
+        payload.newPassword = resetPasswordModal.customPassword.trim();
+      }
+      const res = await fetch('/api/v1/team/members/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || 'Failed to reset password');
+        return;
+      }
+      setResetPasswordModal((prev: any) => ({
+        ...prev,
+        resultPassword: data.newPassword,
+        username: data.username || prev.username,
+      }));
+      toast.success('Password reset successfully!');
+    } catch (err: any) {
+      toast.error(err?.message || 'Error resetting password');
+    } finally {
+      setIsResettingPassword(false);
+    }
+  };
+
+  const handleDeleteTeamMember = async () => {
+    if (!deleteMemberModal) return;
+    setIsDeletingMember(true);
+    try {
+      const res = await fetch(
+        `/api/v1/team/members?id=${deleteMemberModal.id}&teamId=${encodeURIComponent(selectedTeamId || '')}&hard=${deleteMemberModal.hardDelete ? 'true' : 'false'}`,
+        { method: 'DELETE' }
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || 'Failed to remove member');
+        return;
+      }
+      toast.success(`Removed ${deleteMemberModal.displayName} from team`);
+      setDeleteMemberModal(null);
+      if (selectedMember?.id === deleteMemberModal.id) {
+        setSelectedMember(null);
+      }
+      await fetchTeamData();
+    } catch (err: any) {
+      toast.error(err?.message || 'Error removing member');
+    } finally {
+      setIsDeletingMember(false);
+    }
   };
 
   // Prompts & Logs pagination state
@@ -448,7 +624,15 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
       return {
         id: m.id,
         displayName: m.display_name || 'Engineer',
-        handle: `@${(m.display_name || 'dev').toLowerCase().replace(/\s+/g, '-')}`,
+        handle: `@${(m.username || (m.display_name || 'dev').toLowerCase().replace(/\s+/g, '-'))}`,
+        username: m.username || null,
+        userId: m.user_id || null,
+        userRole: m.user_role || m.role || 'member',
+        userActive: m.user_active !== false,
+        hasUserAccount: Boolean(m.has_user_account || m.user_id),
+        apiKey: m.api_key || null,
+        installCommandMac: m.installCommandMac || null,
+        installCommandWin: m.installCommandWin || null,
         role: m.role || 'Member',
         daemonVersion: m.daemon_version || '1.3.0',
         isLatestDaemon: (m.daemon_version || '1.3.0') === '1.3.0',
@@ -483,8 +667,8 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
   const totalEdits = Number(totals.totalEdits || totals.edits || 0);
 
   // Scoped or global tool errors and tool calls calculation
-  const totalToolCalls = Number(totals.toolCalls ?? totals.totalToolCalls ?? totals.totalTools ?? 0);
-  const totalToolErrors = Number(totals.toolErrors ?? totals.totalToolErrors ?? 0);
+  const totalToolCalls = Number(stats?.totals?.toolCalls || stats?.totals?.tool_calls || 0);
+  const totalToolErrors = Number(stats?.totals?.toolErrors || stats?.totals?.tool_errors || 0);
 
   const scopedToolCalls = selectedGlobalMemberIds.length > 0
     ? developerRoster.reduce((sum, d) => sum + (d.toolCalls || 0), 0)
@@ -518,6 +702,7 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
   const filteredRoster = developerRoster.filter(d => 
     !searchQuery || 
     d.displayName.toLowerCase().includes(searchQuery.toLowerCase()) || 
+    (d.username && d.username.toLowerCase().includes(searchQuery.toLowerCase())) ||
     d.topProject.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
@@ -818,13 +1003,21 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
           </nav>
 
           {/* Quick Actions */}
-          <div className="pt-2">
+          <div className="pt-2 space-y-2">
             <Button
-              onClick={() => setShowInviteModal(true)}
-              className="w-full bg-[rgba(226,163,85,0.1)] hover:bg-[rgba(226,163,85,0.2)] text-[#f5c485] border border-[rgba(226,163,85,0.3)] text-xs font-semibold rounded-xl flex items-center justify-center gap-2"
+              onClick={() => setShowCreateUserModal(true)}
+              className="w-full bg-gradient-to-r from-[#e2a355] to-[#f5c485] hover:brightness-110 text-[#170f05] font-bold text-xs rounded-xl shadow-lg shadow-[#e2a355]/20 flex items-center justify-center gap-2"
             >
               <UserPlus className="h-3.5 w-3.5" />
-              Invite Developer
+              + Add Team Member
+            </Button>
+            <Button
+              onClick={() => setShowInviteModal(true)}
+              variant="outline"
+              className="w-full bg-[#1c1712] hover:bg-[rgba(226,163,85,0.15)] text-[#f5c485] border border-[rgba(226,163,85,0.3)] text-xs font-semibold rounded-xl flex items-center justify-center gap-2"
+            >
+              <Terminal className="h-3.5 w-3.5 text-[#e2a355]" />
+              Quick Daemon Link
             </Button>
           </div>
         </div>
@@ -1050,6 +1243,15 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
                 <span>{timeRange === 'custom' ? `${customFrom} → ${customTo}` : 'Custom'}</span>
               </button>
             </div>
+
+            <Button
+              size="sm"
+              onClick={() => setShowCreateUserModal(true)}
+              className="bg-gradient-to-r from-[#e2a355] to-[#f5c485] hover:brightness-110 text-[#170f05] font-bold text-xs rounded-xl shadow-lg shadow-[#e2a355]/20 flex items-center gap-1.5"
+            >
+              <UserPlus className="h-3.5 w-3.5" />
+              + Add Member
+            </Button>
 
             <Button
               variant="outline"
@@ -2283,15 +2485,25 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
               {/* Left (45%): Team Members & Usage List */}
               <div className="lg:col-span-5 rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-base font-bold font-mono text-white">Team Developers</h3>
-                  <span className="text-xs text-[#8e8473] font-mono">{developerRoster.length} engineers</span>
+                  <div>
+                    <h3 className="text-base font-bold font-mono text-white">Team Developers</h3>
+                    <span className="text-xs text-[#8e8473] font-mono">{developerRoster.length} registered members</span>
+                  </div>
+                  <Button
+                    size="sm"
+                    onClick={() => setShowCreateUserModal(true)}
+                    className="h-8 bg-gradient-to-r from-[#e2a355] to-[#f5c485] hover:brightness-110 text-[#170f05] font-bold text-xs rounded-xl shadow-md shadow-[#e2a355]/20 flex items-center gap-1.5"
+                  >
+                    <UserPlus className="h-3.5 w-3.5" />
+                    + Add Member
+                  </Button>
                 </div>
 
                 <div className="relative">
                   <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-[#8e8473]" />
                   <input
                     type="text"
-                    placeholder="Search developer or repo..."
+                    placeholder="Search developer, @username, or repo..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder-[#8e8473] focus:outline-none focus:border-[#e2a355] transition-all"
@@ -2301,6 +2513,7 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
                 <div className="space-y-3 pt-2 max-h-[700px] overflow-y-auto">
                   {filteredRoster.map((dev: any) => {
                     const isSelected = activeSelected?.id === dev.id;
+                    const isDevAdmin = dev.role === 'admin' || dev.userRole === 'admin';
                     return (
                       <div
                         key={dev.id}
@@ -2313,12 +2526,32 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
                       >
                         <div className="flex items-center justify-between mb-2">
                           <div className="flex items-center gap-3">
-                            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-tr from-[#e2a355] to-[#f5c485] text-[#170f05] font-bold text-xs font-mono">
+                            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-tr from-[#e2a355] to-[#f5c485] text-[#170f05] font-bold text-xs font-mono shadow-sm">
                               {dev.displayName.slice(0, 2).toUpperCase()}
                             </div>
                             <div>
-                              <div className="font-semibold text-white text-sm">{dev.displayName}</div>
-                              <div className="text-[11px] text-[#8e8473]">{dev.role}</div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-semibold text-white text-sm">{dev.displayName}</span>
+                                {isDevAdmin ? (
+                                  <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                                    Admin
+                                  </span>
+                                ) : (
+                                  <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-[#8e8473]/15 text-[#cbbfad] border border-[rgba(242,236,223,0.08)]">
+                                    Dev
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-[#8e8473] font-mono flex items-center gap-1.5">
+                                <span>{dev.handle}</span>
+                                {dev.hasUserAccount ? (
+                                  <span className={`inline-flex items-center gap-1 ${dev.userActive ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                    • {dev.userActive ? 'Active' : 'Inactive'}
+                                  </span>
+                                ) : (
+                                  <span className="text-[#8e8473]">• CLI Key</span>
+                                )}
+                              </div>
                             </div>
                           </div>
                           <div className="text-right font-mono">
@@ -2331,9 +2564,69 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
                           <span className="text-[#8e8473]">
                             Top Project: <span className="text-[#cbbfad]">{dev.topProject}</span>
                           </span>
-                          <span className="text-emerald-400 font-semibold">
-                            {dev.promptsCount} prompts
-                          </span>
+                          <div className="flex items-center gap-1">
+                            {/* Quick Action Icons */}
+                            <button
+                              title="Edit Member"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingMember({
+                                  id: dev.id,
+                                  displayName: dev.displayName,
+                                  username: dev.username || (dev.displayName || '').toLowerCase().replace(/\s+/g, '.'),
+                                  role: dev.role || 'member',
+                                  active: dev.userActive !== false,
+                                });
+                              }}
+                              className="p-1.5 text-[#8e8473] hover:text-[#f5c485] hover:bg-[#251f18] rounded-lg transition-colors"
+                            >
+                              <Edit2 className="h-3 w-3" />
+                            </button>
+
+                            <button
+                              title="Reset Password"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setResetPasswordModal({
+                                  memberId: dev.id,
+                                  displayName: dev.displayName,
+                                  username: dev.username || (dev.displayName || '').toLowerCase().replace(/\s+/g, '.'),
+                                  newPasswordOption: 'auto',
+                                  customPassword: '',
+                                  resultPassword: '',
+                                });
+                              }}
+                              className="p-1.5 text-[#8e8473] hover:text-[#f5c485] hover:bg-[#251f18] rounded-lg transition-colors"
+                            >
+                              <Lock className="h-3 w-3" />
+                            </button>
+
+                            <button
+                              title="CLI Token & Command"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setViewCliModal(dev);
+                              }}
+                              className="p-1.5 text-[#8e8473] hover:text-emerald-400 hover:bg-[#251f18] rounded-lg transition-colors"
+                            >
+                              <Key className="h-3 w-3" />
+                            </button>
+
+                            <button
+                              title="Remove from Team"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setDeleteMemberModal({
+                                  id: dev.id,
+                                  displayName: dev.displayName,
+                                  hardDelete: false,
+                                });
+                              }}
+                              className="p-1.5 text-[#8e8473] hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </button>
+                          </div>
                         </div>
                       </div>
                     );
@@ -2346,38 +2639,109 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
                 {activeSelected ? (
                   <>
                     {/* Header Profile Card */}
-                    <div className="p-5 rounded-2xl bg-gradient-to-br from-[#1c1712] to-[#14100c] border border-[rgba(226,163,85,0.2)] flex items-center justify-between flex-wrap gap-4 shadow-lg">
-                      <div className="flex items-center gap-4">
-                        <div className="relative">
-                          <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-tr from-[#e2a355] to-[#f5c485] text-[#170f05] font-bold text-base font-mono shadow-md">
-                            {activeSelected.displayName.slice(0, 2).toUpperCase()}
+                    <div className="p-5 rounded-2xl bg-gradient-to-br from-[#1c1712] to-[#14100c] border border-[rgba(226,163,85,0.2)] shadow-lg space-y-4">
+                      <div className="flex items-center justify-between flex-wrap gap-4">
+                        <div className="flex items-center gap-4">
+                          <div className="relative">
+                            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-tr from-[#e2a355] to-[#f5c485] text-[#170f05] font-bold text-base font-mono shadow-md">
+                              {activeSelected.displayName.slice(0, 2).toUpperCase()}
+                            </div>
+                            <span className="absolute bottom-0 right-0 h-3.5 w-3.5 rounded-full bg-emerald-500 border-2 border-[#14100c]" />
                           </div>
-                          <span className="absolute bottom-0 right-0 h-3.5 w-3.5 rounded-full bg-emerald-500 border-2 border-[#14100c]" />
-                        </div>
-                        <div>
-                          <h3 className="text-lg font-bold text-white flex items-center gap-2">
-                            <span>{activeSelected.displayName}</span>
-                            <span className="text-xs font-mono font-normal text-[#8e8473]">{activeSelected.handle}</span>
-                          </h3>
-                          <div className="flex items-center gap-3 text-xs font-mono text-[#8e8473] mt-1">
-                            <span>Role: <strong className="text-white">{activeSelected.role}</strong></span>
-                            <span>•</span>
-                            <span>Top Repo: <strong className="text-[#f5c485]">{activeSelected.topProject}</strong></span>
+                          <div>
+                            <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                              <span>{activeSelected.displayName}</span>
+                              <span className="text-xs font-mono font-normal text-[#8e8473]">{activeSelected.handle}</span>
+                              {activeSelected.role === 'admin' && (
+                                <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                                  Team Admin
+                                </span>
+                              )}
+                            </h3>
+                            <div className="flex items-center gap-3 text-xs font-mono text-[#8e8473] mt-1 flex-wrap">
+                              <span>Web User: <strong className="text-white">{activeSelected.username || 'Not configured'}</strong></span>
+                              <span>•</span>
+                              <span>Status: <strong className={activeSelected.userActive ? 'text-emerald-400' : 'text-rose-400'}>{activeSelected.userActive ? 'Active' : 'Deactivated'}</strong></span>
+                              <span>•</span>
+                              <span>Top Repo: <strong className="text-[#f5c485]">{activeSelected.topProject}</strong></span>
+                            </div>
                           </div>
                         </div>
+
+                        <Button
+                          size="sm"
+                          onClick={() => {
+                            setSelectedGlobalMemberIds([activeSelected.id]);
+                            setActiveTab('prompts');
+                          }}
+                          className="bg-gradient-to-r from-[#e2a355] to-[#f5c485] text-[#170f05] font-semibold text-xs rounded-xl shadow-lg shadow-[#e2a355]/20 flex items-center gap-1.5"
+                        >
+                          <FileText className="h-3.5 w-3.5" />
+                          Inspect Developer Prompts ↗
+                        </Button>
                       </div>
 
-                      <Button
-                        size="sm"
-                        onClick={() => {
-                          setSelectedGlobalMemberIds([activeSelected.id]);
-                          setActiveTab('prompts');
-                        }}
-                        className="bg-gradient-to-r from-[#e2a355] to-[#f5c485] text-[#170f05] font-semibold text-xs rounded-xl shadow-lg shadow-[#e2a355]/20 flex items-center gap-1.5"
-                      >
-                        <FileText className="h-3.5 w-3.5" />
-                        Inspect Developer Prompts ↗
-                      </Button>
+                      {/* Admin Controls Action Toolbar */}
+                      <div className="pt-3 border-t border-[rgba(242,236,223,0.06)] flex items-center justify-between flex-wrap gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setEditingMember({
+                              id: activeSelected.id,
+                              displayName: activeSelected.displayName,
+                              username: activeSelected.username || (activeSelected.displayName || '').toLowerCase().replace(/\s+/g, '.'),
+                              role: activeSelected.role || 'member',
+                              active: activeSelected.userActive !== false,
+                            })}
+                            className="h-7 text-xs border-[rgba(242,236,223,0.1)] text-[#cbbfad] hover:text-white hover:bg-[#251f18]"
+                          >
+                            <Edit2 className="h-3 w-3 mr-1 text-[#e2a355]" />
+                            Edit Profile
+                          </Button>
+
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setResetPasswordModal({
+                              memberId: activeSelected.id,
+                              displayName: activeSelected.displayName,
+                              username: activeSelected.username || (activeSelected.displayName || '').toLowerCase().replace(/\s+/g, '.'),
+                              newPasswordOption: 'auto',
+                              customPassword: '',
+                              resultPassword: '',
+                            })}
+                            className="h-7 text-xs border-[rgba(242,236,223,0.1)] text-[#cbbfad] hover:text-white hover:bg-[#251f18]"
+                          >
+                            <Lock className="h-3 w-3 mr-1 text-[#e2a355]" />
+                            Reset Password
+                          </Button>
+
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setViewCliModal(activeSelected)}
+                            className="h-7 text-xs border-[rgba(242,236,223,0.1)] text-[#cbbfad] hover:text-emerald-400 hover:bg-[#251f18]"
+                          >
+                            <Key className="h-3 w-3 mr-1 text-emerald-400" />
+                            CLI Setup &amp; Key
+                          </Button>
+                        </div>
+
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setDeleteMemberModal({
+                            id: activeSelected.id,
+                            displayName: activeSelected.displayName,
+                            hardDelete: false,
+                          })}
+                          className="h-7 text-xs text-[#8e8473] hover:text-rose-400 hover:bg-rose-500/10"
+                        >
+                          <Trash2 className="h-3 w-3 mr-1" />
+                          Remove Member
+                        </Button>
+                      </div>
                     </div>
 
                     {/* Developer KPI Grid */}
@@ -2947,7 +3311,653 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
           MODALS & DRAWERS
          ========================================================================= */}
 
-      {/* 1. Add Custom Pricing Modal */}
+      {/* 1. Create Team User / Member Modal */}
+      {showCreateUserModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-md p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-[#14100c] border border-[rgba(226,163,85,0.3)] shadow-2xl p-7 space-y-5 animate-scaleUp">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-tr from-[#e2a355] to-[#f5c485] text-[#170f05] shadow-md">
+                  <UserPlus className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold font-mono text-white">Create New Team Member</h3>
+                  <p className="text-[11px] text-[#8e8473]">Provisions developer profile, web login, and CLI token</p>
+                </div>
+              </div>
+              <button onClick={() => setShowCreateUserModal(false)} className="text-[#8e8473] hover:text-white">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateTeamMember} className="space-y-4">
+              <div>
+                <label className="block text-xs font-mono text-[#8e8473] mb-1">
+                  Full Name / Display Name <span className="text-[#e2a355]">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Sarah Connor"
+                  value={createUserForm.displayName}
+                  onChange={(e) => {
+                    const name = e.target.value;
+                    const autoUsername = name.toLowerCase().replace(/[^a-z0-9]/g, '.').replace(/\.+/g, '.').replace(/^\.|\.$/g, '');
+                    setCreateUserForm((prev) => ({
+                      ...prev,
+                      displayName: name,
+                      username: prev.username === '' || prev.username === autoUsername.slice(0, -1) ? autoUsername : prev.username
+                    }));
+                  }}
+                  className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-[#8e8473] focus:outline-none focus:border-[#e2a355] transition-all"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-mono text-[#8e8473] mb-1">
+                    Username
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. sarah.connor"
+                    value={createUserForm.username}
+                    onChange={(e) => setCreateUserForm({ ...createUserForm, username: e.target.value })}
+                    className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-xl px-3.5 py-2 text-xs font-mono text-white placeholder-[#8e8473] focus:outline-none focus:border-[#e2a355] transition-all"
+                  />
+                  <span className="text-[10px] text-[#8e8473] font-mono mt-1 block">Leave empty to auto-generate</span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-mono text-[#8e8473] mb-1">
+                    Team Role
+                  </label>
+                  <select
+                    value={createUserForm.role}
+                    onChange={(e) => setCreateUserForm({ ...createUserForm, role: e.target.value })}
+                    className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[#e2a355] transition-all"
+                  >
+                    <option value="member">Developer (Member)</option>
+                    <option value="admin">Team Administrator</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Password configuration */}
+              <div className="space-y-2 pt-1">
+                <label className="block text-xs font-mono text-[#8e8473]">Web Login Password</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCreateUserForm({ ...createUserForm, passwordOption: 'auto', customPassword: '' })}
+                    className={`py-2 px-3 rounded-xl border text-xs font-mono transition-all text-left ${
+                      createUserForm.passwordOption === 'auto'
+                        ? 'bg-[rgba(226,163,85,0.15)] border-[#e2a355] text-[#f5c485]'
+                        : 'bg-[#1c1712] border-[rgba(242,236,223,0.06)] text-[#8e8473] hover:border-[#e2a355]/30'
+                    }`}
+                  >
+                    <div className="font-semibold text-white">⚡ Auto-Generate</div>
+                    <div className="text-[10px] text-[#8e8473]">Secure random password</div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setCreateUserForm({ ...createUserForm, passwordOption: 'custom' })}
+                    className={`py-2 px-3 rounded-xl border text-xs font-mono transition-all text-left ${
+                      createUserForm.passwordOption === 'custom'
+                        ? 'bg-[rgba(226,163,85,0.15)] border-[#e2a355] text-[#f5c485]'
+                        : 'bg-[#1c1712] border-[rgba(242,236,223,0.06)] text-[#8e8473] hover:border-[#e2a355]/30'
+                    }`}
+                  >
+                    <div className="font-semibold text-white">🔑 Set Custom</div>
+                    <div className="text-[10px] text-[#8e8473]">Custom password</div>
+                  </button>
+                </div>
+
+                {createUserForm.passwordOption === 'custom' && (
+                  <div className="pt-2 animate-fadeIn">
+                    <input
+                      type="password"
+                      placeholder="Enter password (min 6 characters)"
+                      value={createUserForm.customPassword}
+                      onChange={(e) => setCreateUserForm({ ...createUserForm, customPassword: e.target.value })}
+                      className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-xl px-3.5 py-2 text-xs font-mono text-white placeholder-[#8e8473] focus:outline-none focus:border-[#e2a355] transition-all"
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div className="p-3 rounded-xl bg-[#0d0a07] border border-[rgba(242,236,223,0.06)] text-[11px] font-mono text-[#8e8473] space-y-1">
+                <div>✓ Creates web dashboard login credentials</div>
+                <div>✓ Provisions CLI daemon token &amp; curl install command</div>
+                <div>✓ Links developer to this team workspace automatically</div>
+              </div>
+
+              <div className="pt-3 flex items-center justify-end gap-3">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowCreateUserModal(false)}
+                  className="text-xs text-[#8e8473]"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={isCreatingUser}
+                  size="sm"
+                  className="bg-gradient-to-r from-[#e2a355] to-[#f5c485] hover:brightness-110 text-[#170f05] font-bold text-xs rounded-xl shadow-lg shadow-[#e2a355]/20 flex items-center gap-1.5"
+                >
+                  {isCreatingUser ? (
+                    <>
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                      Creating Member...
+                    </>
+                  ) : (
+                    <>
+                      <UserPlus className="h-3.5 w-3.5" />
+                      Create Member &amp; Generate Token
+                    </>
+                  )}
+                </Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 2. User Created Success Modal */}
+      {createdUserResult && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
+          <div className="w-full max-w-xl rounded-2xl bg-[#14100c] border border-emerald-500/30 shadow-2xl p-7 space-y-5 animate-scaleUp">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-400">
+                  <CheckCircle2 className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold font-mono text-white">Team Member Created Successfully!</h3>
+                  <p className="text-[11px] text-[#8e8473]">Share the credentials and installation command below with the engineer</p>
+                </div>
+              </div>
+              <button onClick={() => setCreatedUserResult(null)} className="text-[#8e8473] hover:text-white">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Credentials Card */}
+            <div className="p-4 rounded-xl bg-[#1c1712] border border-[rgba(242,236,223,0.08)] space-y-3">
+              <div className="text-xs font-bold font-mono text-[#f5c485] uppercase tracking-wider">Web Portal Credentials</div>
+              
+              <div className="grid grid-cols-2 gap-3 text-xs font-mono">
+                <div className="p-2.5 rounded-lg bg-[#0d0a07] border border-[rgba(242,236,223,0.05)]">
+                  <span className="text-[#8e8473] block text-[10px]">Username</span>
+                  <div className="flex items-center justify-between mt-0.5">
+                    <span className="text-white font-bold">{createdUserResult.user?.username || createdUserResult.member?.display_name}</span>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(createdUserResult.user?.username || '');
+                        toast.success('Username copied!');
+                      }}
+                      className="text-[#e2a355] hover:text-[#f5c485]"
+                    >
+                      <Copy className="h-3 w-3" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="p-2.5 rounded-lg bg-[#0d0a07] border border-[rgba(242,236,223,0.05)]">
+                  <span className="text-[#8e8473] block text-[10px]">Temporary Password</span>
+                  <div className="flex items-center justify-between mt-0.5">
+                    <span className="text-emerald-400 font-bold font-mono">{createdUserResult.tempPassword || '(Set by admin)'}</span>
+                    {createdUserResult.tempPassword && (
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(createdUserResult.tempPassword);
+                          toast.success('Password copied!');
+                        }}
+                        className="text-emerald-400 hover:text-emerald-300"
+                      >
+                        <Copy className="h-3 w-3" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* One-Line CLI Install Commands */}
+            <div className="space-y-3">
+              <div className="text-xs font-bold font-mono text-[#f5c485] uppercase tracking-wider flex items-center justify-between">
+                <span>CLI Daemon Setup Commands</span>
+                <span className="text-[10px] text-[#8e8473] normal-case">Includes auto-linked sync token</span>
+              </div>
+
+              {/* macOS / Linux */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[11px] font-mono text-[#8e8473]">
+                  <span>macOS &amp; Linux (Terminal)</span>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(createdUserResult.installCommandMac || '');
+                      toast.success('macOS/Linux curl command copied!');
+                    }}
+                    className="text-[#e2a355] hover:underline flex items-center gap-1"
+                  >
+                    <Copy className="h-3 w-3" /> Copy
+                  </button>
+                </div>
+                <div className="p-3 rounded-xl bg-[#0d0a07] border border-[rgba(242,236,223,0.08)] font-mono text-xs text-[#cbbfad] overflow-x-auto whitespace-nowrap">
+                  {createdUserResult.installCommandMac}
+                </div>
+              </div>
+
+              {/* Windows PowerShell */}
+              {createdUserResult.installCommandWin && (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-[11px] font-mono text-[#8e8473]">
+                    <span>Windows (PowerShell)</span>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(createdUserResult.installCommandWin || '');
+                        toast.success('Windows PowerShell command copied!');
+                      }}
+                      className="text-[#e2a355] hover:underline flex items-center gap-1"
+                    >
+                      <Copy className="h-3 w-3" /> Copy
+                    </button>
+                  </div>
+                  <div className="p-3 rounded-xl bg-[#0d0a07] border border-[rgba(242,236,223,0.08)] font-mono text-xs text-[#cbbfad] overflow-x-auto whitespace-nowrap">
+                    {createdUserResult.installCommandWin}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="pt-2 flex justify-end">
+              <Button
+                size="sm"
+                onClick={() => setCreatedUserResult(null)}
+                className="bg-gradient-to-r from-[#e2a355] to-[#f5c485] text-[#170f05] font-bold text-xs rounded-xl shadow-lg shadow-[#e2a355]/20"
+              >
+                Done &amp; Close
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 3. Edit Team Member Modal */}
+      {editingMember && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-md p-4">
+          <div className="w-full max-w-md rounded-2xl bg-[#14100c] border border-[rgba(226,163,85,0.3)] shadow-2xl p-6 space-y-5 animate-scaleUp">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[rgba(226,163,85,0.15)] text-[#f5c485]">
+                  <Edit2 className="h-4 w-4" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold font-mono text-white">Edit Team Member</h3>
+                  <p className="text-[11px] text-[#8e8473]">Update profile and role</p>
+                </div>
+              </div>
+              <button onClick={() => setEditingMember(null)} className="text-[#8e8473] hover:text-white">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleUpdateTeamMember} className="space-y-4">
+              <div>
+                <label className="block text-xs font-mono text-[#8e8473] mb-1">
+                  Full Name / Display Name <span className="text-[#e2a355]">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editingMember.displayName}
+                  onChange={(e) => setEditingMember({ ...editingMember, displayName: e.target.value })}
+                  className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-xl px-3.5 py-2 text-xs text-white placeholder-[#8e8473] focus:outline-none focus:border-[#e2a355]"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-mono text-[#8e8473] mb-1">Username</label>
+                  <input
+                    type="text"
+                    value={editingMember.username || ''}
+                    onChange={(e) => setEditingMember({ ...editingMember, username: e.target.value })}
+                    className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-xl px-3 py-2 text-xs font-mono text-white placeholder-[#8e8473] focus:outline-none focus:border-[#e2a355]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-mono text-[#8e8473] mb-1">Team Role</label>
+                  <select
+                    value={editingMember.role || 'member'}
+                    onChange={(e) => setEditingMember({ ...editingMember, role: e.target.value })}
+                    className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[#e2a355]"
+                  >
+                    <option value="member">Developer (Member)</option>
+                    <option value="admin">Team Administrator</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-mono text-[#8e8473] mb-1">Account Status</label>
+                <div className="flex items-center gap-3 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setEditingMember({ ...editingMember, active: true })}
+                    className={`flex-1 py-2 px-3 rounded-xl border text-xs font-mono text-center transition-all ${
+                      editingMember.active !== false
+                        ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400 font-bold'
+                        : 'bg-[#1c1712] border-[rgba(242,236,223,0.06)] text-[#8e8473]'
+                    }`}
+                  >
+                    ✓ Active
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingMember({ ...editingMember, active: false })}
+                    className={`flex-1 py-2 px-3 rounded-xl border text-xs font-mono text-center transition-all ${
+                      editingMember.active === false
+                        ? 'bg-rose-500/15 border-rose-500/40 text-rose-400 font-bold'
+                        : 'bg-[#1c1712] border-[rgba(242,236,223,0.06)] text-[#8e8473]'
+                    }`}
+                  >
+                    ✕ Deactivated
+                  </button>
+                </div>
+              </div>
+
+              <div className="pt-3 flex items-center justify-end gap-3">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setEditingMember(null)}
+                  className="text-xs text-[#8e8473]"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={isUpdatingMember}
+                  size="sm"
+                  className="bg-gradient-to-r from-[#e2a355] to-[#f5c485] text-[#170f05] font-bold text-xs rounded-xl shadow-lg shadow-[#e2a355]/20"
+                >
+                  {isUpdatingMember ? 'Saving...' : 'Save Changes'}
+                </Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 4. Reset Password Modal */}
+      {resetPasswordModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-md p-4">
+          <div className="w-full max-w-md rounded-2xl bg-[#14100c] border border-[rgba(226,163,85,0.3)] shadow-2xl p-6 space-y-5 animate-scaleUp">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[rgba(226,163,85,0.15)] text-[#f5c485]">
+                  <Lock className="h-4 w-4" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold font-mono text-white">Reset Password</h3>
+                  <p className="text-[11px] text-[#8e8473]">For {resetPasswordModal.displayName} (@{resetPasswordModal.username})</p>
+                </div>
+              </div>
+              <button onClick={() => setResetPasswordModal(null)} className="text-[#8e8473] hover:text-white">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {resetPasswordModal.resultPassword ? (
+              <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 space-y-3">
+                <div className="text-xs font-bold font-mono text-emerald-400">Password Reset Successful!</div>
+                <p className="text-xs text-[#cbbfad]">New temporary password for @{resetPasswordModal.username}:</p>
+                <div className="p-3 rounded-lg bg-[#0d0a07] border border-emerald-500/20 flex items-center justify-between font-mono text-sm font-bold text-emerald-300">
+                  <span>{resetPasswordModal.resultPassword}</span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      navigator.clipboard.writeText(resetPasswordModal.resultPassword);
+                      toast.success('New password copied!');
+                    }}
+                    className="h-7 text-xs text-emerald-400 hover:bg-emerald-500/20"
+                  >
+                    <Copy className="h-3.5 w-3.5 mr-1" /> Copy
+                  </Button>
+                </div>
+                <div className="pt-2 flex justify-end">
+                  <Button size="sm" onClick={() => setResetPasswordModal(null)} className="bg-[#1c1712] text-white text-xs">
+                    Done
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <form onSubmit={handleResetPassword} className="space-y-4">
+                <div className="space-y-2">
+                  <label className="block text-xs font-mono text-[#8e8473]">Password Option</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setResetPasswordModal({ ...resetPasswordModal, newPasswordOption: 'auto', customPassword: '' })}
+                      className={`py-2 px-3 rounded-xl border text-xs font-mono text-left transition-all ${
+                        resetPasswordModal.newPasswordOption === 'auto'
+                          ? 'bg-[rgba(226,163,85,0.15)] border-[#e2a355] text-[#f5c485]'
+                          : 'bg-[#1c1712] border-[rgba(242,236,223,0.06)] text-[#8e8473]'
+                      }`}
+                    >
+                      <div className="font-semibold text-white">⚡ Auto-Generate</div>
+                      <div className="text-[10px] text-[#8e8473]">Random temporary key</div>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setResetPasswordModal({ ...resetPasswordModal, newPasswordOption: 'custom' })}
+                      className={`py-2 px-3 rounded-xl border text-xs font-mono text-left transition-all ${
+                        resetPasswordModal.newPasswordOption === 'custom'
+                          ? 'bg-[rgba(226,163,85,0.15)] border-[#e2a355] text-[#f5c485]'
+                          : 'bg-[#1c1712] border-[rgba(242,236,223,0.06)] text-[#8e8473]'
+                      }`}
+                    >
+                      <div className="font-semibold text-white">🔑 Set Custom</div>
+                      <div className="text-[10px] text-[#8e8473]">Enter new password</div>
+                    </button>
+                  </div>
+
+                  {resetPasswordModal.newPasswordOption === 'custom' && (
+                    <div className="pt-2 animate-fadeIn">
+                      <input
+                        type="password"
+                        placeholder="Enter new password (min 6 characters)"
+                        value={resetPasswordModal.customPassword}
+                        onChange={(e) => setResetPasswordModal({ ...resetPasswordModal, customPassword: e.target.value })}
+                        className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-xl px-3.5 py-2 text-xs font-mono text-white focus:outline-none focus:border-[#e2a355]"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <div className="pt-3 flex items-center justify-end gap-3">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setResetPasswordModal(null)}
+                    className="text-xs text-[#8e8473]"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="submit"
+                    disabled={isResettingPassword}
+                    size="sm"
+                    className="bg-gradient-to-r from-[#e2a355] to-[#f5c485] text-[#170f05] font-bold text-xs rounded-xl shadow-lg shadow-[#e2a355]/20"
+                  >
+                    {isResettingPassword ? 'Resetting...' : 'Confirm Reset Password'}
+                  </Button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 5. Delete / Remove Member Confirmation Modal */}
+      {deleteMemberModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
+          <div className="w-full max-w-md rounded-2xl bg-[#14100c] border border-rose-500/30 shadow-2xl p-6 space-y-5 animate-scaleUp">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-rose-500/15 text-rose-400 border border-rose-500/30">
+                  <Trash2 className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold font-mono text-white">Remove Team Member</h3>
+                  <p className="text-[11px] text-[#8e8473]">Confirm removal from workspace</p>
+                </div>
+              </div>
+              <button onClick={() => setDeleteMemberModal(null)} className="text-[#8e8473] hover:text-white">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-[#cbbfad] leading-relaxed">
+              Are you sure you want to remove <strong className="text-white">{deleteMemberModal.displayName}</strong> from this team workspace?
+            </p>
+
+            <label className="flex items-start gap-2.5 p-3 rounded-xl bg-[#1c1712] border border-[rgba(242,236,223,0.06)] cursor-pointer text-xs font-mono">
+              <input
+                type="checkbox"
+                checked={deleteMemberModal.hardDelete}
+                onChange={(e) => setDeleteMemberModal({ ...deleteMemberModal, hardDelete: e.target.checked })}
+                className="mt-0.5 rounded border-[rgba(242,236,223,0.2)] text-[#e2a355] focus:ring-0"
+              />
+              <span className="text-[#8e8473]">
+                Hard-delete associated user login account &amp; daemon sync tokens as well.
+              </span>
+            </label>
+
+            <div className="pt-2 flex items-center justify-end gap-3">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setDeleteMemberModal(null)}
+                className="text-xs text-[#8e8473]"
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                disabled={isDeletingMember}
+                onClick={handleDeleteTeamMember}
+                className="bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-rose-600/20"
+              >
+                {isDeletingMember ? 'Removing...' : 'Yes, Remove Member'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 6. View CLI Key & Installation Snippet Modal */}
+      {viewCliModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-[#14100c] border border-[rgba(226,163,85,0.3)] shadow-2xl p-6 space-y-5 animate-scaleUp">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                  <Key className="h-4 w-4" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold font-mono text-white">CLI Daemon Setup for {viewCliModal.displayName}</h3>
+                  <p className="text-[11px] text-[#8e8473]">Daemon synchronization command &amp; token</p>
+                </div>
+              </div>
+              <button onClick={() => setViewCliModal(null)} className="text-[#8e8473] hover:text-white">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {/* macOS / Linux */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[11px] font-mono text-[#8e8473]">
+                  <span>macOS &amp; Linux (Terminal)</span>
+                  <button
+                    onClick={() => {
+                      const cmd = viewCliModal.installCommandMac || `curl -fsSL https://token-tracer-three.vercel.app/install.sh | bash -s -- --key ${viewCliModal.apiKey || 'YOUR_KEY'}`;
+                      navigator.clipboard.writeText(cmd);
+                      toast.success('macOS/Linux install command copied!');
+                    }}
+                    className="text-[#e2a355] hover:underline flex items-center gap-1"
+                  >
+                    <Copy className="h-3 w-3" /> Copy
+                  </button>
+                </div>
+                <div className="p-3 rounded-xl bg-[#0d0a07] border border-[rgba(242,236,223,0.08)] font-mono text-xs text-[#cbbfad] overflow-x-auto whitespace-nowrap">
+                  {viewCliModal.installCommandMac || `curl -fsSL https://token-tracer-three.vercel.app/install.sh | bash -s -- --key ${viewCliModal.apiKey || 'YOUR_KEY'}`}
+                </div>
+              </div>
+
+              {/* Windows PowerShell */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[11px] font-mono text-[#8e8473]">
+                  <span>Windows (PowerShell)</span>
+                  <button
+                    onClick={() => {
+                      const cmd = viewCliModal.installCommandWin || `$ApiKey="${viewCliModal.apiKey || 'YOUR_KEY'}"; iex (irm https://token-tracer-three.vercel.app/install.ps1)`;
+                      navigator.clipboard.writeText(cmd);
+                      toast.success('Windows install command copied!');
+                    }}
+                    className="text-[#e2a355] hover:underline flex items-center gap-1"
+                  >
+                    <Copy className="h-3 w-3" /> Copy
+                  </button>
+                </div>
+                <div className="p-3 rounded-xl bg-[#0d0a07] border border-[rgba(242,236,223,0.08)] font-mono text-xs text-[#cbbfad] overflow-x-auto whitespace-nowrap">
+                  {viewCliModal.installCommandWin || `$ApiKey="${viewCliModal.apiKey || 'YOUR_KEY'}"; iex (irm https://token-tracer-three.vercel.app/install.ps1)`}
+                </div>
+              </div>
+
+              {/* Quick CLI login link */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[11px] font-mono text-[#8e8473]">
+                  <span>NPM Package Daemon Link</span>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(`npx token-tracer link --team ${selectedTeamId || 'default'}`);
+                      toast.success('NPM link command copied!');
+                    }}
+                    className="text-[#e2a355] hover:underline flex items-center gap-1"
+                  >
+                    <Copy className="h-3 w-3" /> Copy
+                  </button>
+                </div>
+                <div className="p-3 rounded-xl bg-[#0d0a07] border border-[rgba(242,236,223,0.08)] font-mono text-xs text-[#f5c485] overflow-x-auto whitespace-nowrap">
+                  npx token-tracer link --team {selectedTeamId || 'default'}
+                </div>
+              </div>
+            </div>
+
+            <div className="pt-2 flex justify-end">
+              <Button size="sm" onClick={() => setViewCliModal(null)} className="bg-[#1c1712] text-white text-xs">
+                Close
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 7. Add Custom Pricing Modal */}
       {showAddPricingModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
           <div className="w-full max-w-md rounded-2xl bg-[#14100c] border border-[rgba(226,163,85,0.3)] shadow-2xl p-6 space-y-5 animate-scaleUp">
@@ -3034,14 +4044,14 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
         </div>
       )}
 
-      {/* 2. Invite Developer Modal */}
+      {/* 8. Invite Developer Modal */}
       {showInviteModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
           <div className="w-full max-w-md rounded-2xl bg-[#14100c] border border-[rgba(226,163,85,0.3)] shadow-2xl p-6 space-y-5 animate-scaleUp">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-bold font-mono text-white flex items-center gap-2">
-                <UserPlus className="h-5 w-5 text-[#e2a355]" />
-                Invite Developer to Workspace
+                <Terminal className="h-5 w-5 text-[#e2a355]" />
+                Quick Daemon Workspace Link
               </h3>
               <button onClick={() => setShowInviteModal(false)} className="text-[#8e8473] hover:text-white">
                 <X className="h-4 w-4" />

@@ -29,6 +29,8 @@ export async function GET(req: NextRequest) {
     const { rows: members } = await query(
       `SELECT m.id, m.display_name, tm.role, m.created_at, m.sync_requested_at,
               m.daemon_version, m.daemon_last_seen_at,
+              u.id AS user_id, u.username, u.active AS user_active, u.role AS user_role, u.api_key,
+              (u.id IS NOT NULL) AS has_user_account,
               GREATEST(
                 (SELECT max(created_at) FROM ingest_events e WHERE e.member_id = m.id),
                 (SELECT max(COALESCE(s.ended_at, s.started_at, s.synced_at)) FROM sync_sessions s WHERE s.member_id = m.id),
@@ -39,11 +41,23 @@ export async function GET(req: NextRequest) {
               (SELECT coalesce(sum(s.api_cost), 0) FROM sync_sessions s WHERE s.member_id = m.id)::float AS total_cost
        FROM team_members tm
        JOIN members m ON m.id = tm.member_id
+       LEFT JOIN users u ON u.member_id = m.id
        WHERE tm.team_id = $1${memberFilter}
        ORDER BY m.display_name`,
       queryParams,
     );
-    return NextResponse.json({ members });
+
+    const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || req.nextUrl.origin || 'https://token-tracer-three.vercel.app';
+    const enrichedMembers = members.map((m: any) => {
+      const apiKey = m.api_key || null;
+      return {
+        ...m,
+        installCommandMac: apiKey ? `curl -fsSL ${serverUrl}/install.sh | bash -s -- --key ${apiKey}` : null,
+        installCommandWin: apiKey ? `$ApiKey="${apiKey}"; iex (irm ${serverUrl}/install.ps1)` : null,
+      };
+    });
+
+    return NextResponse.json({ members: enrichedMembers });
 
   } catch (err) {
     console.error('[team/members GET error]', err);
@@ -110,11 +124,48 @@ export async function PUT(req: NextRequest) {
     const member = await updateMember(
       String(body.id),
       teamId,
-      String(body.displayName),
+      String(body.displayName).trim(),
       String(body.role ?? 'member'),
     );
     if (!member) return NextResponse.json({ error: 'member not found' }, { status: 404 });
-    return NextResponse.json({ member });
+
+    // Also update linked user profile if username / active status passed
+    const cleanUsername = body.username ? String(body.username).trim().toLowerCase() : null;
+    if (cleanUsername) {
+      if (cleanUsername.length < 2) {
+        return NextResponse.json({ error: 'Username must be at least 2 characters' }, { status: 400 });
+      }
+      const reserved = ['team', 'superadmin', 'admin', 'root', 'api', 'system', 'dashboard'];
+      if (reserved.includes(cleanUsername)) {
+        return NextResponse.json({ error: 'This username is reserved' }, { status: 409 });
+      }
+      const { rows: existing } = await query(
+        'SELECT id FROM users WHERE LOWER(username) = $1 AND member_id != $2',
+        [cleanUsername, String(body.id)]
+      );
+      if (existing.length > 0) {
+        return NextResponse.json({ error: `Username '${cleanUsername}' is already taken.` }, { status: 409 });
+      }
+    }
+
+    await query(
+      `UPDATE users SET
+         display_name = COALESCE($1, display_name),
+         username = COALESCE($2, username),
+         active = COALESCE($3, active),
+         role = COALESCE($4, role),
+         updated_at = now()
+       WHERE member_id = $5`,
+      [
+        String(body.displayName).trim(),
+        cleanUsername,
+        body.active !== undefined ? Boolean(body.active) : null,
+        body.role === 'admin' ? 'admin' : (body.role ? 'user' : null),
+        String(body.id),
+      ]
+    );
+
+    return NextResponse.json({ ok: true, member });
   } catch (err) {
     console.error('[team/members PUT error]', err);
     return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
@@ -125,9 +176,23 @@ export async function DELETE(req: NextRequest) {
   try {
     const id = req.nextUrl.searchParams.get('id');
     const rawTeamId = req.nextUrl.searchParams.get('teamId');
+    const hard = req.nextUrl.searchParams.get('hard') === 'true';
     const teamId = getAuthorizedTeamId(req, rawTeamId);
     if (!teamId) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
     if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
+
+    const session = getSessionFromCookie(req.headers.get('cookie'));
+    if (session?.memberId === id) {
+      return NextResponse.json({ error: 'You cannot remove your own administrator account' }, { status: 400 });
+    }
+
+    if (hard) {
+      await query('DELETE FROM users WHERE member_id = $1', [id]);
+      await query('DELETE FROM team_members WHERE member_id = $1', [id]);
+      await query('DELETE FROM member_keys WHERE member_id = $1', [id]);
+      await query('DELETE FROM members WHERE id = $1', [id]);
+      return NextResponse.json({ ok: true, deleted: true, hard: true });
+    }
 
     const res = await deleteMember(id, teamId);
     return NextResponse.json(res);
