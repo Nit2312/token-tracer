@@ -31,26 +31,37 @@ export default async function ResearchLayout({ children }: { children: React.Rea
 
   return (
     <div className="min-h-screen bg-page text-ink font-body">
-      <div className="block border-b border-border bg-surface">
-        <div className="mx-auto flex max-w-[1400px] items-center gap-4 px-5 py-3">
-          <a href="/admin" className="text-xs font-semibold text-brand hover:underline">
-            ← Admin Dashboard
-          </a>
-          <span className="text-sm font-medium text-ink">Research Analytics</span>
+      <div className="sticky top-0 z-30 border-b border-border bg-surface/90 backdrop-blur-md">
+        <div className="mx-auto flex max-w-[1400px] items-center justify-between px-6 py-3.5">
+          <div className="flex items-center gap-3">
+            <a href="/admin" className="text-xs font-semibold text-brand hover:text-brand-hi transition-colors flex items-center gap-1">
+              <span>←</span> Admin Dashboard
+            </a>
+            <span className="text-border">/</span>
+            <span className="text-sm font-semibold text-ink flex items-center gap-1.5">
+              <span>🔬</span> Research Analytics
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-brand/10 px-2.5 py-0.5 text-[11px] font-medium text-brand border border-brand/20">
+              <span className="h-1.5 w-1.5 rounded-full bg-brand animate-pulse" />
+              Real-time Agent Telemetry
+            </span>
+          </div>
         </div>
-        <div className="mx-auto flex max-w-[1400px] gap-1 overflow-x-auto px-5 pb-2">
+        <div className="mx-auto flex max-w-[1400px] gap-1 overflow-x-auto px-6 pb-2.5 pt-1 scrollbar-none">
           {NAV.map((item) => (
             <Link
               key={item.href}
               href={item.href}
-              className="whitespace-nowrap rounded-md px-2.5 py-1 text-xs text-muted hover:bg-wash hover:text-ink"
+              className="whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium text-muted transition-all hover:bg-raised hover:text-ink hover:border-brand/30 border border-transparent"
             >
               {item.label}
             </Link>
           ))}
         </div>
       </div>
-      <div className="mx-auto max-w-[1400px] px-5 py-6">
+      <div className="mx-auto max-w-[1400px] px-6 py-8">
         <ResearchQueryProvider>{children}</ResearchQueryProvider>
       </div>
     </div>

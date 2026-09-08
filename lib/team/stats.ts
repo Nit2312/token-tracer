@@ -278,6 +278,28 @@ export async function buildTeamStats(
      params,
    );
 
+   // 8a. Day-wise telemetry per member
+   const { rows: byDayMember } = await query(
+     `SELECT to_char(COALESCE(s.ended_at, s.started_at, s.synced_at)::date, 'YYYY-MM-DD') AS date,
+             s.member_id,
+             m.display_name,
+             count(s.id)::int AS sessions,
+             coalesce(sum(${EFF_IN}), 0)::bigint AS tokens_in,
+             coalesce(sum(${EFF_OUT}), 0)::bigint AS tokens_out,
+             coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
+             coalesce(sum(s.edits), 0)::int AS edits,
+             coalesce(sum(s.changed_lines), 0)::int AS changed_lines,
+             coalesce(sum(s.tool_calls), 0)::int AS tool_calls,
+             coalesce(sum(s.tool_errors), 0)::int AS tool_errors,
+             coalesce(sum(s.api_cost), 0)::float AS api_cost
+      FROM sync_sessions s
+      JOIN members m ON m.id = s.member_id
+      WHERE (s.team_id = $1 OR s.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $1)) ${dateFilter}
+      GROUP BY 1, 2, 3
+      ORDER BY 1 DESC, api_cost DESC`,
+     params,
+   );
+
    // 8b. Hourly activity punch-card (weekday 0-6, hour 0-23) — same shape/window as dateFilter above
    const { rows: punchRows } = await query(
      `SELECT
@@ -569,6 +591,21 @@ export async function buildTeamStats(
       tokens_in: Number(d.tokens_in || 0),
       tokens_out: Number(d.tokens_out || 0),
     })),
+    dailyMemberUsage: byDayMember.map((dm) => ({
+      date: dm.date,
+      member_id: dm.member_id,
+      display_name: dm.display_name,
+      sessions: Number(dm.sessions || 0),
+      tokens_in: Number(dm.tokens_in || 0),
+      tokens_out: Number(dm.tokens_out || 0),
+      tokens_cache_read: Number(dm.tokens_cache_read || 0),
+      total_tokens: Number(dm.tokens_in || 0) + Number(dm.tokens_out || 0),
+      edits: Number(dm.edits || 0),
+      changed_lines: Number(dm.changed_lines || 0),
+      tool_calls: Number(dm.tool_calls || 0),
+      tool_errors: Number(dm.tool_errors || 0),
+      api_cost: Number(dm.api_cost || 0),
+    })),
     punch,
     activity,
     topTools,
@@ -576,7 +613,13 @@ export async function buildTeamStats(
     recentLogs,
     modelPricing,
     memberModels,
-    totals,
+    totals: {
+      ...totals,
+      toolErrorRate: totals.toolCalls > 0 ? totals.toolErrors / totals.toolCalls : 0,
+      totalTools: totals.toolCalls,
+      totalToolCalls: totals.toolCalls,
+      totalToolErrors: totals.toolErrors,
+    },
   };
   });
 }

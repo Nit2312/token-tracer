@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+@theme {
+  --color-page: var(--page);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-overlay: var(--overlay);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-muted: var(--muted);
+  --color-grid: var(--grid);
+  --color-border: var(--border);
+  --color-brand: var(--brand);
+  --color-brand-hi: var(--brand-hi);
+  --color-brand-dim: var(--brand-dim);
+  --color-brand-ink: var(--brand-ink);
+  --color-ser-in: var(--ser-in);
+  --color-ser-out: var(--ser-out);
+  --color-good: var(--good);
+  --color-critical: var(--critical);
+  --color-heat-1: var(--heat-1);
+  --color-heat-2: var(--heat-2);
+  --color-heat-3: var(--heat-3);
+  --color-heat-4: var(--heat-4);
+  --color-heat-5: var(--heat-5);
+  --color-wash: var(--wash);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+
+  --font-display: var(--font-display);
+  --font-body: var(--font-body);
+  --font-mono: var(--font-mono);
+}
+
+/* Base resets & utilities for SVG sizing safety */
+svg {
+  display: inline-block;
+  vertical-align: middle;
+}

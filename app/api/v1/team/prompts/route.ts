@@ -6,7 +6,7 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
   try {
-    const rawTeamId = req.nextUrl.searchParams.get('teamId');
+    const rawTeamId = req.nextUrl.searchParams.get('teamId') || req.nextUrl.searchParams.get('team_id');
     const teamId = getAuthorizedTeamId(req, rawTeamId);
     if (!teamId) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
 
@@ -99,6 +99,8 @@ export async function GET(req: NextRequest) {
         st.model,
         st.tool,
         COALESCE(m.display_name, 'Unknown User') AS "userName",
+        ss.member_id AS "memberId",
+        COALESCE(ss.agent, 'default') AS "project",
         ss.started_at AS "createdAt"
       FROM session_turns st
       JOIN sync_sessions ss ON ss.session_id = st.session_id

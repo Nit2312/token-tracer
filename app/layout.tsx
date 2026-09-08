@@ -1,4 +1,6 @@
 import type { Metadata } from 'next';
+import './globals.css';
+import { Toaster } from '@/components/ui/sonner';
 
 export const metadata: Metadata = {
   title: 'Visualisation Dashboard — cross-agent intelligence',
@@ -21,6 +23,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </button>
         </div>
         {children}
+        <Toaster position="bottom-right" richColors />
       </body>
     </html>
   );
