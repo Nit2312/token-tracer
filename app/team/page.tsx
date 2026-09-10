@@ -14,7 +14,7 @@ export default async function TeamDashboardPage() {
   const cookieStore = await cookies();
   const session = getSessionFromCookie(cookieStore.toString());
 
-  if (!session || (session.role !== 'admin' && session.role !== 'superadmin' && session.role !== 'user')) {
+  if (!session || (session.role !== 'admin' && session.role !== 'superadmin')) {
     redirect('/');
   }
 

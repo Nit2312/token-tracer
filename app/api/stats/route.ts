@@ -19,7 +19,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
 import { query } from '@/lib/team/db';
 import { normalizeDateParam } from '@/lib/analytics.mjs';
-import { statsCache } from '@/lib/team/cache';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -104,27 +103,37 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // ── Timezone resolution ──────────────────────────────────────────────────
+    const tzParam = url.searchParams.get('tz') || 'UTC';
+    let validTz = 'UTC';
+    try {
+      Intl.DateTimeFormat(undefined, { timeZone: tzParam });
+      validTz = tzParam;
+    } catch {
+      validTz = 'UTC';
+    }
+
     // ── Build parameterised WHERE clauses ────────────────────────────────────
-    const params: unknown[] = [memberId];
+    const params: unknown[] = [memberId, validTz];
+    const tzIdx = 2;
     let dateFilter = '';
     if (!useAll) {
-      if (from) { params.push(from); dateFilter += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date >= $${params.length}::date`; }
-      if (to)   { params.push(to);   dateFilter += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date <= $${params.length}::date`; }
+      if (from) { params.push(from); dateFilter += ` AND (COALESCE(s.ended_at, s.started_at, s.synced_at) AT TIME ZONE $${tzIdx})::date >= $${params.length}::date`; }
+      if (to)   { params.push(to);   dateFilter += ` AND (COALESCE(s.ended_at, s.started_at, s.synced_at) AT TIME ZONE $${tzIdx})::date <= $${params.length}::date`; }
     }
     if (src && src !== 'all') { params.push(src); dateFilter += ` AND s.source = $${params.length}`; }
 
-    const cacheKey = `personal_stats_${memberId}_${from || ''}_${to || ''}_${src || ''}_${useAll ? '1' : '0'}`;
-    const result = await statsCache.getOrSet(cacheKey, 60, async () => {
-      // ── Fire all independent queries in parallel ──────────────────────────────
-      const [
-        totalsRes,
-        perDayRes,
-        perSourceRes,
-        perModelRes,
-        topToolsRes,
-        perHourRes,
-        topFilesRes,
-      ] = await Promise.all([
+    // ── Fire all independent queries in parallel ──────────────────────────────
+    const [
+      totalsRes,
+      perDayRes,
+      perSourceRes,
+      perModelRes,
+      topToolsRes,
+      perHourRes,
+      topFilesRes,
+      projectRollupRes,
+    ] = await Promise.all([
         // 1. Aggregate totals — use effective tokens (with approximation for zero-token sessions)
         query(`
           SELECT
@@ -151,10 +160,10 @@ export async function GET(req: NextRequest) {
           WHERE s.member_id = $1 ${dateFilter}
         `, params),
 
-        // 2. Per-day breakdown — effective tokens for chart
+        // 2. Per-day breakdown in user's timezone — effective tokens for chart
         query(`
           SELECT
-            COALESCE(s.ended_at, s.started_at, s.synced_at)::date AS date,
+            TO_CHAR((COALESCE(s.ended_at, s.started_at, s.synced_at) AT TIME ZONE $${tzIdx})::date, 'YYYY-MM-DD') AS date,
             count(*)::int AS sessions,
             coalesce(sum(${EFF_IN}), 0)::bigint AS tokens_in,
             coalesce(sum(${EFF_OUT}), 0)::bigint AS tokens_out,
@@ -212,12 +221,15 @@ export async function GET(req: NextRequest) {
           GROUP BY t.tool_name ORDER BY count DESC LIMIT 20
         `, params),
 
-        // 6. Hourly activity punch-card (weekday 0-6, hour 0-23)
+        // 6. Hourly activity punch-card & velocity in user's timezone (weekday 0-6, hour 0-23)
         query(`
           SELECT
-            EXTRACT(DOW FROM COALESCE(s.ended_at, s.started_at, s.synced_at))::int AS weekday,
-            EXTRACT(HOUR FROM COALESCE(s.ended_at, s.started_at, s.synced_at))::int AS hour,
-            count(*)::int AS n
+            EXTRACT(DOW FROM (COALESCE(s.ended_at, s.started_at, s.synced_at) AT TIME ZONE $${tzIdx}))::int AS weekday,
+            EXTRACT(HOUR FROM (COALESCE(s.ended_at, s.started_at, s.synced_at) AT TIME ZONE $${tzIdx}))::int AS hour,
+            count(*)::int AS n,
+            coalesce(sum(${EFF_IN}), 0)::bigint AS tokens_in,
+            coalesce(sum(${EFF_OUT}), 0)::bigint AS tokens_out,
+            coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache
           FROM sync_sessions s
           WHERE s.member_id = $1 ${dateFilter}
           GROUP BY 1, 2
@@ -234,8 +246,25 @@ export async function GET(req: NextRequest) {
             count(DISTINCT s.id)::int AS sessions
           FROM sync_session_files f
           JOIN sync_sessions s ON s.id = f.sync_session_id
-          WHERE s.member_id = $1 ${dateFilter}
-          GROUP BY f.path ORDER BY changed_lines DESC LIMIT 50
+          WHERE (s.member_id = $1 OR s.team_id IN (SELECT tm.team_id FROM team_members tm WHERE tm.member_id = $1)) ${dateFilter}
+          GROUP BY f.path ORDER BY changed_lines DESC, edits DESC LIMIT 50
+        `, params),
+
+        // 8. Project rollup (across projects/repos)
+        query(`
+          SELECT
+            COALESCE(s.agent, 'default') AS project,
+            count(s.id)::int AS sessions,
+            coalesce(sum(${EFF_IN}), 0)::bigint AS tokens_in,
+            coalesce(sum(${EFF_OUT}), 0)::bigint AS tokens_out,
+            coalesce(sum(s.tokens_cache_read), 0)::bigint AS tokens_cache_read,
+            coalesce(sum(s.api_cost), 0)::float AS api_cost,
+            coalesce(sum(s.edits), 0)::int AS edits,
+            coalesce(sum(s.changed_lines), 0)::int AS changed_lines
+          FROM sync_sessions s
+          WHERE (s.member_id = $1 OR s.team_id IN (SELECT tm.team_id FROM team_members tm WHERE tm.member_id = $1)) ${dateFilter}
+          GROUP BY COALESCE(s.agent, 'default')
+          ORDER BY api_cost DESC, sessions DESC
         `, params),
       ]);
 
@@ -246,19 +275,45 @@ export async function GET(req: NextRequest) {
       const topToolRows = topToolsRes.rows;
       const perHourRows = perHourRes.rows;
       const topFileRows = topFilesRes.rows;
+      const projectRollupRows = projectRollupRes.rows;
 
-      // ── Build punch-card grid ────────────────────────────────────────────────
+      // ── Build punch-card grid & hourly velocity ──────────────────────────────
       const punch: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
+      const hourly = Array.from({ length: 24 }, (_, h) => ({
+        hour: h,
+        label: `${String(h).padStart(2, '0')}:00`,
+        tokensIn: 0,
+        tokensOut: 0,
+        tokensCache: 0,
+        sessions: 0,
+      }));
+
       for (const r of perHourRows) {
         const w = Number(r.weekday);
         const h = Number(r.hour);
-        if (w >= 0 && w < 7 && h >= 0 && h < 24) punch[w][h] += Number(r.n);
+        if (w >= 0 && w < 7 && h >= 0 && h < 24) {
+          punch[w][h] += Number(r.n);
+        }
+        if (h >= 0 && h < 24) {
+          hourly[h].tokensIn += Number(r.tokens_in || 0);
+          hourly[h].tokensOut += Number(r.tokens_out || 0);
+          hourly[h].tokensCache += Number(r.tokens_cache || 0);
+          hourly[h].sessions += Number(r.n || 0);
+        }
       }
 
       // ── Build per-day series with date gap-filling ────────────────────────────
       const dayMap = new Map<string, any>();
       for (const r of perDayRows) {
-        const k = String(r.date).slice(0, 10);
+        let k = '';
+        if (r.date instanceof Date) {
+          const y = r.date.getUTCFullYear();
+          const m = String(r.date.getUTCMonth() + 1).padStart(2, '0');
+          const d = String(r.date.getUTCDate()).padStart(2, '0');
+          k = `${y}-${m}-${d}`;
+        } else {
+          k = String(r.date).slice(0, 10);
+        }
         dayMap.set(k, {
           date: k,
           sessions: Number(r.sessions),
@@ -280,15 +335,20 @@ export async function GET(req: NextRequest) {
       const seriesTo = to || (allKeys[allKeys.length - 1] ?? new Date().toISOString().slice(0, 10));
       const series: any[] = [];
       {
-        const cur = new Date(`${seriesFrom}T00:00:00`);
-        const end = new Date(`${seriesTo}T00:00:00`);
+        const [fy, fm, fd] = seriesFrom.split('-').map(Number);
+        const [ty, tm, td] = seriesTo.split('-').map(Number);
+        const cur = new Date(Date.UTC(fy, (fm || 1) - 1, fd || 1));
+        const end = new Date(Date.UTC(ty, (tm || 1) - 1, td || 1));
         while (cur <= end) {
-          const k = cur.toISOString().slice(0, 10);
+          const y = cur.getUTCFullYear();
+          const m = String(cur.getUTCMonth() + 1).padStart(2, '0');
+          const d = String(cur.getUTCDate()).padStart(2, '0');
+          const k = `${y}-${m}-${d}`;
           series.push(dayMap.get(k) ?? {
             date: k, sessions: 0, tokensIn: 0, tokensOut: 0, tokensCache: 0,
             tokensCacheWrite: 0, apiCost: 0, edits: 0, additions: 0, deletions: 0, toolCalls: 0,
           });
-          cur.setDate(cur.getDate() + 1);
+          cur.setUTCDate(cur.getUTCDate() + 1);
         }
       }
 
@@ -400,7 +460,7 @@ export async function GET(req: NextRequest) {
       const totalEdits = Number(totals?.edits ?? 0);
 
       // ── Assemble final response matching buildStats() shape ──────────────────
-      return {
+      const result = {
         window: { from: from ?? null, to: to ?? null, all: useAll },
 
         totals: {
@@ -459,6 +519,8 @@ export async function GET(req: NextRequest) {
 
         perDay: series,
 
+        hourly,
+
         punch,
 
         sources: perSourceRows.map((r: any) => ({
@@ -484,6 +546,21 @@ export async function GET(req: NextRequest) {
           errors: 0,
         })),
 
+        projectRollup: projectRollupRows.map((r: any) => ({
+          project: r.project,
+          name: r.project,
+          sessions: Number(r.sessions),
+          tokens_in: Number(r.tokens_in),
+          tokens_out: Number(r.tokens_out),
+          tokens: Number(r.tokens_in) + Number(r.tokens_out),
+          tokens_cache_read: Number(r.tokens_cache_read || 0),
+          api_cost: Number(r.api_cost),
+          edits: Number(r.edits),
+          changed_lines: Number(r.changed_lines),
+        })),
+
+        topFiles: fileRows,
+
         records: {
           longestSession: null,
           busiestDay: busiestDay && busiestDay.toolCalls > 0 ? busiestDay : null,
@@ -492,11 +569,21 @@ export async function GET(req: NextRequest) {
           streak,
         },
       };
-    });
 
-    return NextResponse.json(result);
+      return NextResponse.json(result, {
+        headers: {
+          'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
+          'Pragma': 'no-cache',
+          'Expires': '0',
+        },
+      });
   } catch (err) {
     console.error('[stats GET error]', err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: String(err) }, {
+      status: 500,
+      headers: {
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+      },
+    });
   }
 }

@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import '@/public/team/team.css';
 import './globals.css';
 import { Toaster } from '@/components/ui/sonner';
 
@@ -11,10 +12,6 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <head>
-        <link rel="stylesheet" href="/style.css" />
-        <link rel="stylesheet" href="/team/team.css" />
-      </head>
       <body suppressHydrationWarning>
         <div id="impersonation-banner" className="impersonation-banner" hidden>
           <span id="impersonation-text">You are logged in as</span>

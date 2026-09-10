@@ -1,5 +1,53 @@
 @import "tailwindcss";
 
+@source "../app";
+@source "../components";
+@source "../lib";
+
+:root {
+  color-scheme: dark;
+  --page: #100d0a;
+  --surface: #171310;
+  --raised: #1f1913;
+  --overlay: #0b0907;
+  --ink: #f2ecdf;
+  --ink-2: #c7bead;
+  --muted: #8a8172;
+  --grid: #272019;
+  --border: rgba(242, 236, 223, 0.09);
+  --brand: #e2a355;
+  --brand-hi: #f0bd75;
+  --brand-dim: rgba(226, 163, 85, 0.13);
+  --brand-ink: #1c1206;
+  --ser-in: #3987e5;
+  --ser-out: #d55181;
+  --good: #0ca30c;
+  --critical: #d03b3b;
+  --heat-1: #2b2013;
+  --heat-2: #4d3818;
+  --heat-3: #7d5822;
+  --heat-4: #b17d31;
+  --heat-5: #eab157;
+  --wash: rgba(242, 236, 223, 0.05);
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 10px 30px rgba(0, 0, 0, 0.35);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.28);
+  --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.45);
+  --radius-sm: 6px;
+  --radius-md: 9px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --font-display: "New York", "Iowan Old Style", ui-serif, Georgia, serif;
+  --font-body: -apple-system, system-ui, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+}
+
 @theme {
   --color-page: var(--page);
   --color-surface: var(--surface);
@@ -35,8 +83,28 @@
   --font-mono: var(--font-mono);
 }
 
-/* Base resets & utilities for SVG sizing safety */
+/* Base resets */
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
 svg {
   display: inline-block;
   vertical-align: middle;
 }
+
+/* Keyframe animations support for Tailwind */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-in {
+  animation: fadeIn 0.25s ease-out forwards;
+}
+
+
