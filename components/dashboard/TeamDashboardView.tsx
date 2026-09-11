@@ -161,6 +161,94 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
   const [selectedPromptProject, setSelectedPromptProject] = React.useState<string>('all');
   const [dailyChartMetric, setDailyChartMetric] = React.useState<'tokens' | 'cost' | 'sessions'>('tokens');
   const [hoveredDailyIndex, setHoveredDailyIndex] = React.useState<number | null>(null);
+
+  // Prompt Deletion State (Admin Only)
+  const [deletingPrompt, setDeletingPrompt] = React.useState<any | null>(null);
+  const [isDeletingPrompt, setIsDeletingPrompt] = React.useState(false);
+  const [selectedPromptIds, setSelectedPromptIds] = React.useState<string[]>([]);
+  const [showBatchDeleteModal, setShowBatchDeleteModal] = React.useState(false);
+  const [isBatchDeleting, setIsBatchDeleting] = React.useState(false);
+
+  const toggleSelectPromptId = (id: string) => {
+    setSelectedPromptIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  };
+
+  const selectAllFilteredPrompts = (ids: string[]) => {
+    setSelectedPromptIds(ids);
+  };
+
+  const clearPromptSelection = () => {
+    setSelectedPromptIds([]);
+  };
+
+  const handleDeleteSinglePrompt = async (promptToDelete: any) => {
+    if (!promptToDelete) return;
+    setIsDeletingPrompt(true);
+    try {
+      const res = await fetch('/api/v1/team/prompts', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: promptToDelete.id,
+          sessionId: promptToDelete.sessionId,
+          turnIndex: promptToDelete.turnIndex,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to delete prompt');
+      }
+      toast.success('Prompt permanently deleted');
+      setDbPrompts((prev) =>
+        prev.filter((p) => {
+          if (promptToDelete.id && p.id === promptToDelete.id) return false;
+          if (promptToDelete.sessionId && p.sessionId === promptToDelete.sessionId) {
+            if (promptToDelete.turnIndex !== undefined && p.turnIndex === promptToDelete.turnIndex) {
+              return false;
+            }
+          }
+          return true;
+        })
+      );
+      setSelectedPromptIds((prev) => prev.filter((id) => id !== String(promptToDelete.id)));
+      if (inspectingPrompt?.id === promptToDelete.id) {
+        setInspectingPrompt(null);
+      }
+      setDeletingPrompt(null);
+      fetchTeamData();
+    } catch (err: any) {
+      toast.error(err.message || 'Error deleting prompt');
+    } finally {
+      setIsDeletingPrompt(false);
+    }
+  };
+
+  const handleBatchDeletePrompts = async () => {
+    if (selectedPromptIds.length === 0) return;
+    setIsBatchDeleting(true);
+    try {
+      const res = await fetch('/api/v1/team/prompts', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: selectedPromptIds }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to delete selected prompts');
+      }
+      toast.success(`Successfully deleted ${selectedPromptIds.length} prompts`);
+      setDbPrompts((prev) => prev.filter((p) => !selectedPromptIds.includes(String(p.id))));
+      setSelectedPromptIds([]);
+      setShowBatchDeleteModal(false);
+      fetchTeamData();
+    } catch (err: any) {
+      toast.error(err.message || 'Error deleting selected prompts');
+    } finally {
+      setIsBatchDeleting(false);
+    }
+  };
   
   // Day-wise local developer analysis & comparison state
   const [dailySelectedMemberIds, setDailySelectedMemberIds] = React.useState<string[]>([]);
@@ -711,6 +799,8 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
     if (dbPrompts.length > 0) {
       return dbPrompts.map((p: any) => ({
         id: p.id,
+        sessionId: p.sessionId,
+        turnIndex: p.turnIndex,
         developerName: p.userName || 'Developer',
         developerHandle: `@${(p.userName || 'dev').toLowerCase().replace(/\s+/g, '-')}`,
         developerAvatar: (p.userName || 'DV').slice(0, 2).toUpperCase(),
@@ -730,6 +820,7 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
     }
     return developerRoster.flatMap(d => d.prompts.map(p => ({
       ...p,
+      id: p.id || `mock-${d.displayName}-${p.time}`,
       developerName: d.displayName,
       developerHandle: d.handle,
       developerAvatar: d.displayName.slice(0, 2).toUpperCase()
@@ -2788,6 +2879,13 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
                                   >
                                     Expand ↗
                                   </button>
+                                  <button
+                                    onClick={() => setDeletingPrompt({ ...p, developerName: activeSelected.displayName, developerAvatar: activeSelected.displayName.slice(0, 2).toUpperCase() })}
+                                    className="text-xs text-rose-400/80 hover:text-rose-300 flex items-center gap-1 hover:underline ml-1"
+                                    title="Delete this prompt"
+                                  >
+                                    <Trash2 className="h-3 w-3" /> Delete
+                                  </button>
                                 </div>
                               </div>
 
@@ -2883,17 +2981,66 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
                 </div>
               </div>
 
+              {/* Batch Actions Bar */}
+              {selectedPromptIds.length > 0 && (
+                <div className="p-3.5 rounded-2xl bg-gradient-to-r from-rose-950/60 via-[#1c1712] to-amber-950/40 border border-rose-500/30 shadow-2xl backdrop-blur-xl flex items-center justify-between gap-3 flex-wrap animate-fadeIn">
+                  <div className="flex items-center gap-3">
+                    <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-rose-500/20 text-rose-300 text-xs font-mono font-bold">
+                      {selectedPromptIds.length}
+                    </span>
+                    <span className="text-xs font-mono text-[#f5efe6]">
+                      <strong>{selectedPromptIds.length}</strong> prompt{selectedPromptIds.length > 1 ? 's' : ''} selected
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => selectAllFilteredPrompts(filteredPrompts.map((p) => String(p.id)).filter(Boolean))}
+                      className="h-8 text-xs font-mono text-[#cbbfad] hover:text-white hover:bg-[#1c1712]"
+                    >
+                      Select All Filtered ({filteredPrompts.length})
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={clearPromptSelection}
+                      className="h-8 text-xs font-mono text-[#8e8473] hover:text-white"
+                    >
+                      Clear
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => setShowBatchDeleteModal(true)}
+                      className="h-8 text-xs font-mono bg-rose-600 hover:bg-rose-500 text-white font-bold flex items-center gap-1.5 rounded-xl shadow-lg shadow-rose-900/30"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Delete Selected ({selectedPromptIds.length})
+                    </Button>
+                  </div>
+                </div>
+              )}
+
               {/* Prompt Stream List (Paginated) */}
               <div className="space-y-4">
                 {paginatedPrompts.length > 0 ? (
                   paginatedPrompts.map((p: any, idx: number) => {
-                    const promptKey = p.id || `prompt-${(promptPage - 1) * promptPageSize + idx}`;
+                    const promptKey = p.id ? String(p.id) : `prompt-${(promptPage - 1) * promptPageSize + idx}`;
                     const isCollapsed = Boolean(collapsedPromptIds[promptKey]);
+                    const isSelected = p.id ? selectedPromptIds.includes(String(p.id)) : false;
 
                     return (
-                      <div key={idx} className="p-6 rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl space-y-4">
+                      <div key={idx} className={`p-6 rounded-2xl bg-[#14100c]/90 border ${isSelected ? 'border-rose-500/40 shadow-rose-950/20' : 'border-[rgba(242,236,223,0.08)]'} shadow-xl backdrop-blur-xl space-y-4 transition-all`}>
                         <div className="flex items-center justify-between flex-wrap gap-3">
                           <div className="flex items-center gap-3">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => p.id && toggleSelectPromptId(String(p.id))}
+                              className="h-4 w-4 rounded border-[rgba(242,236,223,0.2)] bg-[#1c1712] accent-[#e2a355] cursor-pointer"
+                              title="Select for batch delete"
+                            />
                             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-tr from-[#e2a355] to-[#f5c485] text-[#170f05] font-bold text-xs font-mono">
                               {p.developerAvatar}
                             </div>
@@ -2909,7 +3056,7 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
                             </span>
                           </div>
 
-                          <div className="flex items-center gap-3 font-mono text-xs">
+                          <div className="flex items-center gap-2 font-mono text-xs">
                             <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                               {p.status}
                             </span>
@@ -2922,6 +3069,16 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
                               className="h-7 text-xs text-[#e2a355] hover:bg-[#e2a355]/10"
                             >
                               Inspect ↗
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => setDeletingPrompt(p)}
+                              className="h-7 text-xs text-[#8e8473] hover:text-rose-400 hover:bg-rose-500/10 px-2"
+                              title="Delete prompt"
+                            >
+                              <Trash2 className="h-3.5 w-3.5 mr-1" />
+                              Delete
                             </Button>
                           </div>
                         </div>
@@ -4143,7 +4300,19 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
               </div>
             </div>
 
-            <div className="pt-2 flex justify-end">
+            <div className="pt-2 flex items-center justify-between gap-3">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  const promptToDel = inspectingPrompt;
+                  setDeletingPrompt(promptToDel);
+                }}
+                className="border-rose-500/30 text-rose-400 hover:text-white hover:bg-rose-600/20 text-xs font-mono flex items-center gap-1.5"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Delete Prompt
+              </Button>
               <Button size="sm" onClick={() => setInspectingPrompt(null)} className="bg-[#1c1712] text-white text-xs">
                 Close
               </Button>
@@ -4245,6 +4414,143 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
                 className="bg-gradient-to-r from-[#e2a355] to-[#f5c485] text-[#170f05] font-bold text-xs rounded-xl shadow-lg shadow-[#e2a355]/20"
               >
                 Apply Date Range
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 5. Delete Single Prompt Confirmation Modal */}
+      {deletingPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-fadeIn">
+          <div className="w-full max-w-lg rounded-2xl bg-[#14100c] border border-rose-500/40 shadow-2xl shadow-rose-950/40 p-6 space-y-5 animate-scaleUp">
+            <div className="flex items-start gap-4">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-rose-500/15 border border-rose-500/30 text-rose-400">
+                <Trash2 className="h-5 w-5" />
+              </div>
+              <div className="space-y-1 flex-1">
+                <h3 className="text-base font-bold font-mono text-white">Permanently Delete Prompt?</h3>
+                <p className="text-xs text-[#8e8473]">
+                  This action cannot be undone. The prompt text and associated turn telemetry will be purged from the database.
+                </p>
+              </div>
+              <button
+                onClick={() => setDeletingPrompt(null)}
+                className="text-[#8e8473] hover:text-white transition-colors"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Prompt details card */}
+            <div className="rounded-xl bg-[#0d0a07] border border-[rgba(242,236,223,0.08)] p-4 space-y-3 font-mono text-xs">
+              <div className="flex items-center justify-between text-[#cbbfad]">
+                <div className="flex items-center gap-2">
+                  <div className="flex h-6 w-6 items-center justify-center rounded-lg bg-gradient-to-tr from-[#e2a355] to-[#f5c485] text-[#170f05] font-bold text-[10px]">
+                    {deletingPrompt.developerAvatar || 'DV'}
+                  </div>
+                  <span className="font-bold text-white">{deletingPrompt.developerName}</span>
+                </div>
+                <span className="text-[#f5c485]">{deletingPrompt.model}</span>
+              </div>
+
+              <div className="p-3 rounded-lg bg-[#14100c] border border-[rgba(242,236,223,0.04)] text-[#cbbfad] text-[11px] leading-relaxed line-clamp-3">
+                &ldquo;{deletingPrompt.text}&rdquo;
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-[#8e8473]">
+                <span>{deletingPrompt.time || 'Recently recorded'}</span>
+                <span>{formatCompactNumber(deletingPrompt.tokens)} tokens (${deletingPrompt.cost})</span>
+              </div>
+            </div>
+
+            {/* Action buttons */}
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setDeletingPrompt(null)}
+                disabled={isDeletingPrompt}
+                className="text-xs font-mono text-[#8e8473] hover:text-white"
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => handleDeleteSinglePrompt(deletingPrompt)}
+                disabled={isDeletingPrompt}
+                className="bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs font-mono rounded-xl shadow-lg shadow-rose-900/30 flex items-center gap-1.5"
+              >
+                {isDeletingPrompt ? (
+                  <>
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    Deleting...
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Confirm Delete
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 6. Batch Delete Confirmation Modal */}
+      {showBatchDeleteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-fadeIn">
+          <div className="w-full max-w-md rounded-2xl bg-[#14100c] border border-rose-500/40 shadow-2xl shadow-rose-950/40 p-6 space-y-5 animate-scaleUp">
+            <div className="flex items-start gap-4">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-rose-500/15 border border-rose-500/30 text-rose-400">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div className="space-y-1 flex-1">
+                <h3 className="text-base font-bold font-mono text-white">Delete {selectedPromptIds.length} Selected Prompts?</h3>
+                <p className="text-xs text-[#8e8473]">
+                  Are you sure you want to permanently delete all {selectedPromptIds.length} selected prompt records? This action cannot be reversed.
+                </p>
+              </div>
+              <button
+                onClick={() => setShowBatchDeleteModal(false)}
+                className="text-[#8e8473] hover:text-white transition-colors"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="p-4 rounded-xl bg-[#0d0a07] border border-rose-500/20 text-xs font-mono text-rose-300">
+              ⚠️ {selectedPromptIds.length} developer prompt turns will be permanently purged from database tables and analytics rollups.
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowBatchDeleteModal(false)}
+                disabled={isBatchDeleting}
+                className="text-xs font-mono text-[#8e8473] hover:text-white"
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleBatchDeletePrompts}
+                disabled={isBatchDeleting}
+                className="bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs font-mono rounded-xl shadow-lg shadow-rose-900/30 flex items-center gap-1.5"
+              >
+                {isBatchDeleting ? (
+                  <>
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    Deleting All...
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Delete All ({selectedPromptIds.length})
+                  </>
+                )}
               </Button>
             </div>
           </div>

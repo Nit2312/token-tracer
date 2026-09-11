@@ -129,24 +129,63 @@
         <td style="color: #60a5fa;">${Number(p.cacheRead || 0).toLocaleString()}</td>
         <td style="color: #34d399;">${Number(p.cacheWrite || 0).toLocaleString()}</td>
         <td>${new Date(p.createdAt).toLocaleDateString()}</td>
-        <td style="color: var(--brand); font-weight: 500; font-size: 12px;">View 📂</td>
+        <td style="white-space: nowrap;">
+          <button type="button" class="btn-toggle-view" data-idx="${idx}" style="background: none; border: none; color: var(--brand); font-weight: 500; font-size: 12px; cursor: pointer; padding: 2px 4px;">View 📂</button>
+          <button type="button" class="btn-delete-prompt" data-idx="${idx}" style="background: none; border: none; color: #ef4444; font-size: 12px; cursor: pointer; padding: 2px 4px; margin-left: 4px;" title="Delete this prompt">🗑️</button>
+        </td>
       </tr>
     `).join('');
 
-    // Setup accordion toggles
+    // Setup accordion toggles & delete buttons
     tbody.querySelectorAll('.prompt-explorer-row').forEach(row => {
-      row.addEventListener('click', () => {
-        const idx = Number(row.dataset.idx);
-        const p = prompts[idx];
+      const idx = Number(row.dataset.idx);
+      const p = prompts[idx];
+
+      const toggleBtn = row.querySelector('.btn-toggle-view');
+      const deleteBtn = row.querySelector('.btn-delete-prompt');
+
+      deleteBtn?.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Are you sure you want to permanently delete this prompt from ${p.userName}?\n\n"${(p.promptText || '').slice(0, 100)}..."`)) {
+          return;
+        }
+
+        try {
+          deleteBtn.disabled = true;
+          deleteBtn.textContent = '⏳';
+          const res = await fetch('/api/admin/prompts', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              id: p.id,
+              sessionId: p.sessionId,
+              turnIndex: p.turnIndex,
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'Failed to delete prompt');
+
+          alert('Prompt permanently deleted.');
+          loadPrompts();
+        } catch (err) {
+          alert('Error deleting prompt: ' + err.message);
+          deleteBtn.disabled = false;
+          deleteBtn.textContent = '🗑️';
+        }
+      });
+
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('.btn-delete-prompt')) return;
         const nextRow = row.nextElementSibling;
 
         if (nextRow && nextRow.classList.contains('prompt-explore-detail-row')) {
           nextRow.remove();
-          row.querySelector('td:last-child').textContent = 'View 📂';
+          if (toggleBtn) toggleBtn.textContent = 'View 📂';
         } else {
           // Remove any other open details
           tbody.querySelectorAll('.prompt-explore-detail-row').forEach(el => {
-            el.previousElementSibling.querySelector('td:last-child').textContent = 'View 📂';
+            const prevToggle = el.previousElementSibling?.querySelector('.btn-toggle-view');
+            if (prevToggle) prevToggle.textContent = 'View 📂';
             el.remove();
           });
 
@@ -156,13 +195,20 @@
           detailRow.innerHTML = `
             <td colspan="11" style="padding: 16px 20px; text-align: left;">
               <div style="background: rgba(255,255,255,0.01); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px;">
-                <div style="font-size: 11px; font-weight: 600; color: var(--brand); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.05em;">Prompt Content (Turn #${p.turnIndex})</div>
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                  <div style="font-size: 11px; font-weight: 600; color: var(--brand); text-transform: uppercase; letter-spacing: 0.05em;">Prompt Content (Turn #${p.turnIndex})</div>
+                  <button type="button" class="btn-detail-delete" style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); color: #f87171; border-radius: 4px; padding: 4px 10px; font-size: 11px; font-weight: 600; cursor: pointer;">🗑️ Delete Prompt</button>
+                </div>
                 <pre style="white-space: pre-wrap; font-family: var(--font-mono); font-size: 12px; margin: 0; max-height: 250px; overflow-y: auto; color: var(--ink); line-height: 1.5; padding: 4px 0;">${esc(p.promptText || '—')}</pre>
               </div>
             </td>
           `;
           row.after(detailRow);
-          row.querySelector('td:last-child').textContent = 'Hide ❌';
+          if (toggleBtn) toggleBtn.textContent = 'Hide ❌';
+
+          detailRow.querySelector('.btn-detail-delete')?.addEventListener('click', () => {
+            deleteBtn?.click();
+          });
         }
       });
     });

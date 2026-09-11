@@ -233,3 +233,178 @@ export async function GET(req: NextRequest) {
     });
   }
 }
+
+export async function DELETE(req: NextRequest) {
+  try {
+    const session = getSessionFromCookie(req.headers.get('cookie'));
+
+    let isSuperAdmin = false;
+    let authorizedTeamId: string | null = null;
+
+    if (session) {
+      if (session.role === 'superadmin') {
+        isSuperAdmin = true;
+      } else if (session.role === 'admin') {
+        authorizedTeamId = session.teamId || null;
+      } else {
+        return NextResponse.json(
+          { error: 'Forbidden: Admin permissions required to delete prompts' },
+          { status: 403 }
+        );
+      }
+    } else {
+      const authHeader = req.headers.get('authorization');
+      let legacyToken = '';
+      if (authHeader?.startsWith('Bearer ')) {
+        legacyToken = authHeader.slice(7);
+      }
+      if (legacyToken) {
+        isSuperAdmin = true;
+      } else {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+    }
+
+    let ids: string[] = [];
+    let sessionId: string | null = null;
+    let turnIndex: number | null = null;
+
+    const urlId = req.nextUrl.searchParams.get('id');
+    const urlSessionId = req.nextUrl.searchParams.get('sessionId') || req.nextUrl.searchParams.get('session_id');
+    const urlTurnIndex = req.nextUrl.searchParams.get('turnIndex') || req.nextUrl.searchParams.get('turn_index');
+
+    if (urlId) {
+      ids.push(...urlId.split(',').map((s) => s.trim()).filter(Boolean));
+    }
+    if (urlSessionId) sessionId = urlSessionId;
+    if (urlTurnIndex !== null && urlTurnIndex !== undefined && urlTurnIndex !== '') {
+      turnIndex = Number(urlTurnIndex);
+    }
+
+    try {
+      const body = await req.json();
+      if (body) {
+        if (body.id) ids.push(String(body.id));
+        if (Array.isArray(body.ids)) ids.push(...body.ids.map((x: any) => String(x)));
+        if (body.sessionId || body.session_id) sessionId = body.sessionId || body.session_id;
+        if (body.turnIndex !== undefined && body.turnIndex !== null) turnIndex = Number(body.turnIndex);
+        if (body.turn_index !== undefined && body.turn_index !== null) turnIndex = Number(body.turn_index);
+      }
+    } catch {
+      // Body may be empty if query params were used
+    }
+
+    ids = Array.from(new Set(ids));
+
+    if (ids.length === 0 && !sessionId) {
+      return NextResponse.json({ error: 'Missing id, ids, or sessionId parameter' }, { status: 400 });
+    }
+
+    let deletedCount = 0;
+
+    if (ids.length > 0) {
+      const numericIds = ids.filter((id) => /^\d+$/.test(id)).map((id) => BigInt(id));
+      const nonNumericIds = ids.filter((id) => !/^\d+$/.test(id));
+
+      if (numericIds.length > 0) {
+        if (!isSuperAdmin && authorizedTeamId) {
+          const { rows: verifyRows } = await query(
+            `SELECT st.id
+             FROM session_turns st
+             LEFT JOIN sync_sessions ss ON ss.session_id = st.session_id
+             WHERE st.id = ANY($1::bigint[])
+               AND (ss.team_id = $2 OR ss.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $2))`,
+            [numericIds, authorizedTeamId]
+          );
+          if (verifyRows.length === 0) {
+            return NextResponse.json({ error: 'Forbidden: No authorized prompts found to delete' }, { status: 403 });
+          }
+        }
+
+        await query(`DELETE FROM prompt_embeddings WHERE turn_id = ANY($1::bigint[])`, [numericIds]);
+        await query(`DELETE FROM session_tool_errors WHERE turn_id = ANY($1::bigint[])`, [numericIds]);
+
+        const { rows: turnsRows } = await query(
+          `SELECT DISTINCT session_id, turn_index FROM session_turns WHERE id = ANY($1::bigint[])`,
+          [numericIds]
+        );
+
+        for (const row of turnsRows) {
+          await query(
+            `DELETE FROM redundant_reprompt_events WHERE session_id = $1 AND turn_index = $2`,
+            [row.session_id, row.turn_index]
+          );
+          await query(
+            `DELETE FROM session_turns WHERE session_id = $1 AND turn_index = $2`,
+            [row.session_id, row.turn_index]
+          );
+        }
+
+        const res = await query(`DELETE FROM session_turns WHERE id = ANY($1::bigint[])`, [numericIds]);
+        deletedCount += (res.rowCount || 0);
+      }
+
+      if (nonNumericIds.length > 0) {
+        if (!isSuperAdmin && authorizedTeamId) {
+          const res = await query(
+            `DELETE FROM sync_sessions WHERE session_id = ANY($1::text[]) AND (team_id = $2 OR member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $2))`,
+            [nonNumericIds, authorizedTeamId]
+          );
+          deletedCount += (res.rowCount || 0);
+        } else {
+          const res = await query(
+            `DELETE FROM sync_sessions WHERE session_id = ANY($1::text[])`,
+            [nonNumericIds]
+          );
+          deletedCount += (res.rowCount || 0);
+        }
+      }
+    }
+
+    if (sessionId) {
+      if (!isSuperAdmin && authorizedTeamId) {
+        const { rows: verifyRows } = await query(
+          `SELECT session_id FROM sync_sessions WHERE session_id = $1 AND (team_id = $2 OR member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $2))`,
+          [sessionId, authorizedTeamId]
+        );
+        if (verifyRows.length === 0) {
+          return NextResponse.json({ error: 'Forbidden: Session not found in your team' }, { status: 403 });
+        }
+      }
+
+      if (turnIndex !== null) {
+        const { rows: tRows } = await query(
+          `SELECT id FROM session_turns WHERE session_id = $1 AND turn_index = $2`,
+          [sessionId, turnIndex]
+        );
+        const turnIds = tRows.map((r) => r.id);
+        if (turnIds.length > 0) {
+          await query(`DELETE FROM prompt_embeddings WHERE turn_id = ANY($1::bigint[])`, [turnIds]);
+          await query(`DELETE FROM session_tool_errors WHERE turn_id = ANY($1::bigint[])`, [turnIds]);
+        }
+        await query(`DELETE FROM redundant_reprompt_events WHERE session_id = $1 AND turn_index = $2`, [sessionId, turnIndex]);
+        const res = await query(`DELETE FROM session_turns WHERE session_id = $1 AND turn_index = $2`, [sessionId, turnIndex]);
+        deletedCount += (res.rowCount || 0);
+      } else {
+        const { rows: tRows } = await query(`SELECT id FROM session_turns WHERE session_id = $1`, [sessionId]);
+        const turnIds = tRows.map((r) => r.id);
+        if (turnIds.length > 0) {
+          await query(`DELETE FROM prompt_embeddings WHERE turn_id = ANY($1::bigint[])`, [turnIds]);
+          await query(`DELETE FROM session_tool_errors WHERE turn_id = ANY($1::bigint[])`, [turnIds]);
+        }
+        await query(`DELETE FROM redundant_reprompt_events WHERE session_id = $1`, [sessionId]);
+        const res = await query(`DELETE FROM session_turns WHERE session_id = $1`, [sessionId]);
+        deletedCount += (res.rowCount || 0);
+      }
+    }
+
+    return NextResponse.json({
+      success: true,
+      deletedCount: Math.max(deletedCount, ids.length || 1),
+      message: 'Prompt(s) permanently deleted.'
+    });
+  } catch (err: any) {
+    console.error('[team-prompts DELETE error]', err);
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
+}

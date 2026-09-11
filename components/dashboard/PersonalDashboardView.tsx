@@ -31,7 +31,10 @@ import {
   ChevronUp,
   FileCode,
   FileText,
-  RefreshCw
+  RefreshCw,
+  Trash2,
+  X,
+  AlertTriangle
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { PersonalTokenForensicsView } from '@/components/dashboard/PersonalTokenForensicsView';
@@ -72,6 +75,49 @@ export function PersonalDashboardView({ user }: PersonalDashboardProps) {
   const [copiedPromptId, setCopiedPromptId] = React.useState<string | null>(null);
   const [refreshTrigger, setRefreshTrigger] = React.useState(0);
   const [isRefreshing, setIsRefreshing] = React.useState(false);
+
+  // Admin-only prompt deletion
+  const isAdmin = user.role === 'admin' || user.role === 'superadmin';
+  const [deletingPrompt, setDeletingPrompt] = React.useState<any | null>(null);
+  const [isDeletingPrompt, setIsDeletingPrompt] = React.useState(false);
+
+  const handleDeletePrompt = async (promptToDelete: any) => {
+    if (!promptToDelete) return;
+    setIsDeletingPrompt(true);
+    try {
+      const res = await fetch('/api/v1/team/prompts', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: promptToDelete.id,
+          sessionId: promptToDelete.sessionId,
+          turnIndex: promptToDelete.turnIndex,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to delete prompt');
+      }
+      toast.success('Prompt deleted successfully');
+      setPromptsList((prev) =>
+        prev.filter((p) => {
+          if (promptToDelete.id && String(p.id) === String(promptToDelete.id)) return false;
+          if (promptToDelete.sessionId && String(p.sessionId) === String(promptToDelete.sessionId)) {
+            if (promptToDelete.turnIndex !== undefined && p.turnIndex === promptToDelete.turnIndex) {
+              return false;
+            }
+          }
+          return true;
+        })
+      );
+      setDeletingPrompt(null);
+      handleManualRefresh();
+    } catch (err: any) {
+      toast.error(err.message || 'Error deleting prompt');
+    } finally {
+      setIsDeletingPrompt(false);
+    }
+  };
 
   const handleManualRefresh = () => {
     setIsRefreshing(true);
@@ -1187,6 +1233,19 @@ export function PersonalDashboardView({ user }: PersonalDashboardProps) {
                               >
                                 {isCopied ? <Check className="h-3.5 w-3.5 text-[#10b981]" /> : <Copy className="h-3.5 w-3.5" />}
                               </button>
+                              {isAdmin && (
+                                <button
+                                  type="button"
+                                  title="Delete prompt (Admin Only)"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setDeletingPrompt(p);
+                                  }}
+                                  className="p-1 rounded hover:bg-rose-500/15 text-[#8e8473] hover:text-rose-400 transition-colors ml-1"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 className="p-1 text-[#8e8473] hover:text-white transition-colors"
@@ -1338,6 +1397,77 @@ export function PersonalDashboardView({ user }: PersonalDashboardProps) {
           </div>
         </div>
       </>
+    )}
+
+    {/* Admin Delete Single Prompt Modal */}
+    {deletingPrompt && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in duration-150">
+        <div className="w-full max-w-lg rounded-2xl bg-[#14100c] border border-rose-500/40 shadow-2xl shadow-rose-950/40 p-6 space-y-5">
+          <div className="flex items-start gap-4">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-rose-500/15 border border-rose-500/30 text-rose-400">
+              <Trash2 className="h-5 w-5" />
+            </div>
+            <div className="space-y-1 flex-1">
+              <h3 className="text-base font-bold font-mono text-white">Permanently Delete Prompt?</h3>
+              <p className="text-xs text-[#8e8473]">
+                Admin Action: This prompt text and its token telemetry will be permanently removed from database records.
+              </p>
+            </div>
+            <button
+              onClick={() => setDeletingPrompt(null)}
+              className="text-[#8e8473] hover:text-white transition-colors"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+
+          <div className="rounded-xl bg-[#0d0a07] border border-[rgba(242,236,223,0.08)] p-4 space-y-3 font-mono text-xs">
+            <div className="flex items-center justify-between text-[#cbbfad]">
+              <span className="font-bold text-white">{deletingPrompt.model}</span>
+              <span className="text-[#f5c485]">{formatCompactNumber(deletingPrompt.totalTokens)} tokens</span>
+            </div>
+
+            <div className="p-3 rounded-lg bg-[#14100c] border border-[rgba(242,236,223,0.04)] text-[#cbbfad] text-[11px] leading-relaxed line-clamp-3">
+              &ldquo;{deletingPrompt.text}&rdquo;
+            </div>
+
+            <div className="flex items-center justify-between text-[11px] text-[#8e8473]">
+              <span>{deletingPrompt.createdAt || 'Recently recorded'}</span>
+              <span className="text-[#10b981]">{formatCurrency(deletingPrompt.cost)}</span>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-3 pt-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setDeletingPrompt(null)}
+              disabled={isDeletingPrompt}
+              className="text-xs font-mono text-[#8e8473] hover:text-white"
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => handleDeletePrompt(deletingPrompt)}
+              disabled={isDeletingPrompt}
+              className="bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs font-mono rounded-xl shadow-lg shadow-rose-900/30 flex items-center gap-1.5"
+            >
+              {isDeletingPrompt ? (
+                <>
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Confirm Delete
+                </>
+              )}
+            </Button>
+          </div>
+        </div>
+      </div>
     )}
   </main>
 </div>
