@@ -71,8 +71,10 @@ export function verifyAdminToken(token: string | null | undefined): boolean {
 export function adminTokenFromCookie(cookieHeader: string | undefined | null): string | null {
   if (!cookieHeader) return null;
   for (const part of cookieHeader.split(';')) {
-    const [k, v] = part.trim().split('=');
-    if (k === 'team_admin') return decodeURIComponent(v || '');
+    // BUG-18 fix: cookie values can contain '=' (common in base64 tokens).
+    // Use rest spread to capture the full value, matching getSessionFromCookie's pattern.
+    const [k, ...rest] = part.trim().split('=');
+    if (k === 'team_admin') return decodeURIComponent(rest.join('=') || '');
   }
   return null;
 }

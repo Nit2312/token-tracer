@@ -37,11 +37,12 @@ export async function GET(req: NextRequest) {
 
   if (isUuid(session.userId)) {
     const { rows: userRows } = await query(
-      `SELECT u.display_name, u.api_key, u.member_id, u.team_id FROM users u WHERE u.id = $1`,
+      // BUG-6 fix: Don't query users.api_key — raw keys should never be stored/read.
+      // The key is only shown once at creation time. The hash is in member_keys.
+      `SELECT u.display_name, u.member_id, u.team_id FROM users u WHERE u.id = $1`,
       [session.userId],
     );
     if (userRows[0]) {
-      apiKey = userRows[0].api_key ?? null;
       memberId = userRows[0].member_id ?? memberId;
       teamId = userRows[0].team_id ?? teamId;
       if (userRows[0].display_name) {

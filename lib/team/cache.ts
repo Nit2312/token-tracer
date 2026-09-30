@@ -30,12 +30,19 @@ class MemoryTtlCache {
 
   set<T>(key: string, value: T, ttlSeconds = 60): void {
     if (this.cache.size >= this.maxEntries) {
-      // Evict oldest or expired keys
+      // BUG-14 fix: The old condition `this.cache.size >= this.maxEntries` inside the
+      // loop was always true when entering, nuking the entire cache on every overflow.
+      // Now: first purge expired entries, then evict oldest if still full.
       const now = Date.now();
       for (const [k, v] of this.cache.entries()) {
-        if (now > v.expiresAt || this.cache.size >= this.maxEntries) {
+        if (now > v.expiresAt) {
           this.cache.delete(k);
         }
+      }
+      // If still at capacity after purging expired, evict the oldest entry
+      if (this.cache.size >= this.maxEntries) {
+        const firstKey = this.cache.keys().next().value;
+        if (firstKey !== undefined) this.cache.delete(firstKey);
       }
     }
 

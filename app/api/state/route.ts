@@ -102,10 +102,21 @@ export async function GET(req: NextRequest) {
     }
 
     const params: unknown[] = [memberId];
+    // BUG-10 fix: add timezone handling (matching the stats route pattern)
+    const tzParam = url.searchParams.get('tz') || 'UTC';
+    let validTz = 'UTC';
+    try {
+      Intl.DateTimeFormat(undefined, { timeZone: tzParam });
+      validTz = tzParam;
+    } catch {
+      validTz = 'UTC';
+    }
+    params.push(validTz); // $2
+    const tzIdx = 2;
     let dateFilter = '';
     if (!useAll) {
-      if (from) { params.push(from); dateFilter += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date >= $${params.length}::date`; }
-      if (to)   { params.push(to);   dateFilter += ` AND COALESCE(s.ended_at, s.started_at, s.synced_at)::date <= $${params.length}::date`; }
+      if (from) { params.push(from); dateFilter += ` AND (COALESCE(s.ended_at, s.started_at, s.synced_at) AT TIME ZONE $${tzIdx})::date >= ($${params.length}::text)::date`; }
+      if (to)   { params.push(to);   dateFilter += ` AND (COALESCE(s.ended_at, s.started_at, s.synced_at) AT TIME ZONE $${tzIdx})::date <= ($${params.length}::text)::date`; }
     }
     if (src && src !== 'all') { params.push(src); dateFilter += ` AND s.source = $${params.length}`; }
 

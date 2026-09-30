@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthorizedTeamId } from '@/lib/auth';
+import { getAuthorizedTeamId, getSessionFromCookie } from '@/lib/auth';
+import { adminTokenFromCookie, verifyAdminToken } from '@/lib/team/auth';
 import { query } from '@/lib/team/db';
 import { recalculateTeamCosts } from '@/lib/team/stats';
 
@@ -9,9 +10,17 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
   try {
+    const session = getSessionFromCookie(req.headers.get('cookie'));
+    const authHeader = req.headers.get('authorization');
+    const legacyToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : adminTokenFromCookie(req.headers.get('cookie')) || '';
+    const isLegacyAdmin = verifyAdminToken(legacyToken);
+
+    if (!session && !isLegacyAdmin) {
+      return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+    }
+
     const rawTeamId = req.nextUrl.searchParams.get('teamId') || req.nextUrl.searchParams.get('team_id');
     const teamId = getAuthorizedTeamId(req, rawTeamId);
-    if (!teamId) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
 
     const isUuid = (val: string | null | undefined): boolean =>
       Boolean(val && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val));
@@ -21,6 +30,11 @@ export async function GET(req: NextRequest) {
       const { rows } = await query(
         'SELECT id, model_pattern, cost_in_per_m, cost_out_per_m, cost_cache_read_per_m, created_at FROM model_pricing WHERE team_id = $1 OR team_id IS NULL ORDER BY (team_id IS NOT NULL) DESC, model_pattern',
         [teamId],
+      );
+      customPricing = rows;
+    } else {
+      const { rows } = await query(
+        'SELECT id, model_pattern, cost_in_per_m, cost_out_per_m, cost_cache_read_per_m, created_at FROM model_pricing WHERE team_id IS NULL ORDER BY model_pattern',
       );
       customPricing = rows;
     }

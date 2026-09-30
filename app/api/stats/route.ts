@@ -118,8 +118,8 @@ export async function GET(req: NextRequest) {
     const tzIdx = 2;
     let dateFilter = '';
     if (!useAll) {
-      if (from) { params.push(from); dateFilter += ` AND (COALESCE(s.ended_at, s.started_at, s.synced_at) AT TIME ZONE $${tzIdx})::date >= $${params.length}::date`; }
-      if (to)   { params.push(to);   dateFilter += ` AND (COALESCE(s.ended_at, s.started_at, s.synced_at) AT TIME ZONE $${tzIdx})::date <= $${params.length}::date`; }
+      if (from) { params.push(from); dateFilter += ` AND (COALESCE(s.ended_at, s.started_at, s.synced_at) AT TIME ZONE $${tzIdx})::date >= ($${params.length}::text)::date`; }
+      if (to)   { params.push(to);   dateFilter += ` AND (COALESCE(s.ended_at, s.started_at, s.synced_at) AT TIME ZONE $${tzIdx})::date <= ($${params.length}::text)::date`; }
     }
     if (src && src !== 'all') { params.push(src); dateFilter += ` AND s.source = $${params.length}`; }
 
@@ -246,7 +246,8 @@ export async function GET(req: NextRequest) {
             count(DISTINCT s.id)::int AS sessions
           FROM sync_session_files f
           JOIN sync_sessions s ON s.id = f.sync_session_id
-          WHERE (s.member_id = $1 OR s.team_id IN (SELECT tm.team_id FROM team_members tm WHERE tm.member_id = $1)) ${dateFilter}
+          -- BUG-7 fix: scope to member only, not all teams the member belongs to
+          WHERE s.member_id = $1 ${dateFilter}
           GROUP BY f.path ORDER BY changed_lines DESC, edits DESC LIMIT 50
         `, params),
 
@@ -262,7 +263,8 @@ export async function GET(req: NextRequest) {
             coalesce(sum(s.edits), 0)::int AS edits,
             coalesce(sum(s.changed_lines), 0)::int AS changed_lines
           FROM sync_sessions s
-          WHERE (s.member_id = $1 OR s.team_id IN (SELECT tm.team_id FROM team_members tm WHERE tm.member_id = $1)) ${dateFilter}
+           -- BUG-7 fix: scope to member only, not all teams the member belongs to
+           WHERE s.member_id = $1 ${dateFilter}
           GROUP BY COALESCE(s.agent, 'default')
           ORDER BY api_cost DESC, sessions DESC
         `, params),
@@ -492,7 +494,8 @@ export async function GET(req: NextRequest) {
           unpricedModels: [],
           coverage,
           billableSessions: totalSessions,
-          perSession: totalSessions ? estimatedCost / totalSessions : null,
+          // BUG-13 fix: divide by priced sessions, not total sessions (avoids diluting with zero-activity sessions)
+          perSession: (totalPricedSessions + approxSessions) ? estimatedCost / (totalPricedSessions + approxSessions) : null,
           perEdit: totalEdits ? estimatedCost / totalEdits : null,
           bySource: costBySource,
           sessions: [],

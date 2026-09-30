@@ -210,6 +210,8 @@ export function getAuthorizedTeamId(req: any, paramTeamId: string | null | undef
       return paramTeamId || null;
     }
     if (session.role === 'admin') {
+      // If admin has a specific teamId bound to their account (team-scoped admin), use that.
+      // If they are the system team admin (session.userId === 'admin' or session.teamId is null), allow paramTeamId.
       return session.teamId || paramTeamId || null;
     }
     if (session.role === 'user') {
