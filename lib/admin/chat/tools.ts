@@ -3,7 +3,6 @@ import 'server-only';
  * Tools the analyst chatbot can call. `run_sql` answers arbitrary questions; the
  * rest are pre-built, parameterized analyses so common questions are fast and exact.
  */
-import { getPool } from '@/lib/team/db';
 import { ALLOWED_TABLES, ANALYST_GRANTS, QueryResult, runReadOnly, SqlGuardError } from './sql-guard';
 
 export interface ToolDef {
@@ -11,98 +10,59 @@ export interface ToolDef {
   function: { name: string; description: string; parameters: Record<string, unknown> };
 }
 
-const daysParam = {
-  type: 'integer',
-  description: 'Look-back window in days (1-365). Default 30.',
-  minimum: 1,
-  maximum: 365,
+export const REPORTS = [
+  'platform_summary',
+  'usage_by_model',
+  'top_members',
+  'daily_trend',
+  'tool_failures',
+  'file_hotspots',
+  'friction_report',
+] as const;
+export type ReportName = (typeof REPORTS)[number];
+
+export const REPORT_TITLES: Record<ReportName, string> = {
+  platform_summary: 'Platform summary',
+  usage_by_model: 'Usage by model',
+  top_members: 'Top members',
+  daily_trend: 'Daily trend',
+  tool_failures: 'Tool failures',
+  file_hotspots: 'File hotspots',
+  friction_report: 'Rework & abandonment',
 };
 
+// Kept deliberately tiny: these definitions are re-sent to the model on every call, so every word costs tokens.
 export const TOOL_DEFS: ToolDef[] = [
   {
     type: 'function',
     function: {
-      name: 'get_schema',
-      description: 'List the queryable tables and their columns. Call this before writing SQL if unsure about column names.',
-      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      name: 'report',
+      description: 'Prebuilt analysis over the last N days (default 30).',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', enum: [...REPORTS] },
+          days: { type: 'integer' },
+          limit: { type: 'integer' },
+        },
+        required: ['name'],
+      },
     },
   },
   {
     type: 'function',
     function: {
       name: 'run_sql',
-      description:
-        'Run ONE read-only PostgreSQL SELECT (or WITH ... SELECT) query. Max 200 rows returned. No comments, no semicolons, no writes. Use for any question the other tools do not cover.',
-      parameters: {
-        type: 'object',
-        properties: { sql: { type: 'string', description: 'A single PostgreSQL SELECT statement.' } },
-        required: ['sql'],
-        additionalProperties: false,
-      },
+      description: 'One read-only PostgreSQL SELECT. Max 200 rows.',
+      parameters: { type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'] },
     },
   },
   {
     type: 'function',
     function: {
-      name: 'platform_summary',
-      description: 'Platform-wide totals for a window: sessions, active members, tokens, cost, edits, lines changed, tool error rate, abandoned sessions.',
-      parameters: { type: 'object', properties: { days: daysParam }, additionalProperties: false },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'usage_by_model',
-      description: 'Per-model sessions, tokens, cost, cost per 100 changed lines and tool error rate.',
-      parameters: { type: 'object', properties: { days: daysParam }, additionalProperties: false },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'top_members',
-      description: 'Highest-spending / highest-token members with their team and top model.',
-      parameters: {
-        type: 'object',
-        properties: { days: daysParam, limit: { type: 'integer', minimum: 1, maximum: 50, description: 'Default 10.' } },
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'daily_trend',
-      description: 'Per-day sessions, tokens, cost and tool errors, oldest to newest.',
-      parameters: { type: 'object', properties: { days: daysParam }, additionalProperties: false },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'tool_failures',
-      description: 'Per agent tool (bash, edit, read, ...): call count, error count and failure rate.',
-      parameters: { type: 'object', properties: { days: daysParam }, additionalProperties: false },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'file_hotspots',
-      description: 'Files agents edit most (edits, lines added/removed, number of sessions).',
-      parameters: {
-        type: 'object',
-        properties: { days: daysParam, limit: { type: 'integer', minimum: 1, maximum: 50, description: 'Default 10.' } },
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'friction_report',
-      description: 'Rework and abandonment: abandonment rate, avg rework loops and corrections per session, and how abandonment changes for deep-context sessions.',
-      parameters: { type: 'object', properties: { days: daysParam }, additionalProperties: false },
+      name: 'get_schema',
+      description: 'Columns of one table (or the table list if omitted).',
+      parameters: { type: 'object', properties: { table: { type: 'string' } } },
     },
   },
 ];
@@ -192,34 +152,26 @@ function builtSql(name: string, args: Record<string, unknown>): string | null {
   }
 }
 
-/** Column/table listing for get_schema, restricted to the allowlist. */
-async function schemaListing(): Promise<Record<string, string[]>> {
-  const { rows } = await getPool().query(
-    `SELECT table_name, column_name, data_type FROM information_schema.columns
-     WHERE table_schema = 'public' AND table_name = ANY($1::text[])
-     ORDER BY table_name, ordinal_position`,
-    [ALLOWED_TABLES as unknown as string[]],
-  );
-  const out: Record<string, string[]> = {};
-  for (const r of rows) {
-    // Only expose columns the analyst role can actually read.
-    if (ANALYST_GRANTS[r.table_name]?.includes(r.column_name)) (out[r.table_name] ||= []).push(`${r.column_name} (${r.data_type})`);
-  }
-  return out;
+/** Columns of one table (or just the table names) — limited to what the analyst role can read. */
+function schemaListing(table?: string): Record<string, string[]> | string[] {
+  if (!table) return ALLOWED_TABLES;
+  const cols = ANALYST_GRANTS[table.toLowerCase()];
+  return cols ? { [table.toLowerCase()]: cols } : ALLOWED_TABLES;
 }
 
 export async function executeTool(name: string, rawArgs: unknown): Promise<ToolOutcome> {
   const args = (rawArgs && typeof rawArgs === 'object' ? rawArgs : {}) as Record<string, unknown>;
   try {
     if (name === 'get_schema') {
-      return { ok: true, data: await schemaListing() };
+      return { ok: true, data: schemaListing(typeof args.table === 'string' ? args.table : undefined) };
     }
     if (name === 'run_sql') {
       const sql = String(args.sql ?? '');
       const result = await runReadOnly(sql);
       return { ok: true, sql, result, data: { columns: result.columns, rows: result.rows, rowCount: result.rowCount, truncated: result.truncated } };
     }
-    const sql = builtSql(name, args);
+    const reportName = name === 'report' ? String(args.name ?? '') : name;
+    const sql = (REPORTS as readonly string[]).includes(reportName) ? builtSql(reportName, args) : null;
     if (!sql) return { ok: false, data: { error: `Unknown tool: ${name}` }, error: `Unknown tool: ${name}` };
     const result = await runReadOnly(sql, [], true);
     return { ok: true, sql, result, data: { columns: result.columns, rows: result.rows, rowCount: result.rowCount, truncated: result.truncated } };
@@ -227,4 +179,51 @@ export async function executeTool(name: string, rawArgs: unknown): Promise<ToolO
     const message = err instanceof SqlGuardError ? err.message : String((err as Error).message || err);
     return { ok: false, data: { error: message }, error: message };
   }
+}
+
+// ── Compact formatting ──────────────────────────────────────────────────────
+
+const MODEL_MAX_ROWS = 25;
+const MODEL_MAX_CELL = 60;
+
+function compactCell(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'number') return Number.isInteger(v) ? String(v) : String(Math.round(v * 1000) / 1000);
+  if (typeof v === 'string' && /^-?\d+\.\d{4,}$/.test(v)) return String(Math.round(Number(v) * 1000) / 1000);
+  const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+  return s.length > MODEL_MAX_CELL ? `${s.slice(0, MODEL_MAX_CELL)}…` : s;
+}
+
+/**
+ * What the model sees for a result: header once + one pipe-separated line per row, capped.
+ * (JSON repeats every column name on every row, which is several times more tokens.)
+ * The UI always gets the full result separately.
+ */
+export function resultForModel(result: QueryResult): string {
+  const rows = result.rows.slice(0, MODEL_MAX_ROWS);
+  const lines = [result.columns.join('|'), ...rows.map((r) => result.columns.map((c) => compactCell(r[c])).join('|'))];
+  const hidden = result.rowCount - rows.length;
+  if (hidden > 0 || result.truncated) lines.push(`(+${Math.max(hidden, 0)}${result.truncated ? '+' : ''} more rows not shown; the user can see all rows. Narrow the query if you need them.)`);
+  if (!rows.length) lines.push('(no rows)');
+  return lines.join('\n');
+}
+
+/** Markdown for a quick report (no AI involved). */
+export function quickMarkdown(name: ReportName, days: number, result: QueryResult): string {
+  const title = `**${REPORT_TITLES[name]}** — last ${days} days`;
+  if (!result.rows.length) return `${title}\n\nNo data in this window.`;
+  const rows = result.rows.slice(0, 25);
+  const fmt = (v: unknown) => {
+    const c = compactCell(v);
+    return /^-?\d{4,}$/.test(c) ? Number(c).toLocaleString('en-US') : c.replace(/\|/g, '\\|');
+  };
+  const head = `| ${result.columns.join(' | ')} |`;
+  const sep = `| ${result.columns.map(() => '---').join(' | ')} |`;
+  const body = rows.map((r) => `| ${result.columns.map((c) => fmt(r[c])).join(' | ')} |`).join('\n');
+  const more = result.rowCount > rows.length ? `\n\n_Showing ${rows.length} of ${result.rowCount} rows — open the query below for all of them._` : '';
+  return `${title}\n\n${head}\n${sep}\n${body}${more}`;
+}
+
+export function clampDays(v: unknown): number {
+  return clampInt(v, 30, 1, 365);
 }

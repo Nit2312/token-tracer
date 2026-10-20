@@ -13,8 +13,10 @@ import {
   ShieldCheck,
   Sparkles,
   Square,
+  RefreshCw,
   Trash2,
   User,
+  Zap,
 } from 'lucide-react';
 
 interface Step {
@@ -31,7 +33,24 @@ interface Msg {
   content: string;
   steps?: Step[];
   error?: boolean;
+  /** Quick-report messages are never sent back to the AI (saves tokens). */
+  quick?: boolean;
+  meta?: { tokens: number; cached?: boolean; ageSec?: number; quick?: boolean };
 }
+
+interface Usage { usedToday: number; budget: number; remaining: number | null }
+
+const QUICK_REPORTS: { name: string; label: string }[] = [
+  { name: 'platform_summary', label: 'Summary' },
+  { name: 'usage_by_model', label: 'By model' },
+  { name: 'top_members', label: 'Top members' },
+  { name: 'daily_trend', label: 'Daily trend' },
+  { name: 'tool_failures', label: 'Tool failures' },
+  { name: 'file_hotspots', label: 'File hotspots' },
+  { name: 'friction_report', label: 'Rework' },
+];
+
+const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n));
 
 const SUGGESTION_GROUPS: { title: string; items: string[] }[] = [
   {
@@ -239,8 +258,8 @@ function MiniBars({ step, hint = '' }: { step: Step; hint?: string }) {
   );
 }
 
-function StepView({ step }: { step: Step }) {
-  const [open, setOpen] = React.useState(false);
+function StepView({ step, defaultOpen = false }: { step: Step; defaultOpen?: boolean }) {
+  const [open, setOpen] = React.useState(defaultOpen);
   const r = step.result;
   return (
     <div className="rounded-xl border border-[rgba(242,236,223,0.08)] bg-[#0d0a07] text-xs" data-testid="chat-step">
@@ -333,14 +352,23 @@ export function AdminChatView() {
 
   const stop = () => abortRef.current?.abort();
 
-  const send = async (text: string) => {
-    const content = text.trim();
-    if (!content || busy) return;
-    const next: Msg[] = [...messages, { role: 'user', content }];
+  const [usage, setUsage] = React.useState<Usage | null>(null);
+  const refreshUsage = React.useCallback(async () => {
+    try {
+      const r = await fetch('/api/admin/chat');
+      if (r.ok) setUsage(await r.json());
+    } catch { /* meter is informational */ }
+  }, []);
+  React.useEffect(() => { refreshUsage(); }, [refreshUsage]);
+
+  // Only real conversation goes to the AI: no errors, and never the (large) quick-report tables.
+  const aiHistory = (list: Msg[]) => list.filter((m) => !m.error && !m.quick).map((m) => ({ role: m.role, content: m.content }));
+
+  /** Shared streaming runner for AI questions and quick reports. */
+  const run = async (payload: Record<string, unknown>, next: Msg[], opts: { quick?: boolean; statusText: string }) => {
     setMessages(next);
-    setInput('');
     setBusy(true);
-    setStatus('Thinking…');
+    setStatus(opts.statusText);
     setLiveSteps([]);
 
     const controller = new AbortController();
@@ -351,7 +379,7 @@ export function AdminChatView() {
       const res = await fetch('/api/admin/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: next.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content })) }),
+        body: JSON.stringify(payload),
         signal: controller.signal,
       });
 
@@ -364,6 +392,7 @@ export function AdminChatView() {
       const decoder = new TextDecoder();
       let buffer = '';
       let finalReply: string | null = null;
+      let meta: Msg['meta'];
       let errorText: string | null = null;
 
       for (;;) {
@@ -375,19 +404,21 @@ export function AdminChatView() {
           const line = buffer.slice(0, nl).trim();
           buffer = buffer.slice(nl + 1);
           if (!line) continue;
-          let evt: { type: string; text?: string; step?: Step; reply?: string; error?: string };
+          let evt: { type: string; text?: string; step?: Step; reply?: string; error?: string; usage?: { total: number }; cached?: boolean; ageSec?: number; quick?: boolean };
           try { evt = JSON.parse(line); } catch { continue; }
           if (evt.type === 'status' && evt.text) setStatus(evt.text);
           else if (evt.type === 'step' && evt.step) {
             collected.push(evt.step);
             setLiveSteps([...collected]);
-          } else if (evt.type === 'final') finalReply = evt.reply ?? '';
-          else if (evt.type === 'error') errorText = evt.error ?? 'Something went wrong.';
+          } else if (evt.type === 'final') {
+            finalReply = evt.reply ?? '';
+            meta = { tokens: evt.usage?.total ?? 0, cached: evt.cached, ageSec: evt.ageSec, quick: evt.quick };
+          } else if (evt.type === 'error') errorText = evt.error ?? 'Something went wrong.';
         }
       }
 
       if (errorText) throw new Error(errorText);
-      setMessages([...next, { role: 'assistant', content: finalReply ?? 'No answer was returned.', steps: collected }]);
+      setMessages([...next, { role: 'assistant', content: finalReply ?? 'No answer was returned.', steps: collected, meta, quick: opts.quick }]);
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
         setMessages([...next, { role: 'assistant', content: 'Stopped.', steps: collected, error: true }]);
@@ -400,14 +431,37 @@ export function AdminChatView() {
       setLiveSteps([]);
       abortRef.current = null;
       taRef.current?.focus();
+      refreshUsage();
     }
+  };
+
+  const send = async (text: string) => {
+    const content = text.trim();
+    if (!content || busy) return;
+    setInput('');
+    const next: Msg[] = [...messages, { role: 'user', content }];
+    await run({ messages: aiHistory(next) }, next, { statusText: 'Thinking…' });
+  };
+
+  /** Re-ask the same question ignoring the 10-minute answer cache. */
+  const rerunFresh = async (assistantIndex: number) => {
+    if (busy) return;
+    const next = messages.slice(0, assistantIndex);
+    await run({ messages: aiHistory(next), fresh: true }, next, { statusText: 'Thinking…' });
+  };
+
+  /** Prebuilt report: plain SQL, no AI, no tokens. */
+  const quick = async (name: string, label: string) => {
+    if (busy) return;
+    const next: Msg[] = [...messages, { role: 'user', content: `⚡ ${label} (last 30 days)`, quick: true }];
+    await run({ quick: { name, days: 30 } }, next, { quick: true, statusText: `Running ${label.toLowerCase()}…` });
   };
 
   const visibleSteps = (steps?: Step[]) => (steps || []).filter((s) => s.tool !== 'get_schema');
   const lastChartStep = (steps?: Step[]) => [...visibleSteps(steps)].reverse().find((s) => s.ok);
 
   return (
-    <div className="flex h-[calc(100vh-11rem)] min-h-[480px] animate-fadeIn flex-col font-mono">
+    <div className="flex h-[calc(100vh-12rem)] min-h-[460px] animate-fadeIn flex-col font-mono">
       {/* Header */}
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-emerald-500/25 bg-gradient-to-r from-[rgba(16,185,129,0.12)] via-[#14100c] to-[rgba(226,163,85,0.08)] px-4 py-3">
         <div className="flex items-center gap-3">
@@ -417,7 +471,22 @@ export function AdminChatView() {
             <p className="text-[11px] text-[#8e8473]">Answers come from live, read-only database queries — expand a step to see the SQL.</p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {usage && (
+            <span
+              className={`inline-flex items-center gap-2 rounded-lg border px-2.5 py-1 text-[11px] ${usage.budget > 0 && usage.usedToday >= usage.budget ? 'border-red-500/30 bg-red-500/10 text-red-300' : 'border-[rgba(242,236,223,0.1)] text-[#cbbfad]'}`}
+              title={usage.budget > 0 ? `AI tokens used today (UTC). Daily budget ${usage.budget.toLocaleString()}. Quick reports and cached answers cost nothing.` : 'AI tokens used today. No daily budget set.'}
+              data-testid="chat-usage"
+            >
+              <Zap className="h-3.5 w-3.5 text-[#e2a355]" />
+              AI tokens today: {fmtTokens(usage.usedToday)}{usage.budget > 0 ? ` / ${fmtTokens(usage.budget)}` : ''}
+              {usage.budget > 0 && (
+                <span className="h-1.5 w-12 overflow-hidden rounded-full bg-[#0d0a07]">
+                  <span className="block h-full rounded-full bg-[#e2a355]" style={{ width: `${Math.min(100, (usage.usedToday / usage.budget) * 100)}%` }} />
+                </span>
+              )}
+            </span>
+          )}
           <span className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[11px] text-emerald-300" title="Prompt text, credentials, API keys, audit logs and raw event payloads are blocked at the database level. Conversations are not saved in your browser.">
             <ShieldCheck className="h-3.5 w-3.5" /> Read-only · private fields excluded
           </span>
@@ -475,11 +544,22 @@ export function AdminChatView() {
                   <div className="mt-1.5 flex items-center gap-3 px-1">
                     <CopyButton text={m.content} />
                     {steps.length > 0 && <span className="text-[11px] text-[#8e8473]">{steps.length} quer{steps.length === 1 ? 'y' : 'ies'} run</span>}
+                    {m.meta && (
+                      <span className="inline-flex items-center gap-1 text-[11px] text-[#8e8473]" data-testid="chat-tokens">
+                        <Zap className="h-3 w-3 text-[#e2a355]" />
+                        {m.meta.quick ? 'no AI tokens' : m.meta.cached ? `cached${m.meta.ageSec ? ` (${Math.max(1, Math.round(m.meta.ageSec / 60))}m old)` : ''} · 0 tokens` : `${m.meta.tokens.toLocaleString()} tokens`}
+                      </span>
+                    )}
+                    {m.meta?.cached && (
+                      <button onClick={() => rerunFresh(i)} disabled={busy} className="inline-flex items-center gap-1 text-[11px] text-[#8e8473] hover:text-white disabled:opacity-40">
+                        <RefreshCw className="h-3 w-3" /> Re-run fresh
+                      </button>
+                    )}
                   </div>
                 )}
                 {steps.length > 0 && (
                   <div className="mt-2 space-y-1.5">
-                    {steps.map((s, j) => <StepView key={j} step={s} />)}
+                    {steps.map((s, j) => <StepView key={j} step={s} defaultOpen={m.role === 'assistant' && !m.meta?.quick && j === steps.length - 1} />)}
                   </div>
                 )}
               </div>
@@ -503,7 +583,21 @@ export function AdminChatView() {
       </div>
 
       {/* Composer */}
-      <form onSubmit={(e) => { e.preventDefault(); send(input); }} className="mt-3">
+      <div className="mt-3 flex flex-wrap items-center gap-1.5" data-testid="chat-quick">
+        <span className="mr-1 inline-flex items-center gap-1 text-[11px] text-[#8e8473]"><Zap className="h-3 w-3 text-[#e2a355]" /> Quick reports · no AI tokens</span>
+        {QUICK_REPORTS.map((q) => (
+          <button
+            key={q.name}
+            onClick={() => quick(q.name, q.label)}
+            disabled={busy}
+            className="rounded-lg border border-[rgba(242,236,223,0.1)] bg-[#1c1712] px-2.5 py-1 text-[11px] text-[#cbbfad] transition-colors hover:border-[rgba(226,163,85,0.4)] hover:text-white disabled:opacity-40"
+          >
+            {q.label}
+          </button>
+        ))}
+      </div>
+
+      <form onSubmit={(e) => { e.preventDefault(); send(input); }} className="mt-2">
         <div className="flex items-end gap-2 rounded-2xl border border-[rgba(242,236,223,0.1)] bg-[#1c1712] p-2 focus-within:border-[#e2a355]">
           <textarea
             ref={taRef}
