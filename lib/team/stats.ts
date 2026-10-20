@@ -27,6 +27,9 @@ interface StatsOptions {
 const EFF_IN = `CASE WHEN s.tokens_in = 0 AND (s.tool_calls + s.edits) > 0 THEN GREATEST(500, (s.tool_calls + s.edits) * 350 + s.changed_lines * 10) ELSE s.tokens_in END`;
 const EFF_OUT = `CASE WHEN s.tokens_out = 0 AND (s.tool_calls + s.edits) > 0 THEN GREATEST(200, (s.tool_calls + s.edits) * 150 + s.changed_lines * 5) ELSE s.tokens_out END`;
 
+/** Built-in rates used by cost calculation (excludes the catch-all fallback). */
+const BUILTIN_PRICED_MODELS = ['claude-3-7-sonnet', 'claude-3-5-sonnet', 'claude-3-5-haiku', 'gpt-4o', 'o1', 'o3-mini', 'deepseek-r1', 'deepseek-v3'];
+
 const fmtPctReason = (n: number): string => `${(n * 100).toFixed(0)}%`;
 
 export async function buildTeamStats(
@@ -54,6 +57,7 @@ export async function buildTeamStats(
       recentLogs: [],
       modelPricing: [],
       memberModels: [],
+      modelCoverage: [],
       window: { from: from ?? null, to: to ?? null, memberId: memberId ? String(memberId) : null, minTokens: minTokens ?? null, maxTokens: maxTokens ?? null, source: source ?? null },
     };
   }
@@ -401,6 +405,44 @@ export async function buildTeamStats(
     [teamId],
   );
 
+  // 12b. Model coverage: every model in use, and whether an explicit pricing rule matches it.
+  // Unmatched models are silently costed with the catch-all fallback rate, so flag them.
+  const pricingPatterns: string[] = [
+    ...modelPricing.map((r: any) => String(r.model_pattern || '')),
+    ...BUILTIN_PRICED_MODELS,
+  ].filter(Boolean);
+  const coverageMap = new Map<string, any>();
+  for (const mm of memberModels) {
+    // Claude Code tags locally generated messages (errors, interrupts) as '<synthetic>' — not a real model.
+    if (String(mm.model).toLowerCase() === '<synthetic>') continue;
+    const name = String(mm.model || 'default');
+    const entry = coverageMap.get(name) || {
+      model: name,
+      sessions: 0,
+      tokens: 0,
+      api_cost: 0,
+      members: new Set<string>(),
+      sources: new Set<string>(),
+    };
+    entry.sessions += Number(mm.sessions || 0);
+    entry.tokens += Number(mm.tokens_in || 0) + Number(mm.tokens_out || 0);
+    entry.api_cost += Number(mm.api_cost || 0);
+    entry.members.add(mm.member_name || mm.member_id);
+    if (mm.source) entry.sources.add(mm.source);
+    coverageMap.set(name, entry);
+  }
+  const modelCoverage = Array.from(coverageMap.values())
+    .map((e) => ({
+      model: e.model,
+      sessions: e.sessions,
+      tokens: e.tokens,
+      api_cost: e.api_cost,
+      members: Array.from(e.members as Set<string>),
+      sources: Array.from(e.sources as Set<string>),
+      hasPricing: e.model !== 'default' && pricingPatterns.some((p) => matchesModelPattern(e.model, p)),
+    }))
+    .sort((a, b) => Number(a.hasPricing) - Number(b.hasPricing) || b.tokens - a.tokens);
+
   const totalTeamTokens = memberStats.reduce(
     (acc, r) => acc + Number(r.tokens_in) + Number(r.tokens_out),
     0,
@@ -613,6 +655,7 @@ export async function buildTeamStats(
     recentLogs,
     modelPricing,
     memberModels,
+    modelCoverage,
     totals: {
       ...totals,
       toolErrorRate: totals.toolCalls > 0 ? totals.toolErrors / totals.toolCalls : 0,
@@ -824,7 +867,12 @@ export async function recalculateTeamCosts(teamId: string, forceAll: boolean = f
     [teamId],
   );
 
-  let updatedCount = 0;
+  // Compute every cost in memory, then write back in bulk (one UPDATE per chunk
+  // instead of one round trip per session).
+  const ids: string[] = [];
+  const tokIn: number[] = [];
+  const tokOut: number[] = [];
+  const costs: number[] = [];
   for (const s of sessions) {
     const modelName = (s.model || '').toLowerCase();
     const rule = allRules.find((r) => r.model_pattern && matchesModelPattern(modelName, r.model_pattern)) || defaultRules[defaultRules.length - 1];
@@ -841,7 +889,6 @@ export async function recalculateTeamCosts(teamId: string, forceAll: boolean = f
     if (tokensIn === 0 && tokensOut === 0 && (edits > 0 || toolCalls > 0 || changedLines > 0)) {
       tokensIn = Math.max(500, (toolCalls + edits) * 350 + changedLines * 10);
       tokensOut = Math.max(200, (toolCalls + edits) * 150 + changedLines * 5);
-      await query('UPDATE sync_sessions SET tokens_in = $1, tokens_out = $2 WHERE id = $3', [tokensIn, tokensOut, s.id]);
     }
 
     const freshInput = Math.max(0, tokensIn - tokensCacheRead - tokensCacheWrite);
@@ -852,10 +899,25 @@ export async function recalculateTeamCosts(teamId: string, forceAll: boolean = f
       (tokensCacheRead / 1_000_000) * Number(rule.cost_cache_read_per_m || 0) +
       (tokensCacheWrite / 1_000_000) * Number(((rule as any).cost_cache_write_per_m ?? rule.cost_in_per_m) || 0);
 
-    await query('UPDATE sync_sessions SET api_cost = $1, priced = true WHERE id = $2', [cost, s.id]);
-    updatedCount++;
+    ids.push(s.id);
+    tokIn.push(tokensIn);
+    tokOut.push(tokensOut);
+    costs.push(cost);
   }
 
+  const CHUNK = 1000;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    await query(
+      `UPDATE sync_sessions AS t
+       SET tokens_in = v.tin, tokens_out = v.tout, api_cost = v.cost, priced = true
+       FROM unnest($1::uuid[], $2::bigint[], $3::bigint[], $4::float8[]) AS v(id, tin, tout, cost)
+       WHERE t.id = v.id`,
+      [ids.slice(i, i + CHUNK), tokIn.slice(i, i + CHUNK), tokOut.slice(i, i + CHUNK), costs.slice(i, i + CHUNK)],
+    );
+  }
+  const updatedCount = ids.length;
+
+  statsCache.clear();
   return { updatedCount, totalSessions: sessions.length };
 }
 

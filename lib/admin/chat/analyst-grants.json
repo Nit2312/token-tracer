@@ -1,0 +1,26 @@
+{
+  "_comment": "Column-level SELECT grants for the analyst_ro database role used by the chatbot. Anything not listed (users, member_keys, audit_log, prompt text, event payloads, session labels, auth tables) is unreadable by the chatbot at the database level.",
+  "tables": {
+    "teams": ["id", "name", "created_at"],
+    "members": ["id", "team_id", "display_name", "role", "daemon_version", "daemon_last_seen_at", "created_at"],
+    "team_members": ["id", "team_id", "member_id", "role", "created_at"],
+    "sync_sessions": ["id", "team_id", "member_id", "source", "session_id", "agent", "model", "started_at", "ended_at", "tokens_in", "tokens_out", "tokens_cache_read", "tokens_cache_write", "api_cost", "priced", "edits", "additions", "deletions", "changed_lines", "files_touched", "tool_calls", "tool_errors", "rework_loops", "corrections", "abandoned", "synced_at"],
+    "sync_session_tools": ["id", "sync_session_id", "tool_name", "call_count"],
+    "sync_session_files": ["id", "sync_session_id", "path", "edits", "additions", "deletions"],
+    "model_pricing": ["id", "team_id", "model_pattern", "cost_in_per_m", "cost_out_per_m", "cost_cache_read_per_m", "created_at"],
+    "ingest_events": ["id", "team_id", "member_id", "session_count", "accepted", "status", "created_at"],
+    "daily_member_usage": ["day", "team_id", "member_id", "source", "model", "project", "tokens_in", "tokens_out", "cache_read_tokens", "cache_write_tokens", "api_cost", "edits", "additions", "deletions", "changed_lines", "files_touched", "tool_calls", "tool_errors", "rework_loops", "corrections", "abandoned_count", "session_count"],
+    "daily_member_tools": ["day", "team_id", "member_id", "tool_name", "call_count"],
+    "daily_member_files": ["day", "team_id", "member_id", "path", "edits", "additions", "deletions", "changed_lines", "session_count"],
+    "daily_punch_card": ["day", "team_id", "member_id", "weekday", "hour", "session_count"],
+    "daily_org_usage": ["day", "org_id", "tool", "model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "list_price_cost", "actual_cost", "session_count"],
+    "daily_pipeline_health": ["day", "daemon_id", "org_id", "last_heartbeat", "batches_received", "batches_failed", "avg_ingestion_lag_seconds", "parse_errors", "sanitize_errors"],
+    "daily_behavior_rollup": ["day", "org_id", "tool", "rework_loop_count", "tool_error_count", "total_turns"],
+    "session_turns": ["id", "session_id", "org_id", "user_id", "tool", "model", "turn_index", "turn_role", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cumulative_input_tokens", "prompt_char_len", "has_code_block", "has_file_path", "has_traceback", "intent_category", "files_touched", "lines_added", "lines_removed", "tool_call_count", "tool_call_valid_count", "tool_error_flag", "rework_flag", "revert_flag", "created_at"],
+    "session_tool_errors": ["id", "turn_id", "session_id", "org_id", "tool", "model", "tool_name", "is_error", "created_at"],
+    "model_context_limits": ["model", "max_context_tokens"],
+    "session_outcomes": ["session_id", "org_id", "tool", "model", "intent_category", "total_input_tokens", "total_output_tokens", "total_cost", "files_touched", "lines_changed", "tool_call_count", "had_rework", "had_revert", "had_tool_error", "success", "complexity_score"],
+    "redundant_reprompt_events": ["id", "session_id", "turn_index", "similarity_score", "tokens_cost_of_following_turn", "created_at"],
+    "daemon_releases": ["id", "version", "mandatory", "active", "release_notes", "released_at"]
+  }
+}

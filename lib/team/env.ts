@@ -113,3 +113,15 @@ export function cronSecret(): string | null {
   loadEnv();
   return process.env.CRON_SECRET || null;
 }
+
+/** Groq API key for the superadmin analyst chat (set GROQ_API_KEY in the environment). */
+export function groqApiKey(): string | null {
+  loadEnv();
+  return process.env.GROQ_API_KEY || null;
+}
+
+/** Groq model used by the analyst chat. Must support tool calling. */
+export function groqModel(): string {
+  loadEnv();
+  return process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+}

@@ -1,11 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthorizedTeamId } from '@/lib/auth';
+import { getAuthorizedTeamId, getSessionFromCookie, isSystemAdmin } from '@/lib/auth';
 import { query } from '@/lib/team/db';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
+/** Linking pulls other people's data into a team, so only the platform owner may do it. */
+function denyUnlessSystemAdmin(req: NextRequest): NextResponse | null {
+  const session = getSessionFromCookie(req.headers.get('cookie'));
+  return isSystemAdmin(session) ? null : NextResponse.json({ error: 'platform administrator access required' }, { status: 403 });
+}
+
 export async function GET(req: NextRequest) {
   try {
+    const denied = denyUnlessSystemAdmin(req);
+    if (denied) return denied;
     const rawTeamId = req.nextUrl.searchParams.get('teamId');
     const teamId = getAuthorizedTeamId(req, rawTeamId);
     if (!teamId) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
@@ -31,12 +40,14 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ members });
   } catch (err) {
     console.error('[team/members/link GET error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
 export async function POST(req: NextRequest) {
   try {
+    const denied = denyUnlessSystemAdmin(req);
+    if (denied) return denied;
     let body: Record<string, unknown> = {};
     try {
       body = await req.json();
@@ -68,6 +79,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true });
   } catch (err) {
     console.error('[team/members/link POST error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }

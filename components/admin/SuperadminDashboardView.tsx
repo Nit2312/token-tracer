@@ -5,7 +5,9 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { formatCompactNumber, formatCurrency } from '@/lib/utils';
+import { AdminChatView } from '@/components/admin/AdminChatView';
 import { 
+  MessageSquare,
   ShieldAlert, 
   Activity, 
   Server, 
@@ -70,13 +72,11 @@ interface SuperadminProps {
 
 export function SuperadminDashboardView({ session }: SuperadminProps) {
   const [activeTab, setActiveTab] = React.useState<
-    'overview' | 'roi' | 'pricing' | 'friction' | 'hotspots' | 'traffic' | 'whales' | 'storage' | 'users'
+    'overview' | 'chat' | 'pricing' | 'traffic' | 'whales' | 'storage' | 'users'
   >('overview');
 
   const [infraData, setInfraData] = React.useState<any | null>(null);
   const [whalesData, setWhalesData] = React.useState<any | null>(null);
-  const [roiData, setRoiData] = React.useState<any | null>(null);
-  const [roiRange, setRoiRange] = React.useState<'7d' | '30d' | '90d' | 'all'>('30d');
   const [pricingList, setPricingList] = React.useState<any[]>([]);
   const [defaultPricingRules, setDefaultPricingRules] = React.useState<any[]>([]);
   const [usersList, setUsersList] = React.useState<any[]>([]);
@@ -143,12 +143,11 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
   const loadAdminData = React.useCallback(async () => {
     setLoading(true);
     try {
-      const [infraRes, whalesRes, usersRes, releasesRes, roiRes, pricingRes] = await Promise.all([
+      const [infraRes, whalesRes, usersRes, releasesRes, pricingRes] = await Promise.all([
         fetch('/api/admin/infra-health'),
         fetch('/api/admin/top-usage'),
         fetch('/api/admin/users'),
         fetch('/api/internal/releases'),
-        fetch(`/api/admin/model-roi?range=${roiRange}`),
         fetch('/api/admin/pricing'),
       ]);
 
@@ -170,10 +169,6 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
         const data = await releasesRes.json();
         setReleasesList(data.releases || []);
       }
-      if (roiRes.ok) {
-        const data = await roiRes.json();
-        setRoiData(data);
-      }
       if (pricingRes.ok) {
         const data = await pricingRes.json();
         setPricingList(data.pricing || []);
@@ -184,7 +179,7 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
     } finally {
       setLoading(false);
     }
-  }, [roiRange]);
+  }, []);
 
   React.useEffect(() => {
     loadAdminData();
@@ -418,6 +413,21 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
       await loadAdminData();
     } catch (err: any) {
       toast.error(err.message || 'Status toggle failed');
+    }
+  };
+
+  const handleResetMfa = async (u: any) => {
+    if (!window.confirm(`Remove the authenticator for ${u.username}? They will set up a new one at their next sign-in.`)) return;
+    try {
+      const res = await fetch('/api/admin/users/reset-mfa', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: u.id }),
+      });
+      if (res.ok) toast.success(`Two-factor reset for ${u.username}`);
+      else toast.error('Failed to reset two-factor login');
+    } catch {
+      toast.error('Network error resetting two-factor login');
     }
   };
 
@@ -672,92 +682,29 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
               </button>
             </div>
 
-            {/* Section 2: Core Analytical Research */}
+            {/* Section 2: Analyst */}
             <div className="space-y-1 pt-1">
               <div className="text-[10px] uppercase tracking-wider text-[#8e8473] px-3 py-1 font-bold flex items-center justify-between">
-                <span>The &quot;Why&quot; Research Suite</span>
-                <span className="text-[9px] text-[#e2a355]">3 Studies</span>
+                <span>Analyst</span>
+                <span className="text-[9px] text-[#e2a355]">Groq</span>
               </div>
 
               <button
-                onClick={() => setActiveTab('roi')}
+                onClick={() => setActiveTab('chat')}
                 className={`w-full relative flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs transition-all ${
-                  activeTab === 'roi'
+                  activeTab === 'chat'
                     ? 'bg-gradient-to-r from-[rgba(16,185,129,0.18)] to-[rgba(16,185,129,0.04)] text-emerald-400 font-bold border border-emerald-500/30 shadow-sm before:absolute before:left-0 before:top-2 before:bottom-2 before:w-1 before:rounded-r-full before:bg-emerald-400'
                     : 'text-[#cbbfad] hover:text-white hover:bg-[#1a140f] border border-transparent'
                 }`}
               >
                 <div className="flex items-center gap-3">
-                  <DollarSign className={`h-4 w-4 ${activeTab === 'roi' ? 'text-emerald-400' : 'text-[#8e8473]'}`} />
-                  <span>#1: Model ROI Frontier</span>
+                  <MessageSquare className={`h-4 w-4 ${activeTab === 'chat' ? 'text-emerald-400' : 'text-[#8e8473]'}`} />
+                  <span>Ask the Data</span>
                 </div>
                 <span className="text-[9.5px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                  Live
+                  Chat
                 </span>
               </button>
-
-              <button
-                onClick={() => setActiveTab('friction')}
-                className={`w-full relative flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs transition-all ${
-                  activeTab === 'friction'
-                    ? 'bg-gradient-to-r from-[rgba(245,158,11,0.18)] to-[rgba(245,158,11,0.04)] text-amber-400 font-bold border border-amber-500/30 shadow-sm before:absolute before:left-0 before:top-2 before:bottom-2 before:w-1 before:rounded-r-full before:bg-amber-400'
-                    : 'text-[#cbbfad] hover:text-white hover:bg-[#1a140f] border border-transparent'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <Flame className={`h-4 w-4 ${activeTab === 'friction' ? 'text-amber-400' : 'text-[#8e8473]'}`} />
-                  <span>#2: AI Friction &amp; Rework</span>
-                </div>
-                <span className="text-[9.5px] text-[#8e8473]">Cascades</span>
-              </button>
-
-              <button
-                onClick={() => setActiveTab('hotspots')}
-                className={`w-full relative flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs transition-all ${
-                  activeTab === 'hotspots'
-                    ? 'bg-gradient-to-r from-[rgba(192,132,252,0.18)] to-[rgba(192,132,252,0.04)] text-[#c084fc] font-bold border border-purple-500/30 shadow-sm before:absolute before:left-0 before:top-2 before:bottom-2 before:w-1 before:rounded-r-full before:bg-[#c084fc]'
-                    : 'text-[#cbbfad] hover:text-white hover:bg-[#1a140f] border border-transparent'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <FileCode className={`h-4 w-4 ${activeTab === 'hotspots' ? 'text-[#c084fc]' : 'text-[#8e8473]'}`} />
-                  <span>#3: Codebase Hotspots</span>
-                </div>
-                <span className="text-[9.5px] text-[#8e8473]">Churn</span>
-              </button>
-            </div>
-
-            {/* Section 3: Econometric Deep Dives */}
-            <div className="space-y-1 pt-1">
-              <div className="text-[10px] uppercase tracking-wider text-[#8e8473] px-3 py-1 font-bold flex items-center justify-between">
-                <span>Econometric Studies</span>
-                <span className="text-[9px] text-[#8e8473]/70 font-normal">7 Models</span>
-              </div>
-
-              {[
-                { href: '/admin/research/error-spikes', label: 'Error Spikes & Anomaly', icon: Zap, color: 'text-red-400' },
-                { href: '/admin/research/context-saturation', label: 'Context Saturation', icon: Layers, color: 'text-[#e2a355]' },
-                { href: '/admin/research/prompt-specificity', label: 'Prompt Specificity', icon: CheckCircle2, color: 'text-emerald-400' },
-                { href: '/admin/research/verbosity-elasticity', label: 'Verbosity Elasticity', icon: TrendingUp, color: 'text-cyan-400' },
-                { href: '/admin/research/cost-performance', label: 'Cost / Performance', icon: DollarSign, color: 'text-purple-400' },
-                { href: '/admin/research/redundant-reprompt', label: 'Redundant Re-prompting', icon: RotateCcw, color: 'text-amber-400' },
-                { href: '/admin/research/daemon-cohorts', label: 'Daemon Cohorts', icon: Package, color: 'text-emerald-400' },
-              ].map((study, idx) => {
-                const IconComponent = study.icon;
-                return (
-                  <a
-                    key={idx}
-                    href={study.href}
-                    className="w-full group flex items-center justify-between px-3 py-2 rounded-xl text-[11.5px] text-[#cbbfad] hover:text-white hover:bg-[#1a140f] border border-transparent hover:border-[rgba(242,236,223,0.06)] transition-all"
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <IconComponent className={`h-3.5 w-3.5 shrink-0 ${study.color} group-hover:scale-110 transition-transform`} />
-                      <span className="truncate">{study.label}</span>
-                    </div>
-                    <span className="text-[10px] text-[#8e8473] group-hover:text-white group-hover:translate-x-0.5 transition-all">↗</span>
-                  </a>
-                );
-              })}
             </div>
           </nav>
         </div>
@@ -1188,755 +1135,9 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
           )}
 
           {/* =========================================================================
-              VIEW 2: RESEARCH STUDY #1 - MODEL ROI & ECONOMIC FRONTIER
+              ANALYST CHAT (Groq-powered, read-only SQL + analytic tools)
              ========================================================================= */}
-          {activeTab === 'roi' && (
-            <div className="space-y-8 animate-fadeIn">
-              {/* Question Banner at the Top */}
-              <div className="rounded-2xl bg-gradient-to-r from-[rgba(16,185,129,0.15)] via-[#14100c] to-[rgba(226,163,85,0.1)] border border-emerald-500/30 p-6 shadow-xl backdrop-blur-xl">
-                <div className="flex items-start justify-between gap-4 flex-wrap">
-                  <div className="flex items-start gap-4">
-                    <div className="p-3 rounded-xl bg-emerald-500/20 text-emerald-400 font-bold shrink-0">
-                      <DollarSign className="h-6 w-6" />
-                    </div>
-                    <div>
-                      <div className="text-xs font-mono text-emerald-400 uppercase font-bold tracking-wider">
-                        Research Question #1: Model ROI &amp; Economic Frontier
-                      </div>
-                      <h2 className="text-lg font-bold font-mono text-white mt-1 leading-snug">
-                        Which LLM model delivers the highest net-accepted code yield per dollar spent, and are we overpaying for verbose reasoning?
-                      </h2>
-                      <p className="text-xs text-[#8e8473] font-mono mt-1">
-                        Empirical cross-model cost-efficiency, prompt cache ROI, and code yield telemetry across{' '}
-                        <strong className="text-white">
-                          {roiData?.totals?.totalTokens ? formatCompactNumber(roiData.totals.totalTokens) : '440M+'} tokens
-                        </strong>
-                        {' '}({roiData?.totals?.totalSessions || 0} live sessions analyzed).
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Actions & Time Range Selector */}
-                  <div className="flex items-center gap-2.5 flex-wrap">
-                    <Button
-                      size="sm"
-                      onClick={() => openCreatePricingModal()}
-                      className="bg-gradient-to-r from-[#e2a355] to-[#f5c485] text-[#170f05] font-bold text-xs font-mono shadow-md hover:brightness-105"
-                    >
-                      <Plus className="h-3.5 w-3.5 mr-1" />
-                      Add Model Rate
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setActiveTab('pricing')}
-                      className="border-[rgba(242,236,223,0.1)] text-[#cbbfad] hover:text-white bg-[#1c1712] text-xs font-mono"
-                    >
-                      <Tag className="h-3.5 w-3.5 mr-1 text-[#e2a355]" />
-                      Pricing Rules ({pricingList.length})
-                    </Button>
-
-                    <div className="flex items-center gap-1 p-1 rounded-xl bg-[#1c1712] border border-[rgba(242,236,223,0.08)] font-mono text-xs">
-                      {(['7d', '30d', '90d', 'all'] as const).map((r) => (
-                        <button
-                          key={r}
-                          onClick={() => setRoiRange(r)}
-                          className={`px-3 py-1 rounded-lg transition-all ${
-                            roiRange === r
-                              ? 'bg-[rgba(226,163,85,0.2)] text-[#f5c485] font-bold border border-[rgba(226,163,85,0.3)] shadow-sm'
-                              : 'text-[#8e8473] hover:text-white'
-                          }`}
-                        >
-                          {r === 'all' ? 'All Time' : `${r.replace('d', '')} Days`}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Research Grid */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 font-mono">
-                {/* 1. Cost per 100 Net Lines of Code */}
-                <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="text-sm font-bold text-white">Cost per 100 Net-Accepted Lines</h3>
-                      <p className="text-xs text-[#8e8473] font-sans">Factoring in rework loop penalties and revert rates</p>
-                    </div>
-                    <span className="px-2 py-0.5 rounded text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                      {roiData?.leader ? `${roiData.leader} Leads` : 'Sonnet Leads'}
-                    </span>
-                  </div>
-
-                  <div className="space-y-3 pt-2">
-                    {(roiData?.models || [
-                      { model: 'Claude 3.7 Sonnet', costPer100: 0.24, bar: 35, color: '#e2a355', yieldPct: 94 },
-                      { model: 'GPT-4o', costPer100: 0.38, bar: 55, color: '#38bdf8', yieldPct: 86 },
-                      { model: 'Claude 3.5 Haiku', costPer100: 0.12, bar: 20, color: '#34d399', yieldPct: 72 },
-                      { model: 'o3-mini (High)', costPer100: 0.62, bar: 90, color: '#c084fc', yieldPct: 91 },
-                    ]).map((m: any, idx: number) => (
-                      <div key={idx} className="space-y-1.5 p-3 rounded-xl bg-[#1c1712] border border-[rgba(242,236,223,0.06)]">
-                        <div className="flex justify-between text-xs">
-                          <span className="font-bold text-white">{m.model}</span>
-                          <span className="text-[#f5c485] font-bold">
-                            ${typeof m.costPer100 === 'number' ? m.costPer100.toFixed(2) : m.costPer100} / 100 lines
-                          </span>
-                        </div>
-                        <div className="w-full h-2 rounded-full bg-[#0d0a07] overflow-hidden">
-                          <div
-                            className="h-full rounded-full transition-all duration-1000"
-                            style={{ width: `${m.bar || 40}%`, backgroundColor: m.color || '#e2a355' }}
-                          />
-                        </div>
-                        <div className="text-[10px] text-[#8e8473] flex justify-between">
-                          <span>Yield: {m.yieldPct}% Net Retained ({m.sessions ? `${m.sessions} sessions` : 'live'})</span>
-                          <span>True Economic Efficiency</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* 2. Prompt Caching ROI */}
-                <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="text-sm font-bold text-white">Prompt Caching ROI &amp; Financial Savings</h3>
-                      <p className="text-xs text-[#8e8473] font-sans">Cold input vs cache read token recycling</p>
-                    </div>
-                    <span className="px-2 py-0.5 rounded text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                      {roiData?.cacheStats?.hitRatioPct ?? 68.5}% Hit Ratio
-                    </span>
-                  </div>
-
-                  <div className="p-4 rounded-xl bg-[#1c1712] border border-[rgba(242,236,223,0.06)] flex items-center justify-between">
-                    <div>
-                      <div className="text-[10.5px] text-[#8e8473] uppercase">Total Dollars Saved via Cache</div>
-                      <div className="text-3xl font-bold text-emerald-400 mt-1">
-                        {formatCurrency(roiData?.cacheStats?.totalSavingsUsd ?? 1420.50)}
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-[10.5px] text-[#8e8473] uppercase">Recycled Tokens</div>
-                      <div className="text-lg font-bold text-white mt-1">
-                        {roiData?.cacheStats?.totalRecycledTokens
-                          ? `${formatCompactNumber(roiData.cacheStats.totalRecycledTokens)} tok`
-                          : '298.4M tok'}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2 pt-1 text-xs">
-                    <div className="flex justify-between text-[#8e8473]">
-                      <span>Anthropic Prompt Cache (90% discount)</span>
-                      <strong className="text-white">
-                        {formatCurrency(roiData?.cacheStats?.anthropicSavingsUsd ?? 1180.20)} saved
-                      </strong>
-                    </div>
-                    <div className="flex justify-between text-[#8e8473]">
-                      <span>OpenAI Prompt Cache (50% discount)</span>
-                      <strong className="text-white">
-                        {formatCurrency(roiData?.cacheStats?.openAiSavingsUsd ?? 240.30)} saved
-                      </strong>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 3. Output Verbosity vs Code Yield */}
-                <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-white">Output Verbosity vs. Code Yield</h3>
-                    <p className="text-xs text-[#8e8473] font-sans">Tokens burned on explanation vs actual lines committed</p>
-                  </div>
-
-                  <div className="space-y-2 text-xs">
-                    {(roiData?.models || [
-                      { model: 'Claude 3.7 Sonnet', tokensPerLine: 18.2, verbosityLabel: 'High Density (Optimal)', verbosityColor: 'text-emerald-400' },
-                      { model: 'GPT-4o', tokensPerLine: 32.4, verbosityLabel: 'Moderate Verbosity', verbosityColor: 'text-amber-400' },
-                      { model: 'o3-mini (High Reasoning)', tokensPerLine: 78.6, verbosityLabel: 'Heavy Reasoning Tokens', verbosityColor: 'text-purple-400' },
-                    ]).slice(0, 4).map((m: any, idx: number) => (
-                      <div key={idx} className="p-3 rounded-xl bg-[#1c1712] flex justify-between items-center">
-                        <div>
-                          <div className="font-semibold text-white">{m.model}</div>
-                          <div className="text-[10.5px] text-[#8e8473]">
-                            {m.tokensPerLine} output tok / code line
-                          </div>
-                        </div>
-                        <span className={`${m.verbosityColor || 'text-emerald-400'} font-bold`}>
-                          {m.verbosityLabel}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* 4. Model Syntax Error Rate */}
-                <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-white">First-Turn Syntax &amp; Tool Error Rate</h3>
-                    <p className="text-xs text-[#8e8473] font-sans">Tool execution errors on initial generation</p>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-3 text-center">
-                    {(roiData?.models || [
-                      { model: 'Sonnet', errorRatePct: 2.1, status: 'Lowest Failures', color: 'text-emerald-400' },
-                      { model: 'GPT-4o', errorRatePct: 4.8, status: 'Nominal', color: 'text-amber-400' },
-                      { model: 'Haiku', errorRatePct: 7.4, status: 'Frequent Re-tries', color: 'text-red-400' },
-                    ]).slice(0, 3).map((m: any, idx: number) => {
-                      const colorClass = m.errorRatePct < 3.5 ? 'text-emerald-400' : m.errorRatePct < 6.0 ? 'text-amber-400' : 'text-red-400';
-                      const statusLabel = m.errorRatePct < 3.5 ? 'Lowest Failures' : m.errorRatePct < 6.0 ? 'Nominal' : 'Frequent Re-tries';
-                      const shortName = m.model.replace('Claude 3.7 ', '').replace('Claude 3.5 ', '').replace(' (High)', '');
-                      return (
-                        <div key={idx} className="p-4 rounded-xl bg-[#1c1712] border border-[rgba(242,236,223,0.06)]">
-                          <div className={`text-2xl font-bold ${colorClass}`}>
-                            {typeof m.errorRatePct === 'number' ? `${m.errorRatePct}%` : m.errorRatePct}
-                          </div>
-                          <div className="text-xs font-semibold text-white mt-1 truncate">{shortName}</div>
-                          <div className="text-[10px] text-[#8e8473] mt-0.5">{statusLabel}</div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* =========================================================================
-              VIEW: MODEL PRICING & TOKEN RATES CONFIGURATION
-             ========================================================================= */}
-          {activeTab === 'pricing' && (
-            <div className="space-y-8 animate-fadeIn">
-              {/* Question Banner at the Top */}
-              <div className="rounded-2xl bg-gradient-to-r from-[rgba(226,163,85,0.15)] via-[#14100c] to-[rgba(16,185,129,0.1)] border border-[rgba(226,163,85,0.3)] p-6 shadow-xl backdrop-blur-xl">
-                <div className="flex items-start justify-between gap-4 flex-wrap">
-                  <div className="flex items-start gap-4">
-                    <div className="p-3 rounded-xl bg-[rgba(226,163,85,0.18)] text-[#f5c485] font-bold shrink-0">
-                      <Tag className="h-6 w-6" />
-                    </div>
-                    <div>
-                      <div className="text-xs font-mono text-[#e2a355] uppercase font-bold tracking-wider">
-                        Platform Economic Governance &amp; Rate Configuration
-                      </div>
-                      <h2 className="text-lg font-bold font-mono text-white mt-1 leading-snug">
-                        How are foundation models and custom deployments monetized across input, output, and prompt-cached tokens?
-                      </h2>
-                      <p className="text-xs text-[#8e8473] font-mono mt-1">
-                        Configure custom per-1M token rates for frontier models, set team-specific discount overrides, and retroactively recalculate historical telemetry costs.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Primary Action Buttons */}
-                  <div className="flex items-center gap-2.5 flex-wrap">
-                    <Button
-                      onClick={() => openCreatePricingModal()}
-                      className="bg-gradient-to-r from-[#e2a355] to-[#f5c485] text-[#170f05] font-bold text-xs font-mono shadow-md hover:brightness-105"
-                    >
-                      <Plus className="h-3.5 w-3.5 mr-1" />
-                      Add Model Pricing Rule
-                    </Button>
-                    <Button
-                      variant="outline"
-                      onClick={handleGlobalRecalculate}
-                      disabled={recalculatingCosts}
-                      className="border-[rgba(242,236,223,0.1)] text-[#cbbfad] hover:text-white bg-[#1c1712] text-xs font-mono"
-                      title="Recalculates all historical telemetry costs with the latest pricing rules"
-                    >
-                      <RefreshCw className={`h-3.5 w-3.5 mr-1.5 text-[#e2a355] ${recalculatingCosts ? 'animate-spin' : ''}`} />
-                      {recalculatingCosts ? 'Recalculating…' : 'Sync & Recalculate Historical Costs'}
-                    </Button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Quick Model Presets Bar */}
-              <div className="p-4 rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl space-y-2.5 font-mono">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-[#8e8473] font-bold uppercase tracking-wider text-[11px] flex items-center gap-1.5">
-                    <Sparkles className="h-3.5 w-3.5 text-[#e2a355]" />
-                    Quick Add Model Presets
-                  </span>
-                  <span className="text-[10px] text-[#8e8473]">Click to load standard baseline rates into editor</span>
-                </div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  {[
-                    { label: 'Claude 3.7 Sonnet', pattern: 'claude-3-7-sonnet', costIn: 3.0, costOut: 15.0, costCache: 0.30 },
-                    { label: 'Claude 3.5 Haiku', pattern: 'claude-3-5-haiku', costIn: 0.8, costOut: 4.0, costCache: 0.08 },
-                    { label: 'GPT-4o', pattern: 'gpt-4o', costIn: 2.5, costOut: 10.0, costCache: 1.25 },
-                    { label: 'GPT-4.5 Preview', pattern: 'gpt-4.5-preview', costIn: 75.0, costOut: 150.0, costCache: 37.5 },
-                    { label: 'o3-mini', pattern: 'o3-mini', costIn: 1.1, costOut: 4.4, costCache: 0.55 },
-                    { label: 'Gemini 2.0 Flash', pattern: 'gemini-2.0-flash', costIn: 0.10, costOut: 0.40, costCache: 0.025 },
-                    { label: 'DeepSeek R1', pattern: 'deepseek-r1', costIn: 0.55, costOut: 2.19, costCache: 0.14 },
-                    { label: 'Llama 3.3 70B', pattern: 'llama-3.3-70b', costIn: 0.20, costOut: 0.60, costCache: 0.05 },
-                  ].map((p, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => openCreatePricingModal(p)}
-                      className="px-3 py-1.5 rounded-xl bg-[#1c1712] border border-[rgba(242,236,223,0.08)] text-[11px] text-[#cbbfad] hover:text-white hover:border-[#e2a355]/40 hover:bg-[#251e18] transition-all flex items-center gap-1.5"
-                    >
-                      <Plus className="h-3 w-3 text-[#e2a355]" />
-                      <span>{p.label}</span>
-                      <span className="text-[10px] text-[#8e8473]">(${p.costIn}/${p.costOut})</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Custom Pricing Rules Table Card */}
-              <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4 font-mono">
-                <div className="flex items-center justify-between flex-wrap gap-4">
-                  <div>
-                    <h3 className="text-base font-bold text-white flex items-center gap-2">
-                      <Tag className="h-4 w-4 text-[#e2a355]" />
-                      Active Custom Pricing Overrides ({pricingList.length})
-                    </h3>
-                    <p className="text-xs text-[#8e8473] font-sans">
-                      Overrides take precedence over system default rates when matching session model strings.
-                    </p>
-                  </div>
-
-                  <div className="relative w-64">
-                    <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-[#8e8473]" />
-                    <input
-                      type="text"
-                      placeholder="Filter model pattern…"
-                      value={pricingSearch}
-                      onChange={(e) => setPricingSearch(e.target.value)}
-                      className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-xl pl-9 pr-3 py-1.5 text-xs text-white placeholder-[#8e8473] focus:outline-none focus:border-[#e2a355]"
-                    />
-                  </div>
-                </div>
-
-                {/* Table */}
-                <div className="overflow-x-auto rounded-xl border border-[rgba(242,236,223,0.06)] bg-[#0d0a07]">
-                  <table className="w-full text-left text-xs border-collapse font-mono">
-                    <thead>
-                      <tr className="border-b border-[rgba(242,236,223,0.08)] bg-[#14100c] text-[#8e8473] uppercase tracking-wider text-[10.5px]">
-                        <th className="py-3 px-4">Model Pattern</th>
-                        <th className="py-3 px-4">Scope</th>
-                        <th className="py-3 px-4 text-right">Input ($/1M)</th>
-                        <th className="py-3 px-4 text-right">Output ($/1M)</th>
-                        <th className="py-3 px-4 text-right">Cache Read ($/1M)</th>
-                        <th className="py-3 px-4 text-center">Cache Discount</th>
-                        <th className="py-3 px-4 text-center">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[rgba(242,236,223,0.04)]">
-                      {pricingList
-                        .filter((r) => {
-                          if (!pricingSearch) return true;
-                          const q = pricingSearch.toLowerCase();
-                          return (
-                            (r.model_pattern && r.model_pattern.toLowerCase().includes(q)) ||
-                            (r.team_name && r.team_name.toLowerCase().includes(q))
-                          );
-                        })
-                        .map((rule: any) => {
-                          const costIn = Number(rule.cost_in_per_m || 0);
-                          const costCache = Number(rule.cost_cache_read_per_m || 0);
-                          const discountPct = costIn > 0 ? Math.max(0, Math.round(((costIn - costCache) / costIn) * 100)) : 0;
-                          return (
-                            <tr key={rule.id} className="hover:bg-[rgba(226,163,85,0.04)] transition-colors">
-                              <td className="py-3 px-4">
-                                <div className="font-bold text-white flex items-center gap-1.5">
-                                  <code className="text-[#f5c485] font-semibold">{rule.model_pattern}</code>
-                                </div>
-                              </td>
-                              <td className="py-3 px-4">
-                                {rule.team_id ? (
-                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
-                                    Team: {rule.team_name || rule.team_id.slice(0, 8)}
-                                  </span>
-                                ) : (
-                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-bold">
-                                    Global (All Teams)
-                                  </span>
-                                )}
-                              </td>
-                              <td className="py-3 px-4 text-right font-bold text-white">
-                                ${costIn.toFixed(2)}
-                              </td>
-                              <td className="py-3 px-4 text-right font-bold text-[#f5c485]">
-                                ${Number(rule.cost_out_per_m || 0).toFixed(2)}
-                              </td>
-                              <td className="py-3 px-4 text-right text-emerald-400 font-semibold">
-                                ${costCache.toFixed(3)}
-                              </td>
-                              <td className="py-3 px-4 text-center">
-                                <span className="inline-flex items-center px-2 py-0.5 rounded text-[10.5px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                                  {discountPct}% OFF
-                                </span>
-                              </td>
-                              <td className="py-3 px-4 text-center">
-                                <div className="flex items-center justify-center gap-1">
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => openEditPricingModal(rule)}
-                                    className="h-7 px-2 text-xs text-[#8e8473] hover:text-white hover:bg-[#1c1712]"
-                                    title="Edit Rule"
-                                  >
-                                    <Edit3 className="h-3.5 w-3.5" />
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => setPricingDeleteConfirm(rule)}
-                                    className="h-7 px-2 text-xs text-red-400/80 hover:text-red-400 hover:bg-red-500/10"
-                                    title="Delete Rule"
-                                  >
-                                    <Trash2 className="h-3.5 w-3.5" />
-                                  </Button>
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      {pricingList.length === 0 && (
-                        <tr>
-                          <td colSpan={7} className="py-8 text-center text-[#8e8473]">
-                            <div className="space-y-2">
-                              <div>No custom pricing overrides configured yet. Platform is using built-in system defaults.</div>
-                              <Button
-                                size="sm"
-                                onClick={() => openCreatePricingModal()}
-                                className="bg-gradient-to-r from-[#e2a355] to-[#f5c485] text-[#170f05] font-bold text-xs"
-                              >
-                                <Plus className="h-3.5 w-3.5 mr-1" />
-                                Create First Custom Rate
-                              </Button>
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* Built-in System Defaults Reference Table */}
-              <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4 font-mono">
-                <div>
-                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    <Database className="h-4 w-4 text-[#8e8473]" />
-                    Built-in System Fallback Defaults ({defaultPricingRules.length || 10})
-                  </h3>
-                  <p className="text-xs text-[#8e8473] font-sans">
-                    These default rates apply automatically when no custom override matches a session model string.
-                  </p>
-                </div>
-
-                <div className="overflow-x-auto rounded-xl border border-[rgba(242,236,223,0.06)] bg-[#0d0a07]">
-                  <table className="w-full text-left text-xs border-collapse font-mono">
-                    <thead>
-                      <tr className="border-b border-[rgba(242,236,223,0.08)] bg-[#14100c] text-[#8e8473] uppercase tracking-wider text-[10.5px]">
-                        <th className="py-2.5 px-4">Model Pattern</th>
-                        <th className="py-2.5 px-4">Model Description</th>
-                        <th className="py-2.5 px-4 text-right">Input ($/1M)</th>
-                        <th className="py-2.5 px-4 text-right">Output ($/1M)</th>
-                        <th className="py-2.5 px-4 text-right">Cache Read ($/1M)</th>
-                        <th className="py-2.5 px-4 text-center">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[rgba(242,236,223,0.04)]">
-                      {(defaultPricingRules.length > 0 ? defaultPricingRules : [
-                        { model_pattern: 'claude-3-7-sonnet', label: 'Claude 3.7 Sonnet', cost_in_per_m: 3.0, cost_out_per_m: 15.0, cost_cache_read_per_m: 0.3 },
-                        { model_pattern: 'claude-3-5-sonnet', label: 'Claude 3.5 Sonnet', cost_in_per_m: 3.0, cost_out_per_m: 15.0, cost_cache_read_per_m: 0.3 },
-                        { model_pattern: 'claude-3-5-haiku', label: 'Claude 3.5 Haiku', cost_in_per_m: 0.8, cost_out_per_m: 4.0, cost_cache_read_per_m: 0.08 },
-                        { model_pattern: 'gpt-4o', label: 'GPT-4o', cost_in_per_m: 2.5, cost_out_per_m: 10.0, cost_cache_read_per_m: 1.25 },
-                        { model_pattern: 'gpt-4o-mini', label: 'GPT-4o Mini', cost_in_per_m: 0.15, cost_out_per_m: 0.6, cost_cache_read_per_m: 0.075 },
-                        { model_pattern: 'o1', label: 'OpenAI o1', cost_in_per_m: 15.0, cost_out_per_m: 60.0, cost_cache_read_per_m: 7.5 },
-                        { model_pattern: 'o3-mini', label: 'OpenAI o3-mini', cost_in_per_m: 1.1, cost_out_per_m: 4.4, cost_cache_read_per_m: 0.55 },
-                        { model_pattern: 'deepseek-r1', label: 'DeepSeek R1', cost_in_per_m: 0.55, cost_out_per_m: 2.19, cost_cache_read_per_m: 0.14 },
-                        { model_pattern: 'deepseek-v3', label: 'DeepSeek V3', cost_in_per_m: 0.14, cost_out_per_m: 0.28, cost_cache_read_per_m: 0.014 },
-                        { model_pattern: '', label: 'Default / Unmatched Fallback', cost_in_per_m: 3.0, cost_out_per_m: 15.0, cost_cache_read_per_m: 0.3 },
-                      ]).map((def: any, idx: number) => (
-                        <tr key={idx} className="hover:bg-[rgba(226,163,85,0.04)] transition-colors">
-                          <td className="py-2.5 px-4 font-bold text-white">
-                            <code>{def.model_pattern || '* (catch-all)'}</code>
-                          </td>
-                          <td className="py-2.5 px-4 text-[#cbbfad]">{def.label || def.model_pattern}</td>
-                          <td className="py-2.5 px-4 text-right text-white">${Number(def.cost_in_per_m || 0).toFixed(2)}</td>
-                          <td className="py-2.5 px-4 text-right text-[#f5c485]">${Number(def.cost_out_per_m || 0).toFixed(2)}</td>
-                          <td className="py-2.5 px-4 text-right text-emerald-400">${Number(def.cost_cache_read_per_m || 0).toFixed(3)}</td>
-                          <td className="py-2.5 px-4 text-center">
-                            <button
-                              onClick={() => openCreatePricingModal({
-                                pattern: def.model_pattern,
-                                costIn: def.cost_in_per_m,
-                                costOut: def.cost_out_per_m,
-                                costCache: def.cost_cache_read_per_m,
-                              })}
-                              className="text-[11px] text-[#e2a355] hover:underline font-bold"
-                            >
-                              + Override
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* =========================================================================
-              VIEW 3: RESEARCH STUDY #2 - HUMAN-AI FRICTION & REWORK CASCADES
-             ========================================================================= */}
-          {activeTab === 'friction' && (
-            <div className="space-y-8 animate-fadeIn">
-              {/* Question Banner at the Top */}
-              <div className="rounded-2xl bg-gradient-to-r from-[rgba(248,113,113,0.15)] via-[#14100c] to-[rgba(226,163,85,0.1)] border border-red-500/30 p-6 shadow-xl backdrop-blur-xl">
-                <div className="flex items-start gap-4">
-                  <div className="p-3 rounded-xl bg-red-500/20 text-red-400 font-bold shrink-0">
-                    <Flame className="h-6 w-6" />
-                  </div>
-                  <div>
-                    <div className="text-xs font-mono text-red-400 uppercase font-bold tracking-wider">
-                      Research Question #2: Human-AI Friction &amp; Rework Cascades
-                    </div>
-                    <h2 className="text-lg font-bold font-mono text-white mt-1 leading-snug">
-                      Why do developers get stuck in rework loops, and at what context window depth does model degradation trigger session abandonment?
-                    </h2>
-                    <p className="text-xs text-[#8e8473] font-mono mt-1">
-                      Quantifying prompt frustration cascades, context saturation amnesia, and turn-latency drop-offs.
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Friction Metrics Grid */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 font-mono">
-                {/* 1. Reprompt Frustration Cascade */}
-                <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-white">Prompt Frustration &amp; Reprompt Cascade</h3>
-                    <p className="text-xs text-[#8e8473] font-sans">Multi-turn sessions with negative sentiment keywords (&apos;fix&apos;, &apos;no&apos;, &apos;undo&apos;)</p>
-                  </div>
-
-                  <div className="space-y-3">
-                    <div className="p-3 rounded-xl bg-[#1c1712] flex justify-between items-center text-xs">
-                      <div>
-                        <div className="text-white font-bold">1-2 Turns (One-Shot Success)</div>
-                        <div className="text-[10.5px] text-[#8e8473]">Clear instructions, high adherence</div>
-                      </div>
-                      <span className="text-emerald-400 font-bold">71.4% of sessions</span>
-                    </div>
-
-                    <div className="p-3 rounded-xl bg-[#1c1712] flex justify-between items-center text-xs">
-                      <div>
-                        <div className="text-white font-bold">3-5 Turns (Moderate Refinement)</div>
-                        <div className="text-[10.5px] text-[#8e8473]">Iterative unit test / edge case tuning</div>
-                      </div>
-                      <span className="text-[#f5c485] font-bold">21.8% of sessions</span>
-                    </div>
-
-                    <div className="p-3 rounded-xl bg-[#1c1712] border border-red-500/20 flex justify-between items-center text-xs">
-                      <div>
-                        <div className="text-red-400 font-bold">6+ Turns (Frustration Cascade / Looping)</div>
-                        <div className="text-[10.5px] text-[#8e8473]">Ambiguous prompt or model hallucination</div>
-                      </div>
-                      <span className="text-red-400 font-bold">6.8% of sessions</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 2. Context Depth Degradation Curve */}
-                <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-white">Context Depth Degradation Curve</h3>
-                    <p className="text-xs text-[#8e8473] font-sans">Tool error probability rising as prompt context expands</p>
-                  </div>
-
-                  <div className="space-y-2 text-xs">
-                    {[
-                      { range: '< 16k tokens', rate: '2.1%', bar: 15, color: '#10b981' },
-                      { range: '16k – 32k tokens', rate: '4.5%', bar: 30, color: '#34d399' },
-                      { range: '32k – 64k tokens', rate: '9.8%', bar: 55, color: '#fbbf24' },
-                      { range: '> 96k tokens (Saturation)', rate: '18.6%', bar: 90, color: '#f87171' },
-                    ].map((d, i) => (
-                      <div key={i} className="p-2.5 rounded-xl bg-[#1c1712] space-y-1">
-                        <div className="flex justify-between">
-                          <span className="text-white">{d.range}</span>
-                          <strong style={{ color: d.color }}>{d.rate} error rate</strong>
-                        </div>
-                        <div className="w-full h-1.5 rounded-full bg-[#0d0a07]">
-                          <div className="h-full rounded-full" style={{ width: `${d.bar}%`, backgroundColor: d.color }} />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* 3. Session Abandonment vs Turn Latency */}
-                <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-white">Session Abandonment vs. Latency</h3>
-                    <p className="text-xs text-[#8e8473] font-sans">Correlation between slow generations and rage-quitting</p>
-                  </div>
-
-                  <div className="p-4 rounded-xl bg-[#1c1712] flex items-center justify-between">
-                    <div>
-                      <div className="text-3xl font-bold text-amber-400">&gt; 4.5s</div>
-                      <div className="text-[10px] text-[#8e8473] uppercase mt-0.5">Critical Latency Threshold</div>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-xl font-bold text-red-400">3.4x higher</div>
-                      <div className="text-[10px] text-[#8e8473]">abandonment probability</div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 4. First-Turn Resolution Rate */}
-                <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-white">First-Turn Resolution Rate</h3>
-                    <p className="text-xs text-[#8e8473] font-sans">Impact of prompt length and traceback inclusion</p>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3 text-center text-xs">
-                    <div className="p-4 rounded-xl bg-[#1c1712] border border-emerald-500/20">
-                      <div className="text-2xl font-bold text-emerald-400">68%</div>
-                      <div className="font-semibold text-white mt-1">Structured Prompts</div>
-                      <div className="text-[10px] text-[#8e8473] mt-0.5">File refs + Stack traces</div>
-                    </div>
-                    <div className="p-4 rounded-xl bg-[#1c1712] border border-red-500/20">
-                      <div className="text-2xl font-bold text-red-400">22%</div>
-                      <div className="font-semibold text-white mt-1">Vague One-Liners</div>
-                      <div className="text-[10px] text-[#8e8473] mt-0.5">&quot;fix this&quot; / &quot;why broken&quot;</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* =========================================================================
-              VIEW 4: RESEARCH STUDY #3 - CODEBASE HOTSPOTS & TOOL FAILURES
-             ========================================================================= */}
-          {activeTab === 'hotspots' && (
-            <div className="space-y-8 animate-fadeIn">
-              {/* Question Banner at the Top */}
-              <div className="rounded-2xl bg-gradient-to-r from-[rgba(192,132,252,0.15)] via-[#14100c] to-[rgba(56,189,248,0.1)] border border-purple-500/30 p-6 shadow-xl backdrop-blur-xl">
-                <div className="flex items-start gap-4">
-                  <div className="p-3 rounded-xl bg-purple-500/20 text-purple-400 font-bold shrink-0">
-                    <FileCode className="h-6 w-6" />
-                  </div>
-                  <div>
-                    <div className="text-xs font-mono text-purple-400 uppercase font-bold tracking-wider">
-                      Research Question #3: Codebase Hotspots &amp; Tool Failures
-                    </div>
-                    <h2 className="text-lg font-bold font-mono text-white mt-1 leading-snug">
-                      Which files in the repository suffer the highest AI churn, and which agent tool operations fail most frequently?
-                    </h2>
-                    <p className="text-xs text-[#8e8473] font-mono mt-1">
-                      Pinpointing god-objects, recurring refactoring blast radius, and agent tool execution vulnerabilities.
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Hotspots Grid */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 font-mono">
-                {/* 1. Fragile File Churn & Blast Radius */}
-                <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-white">Hotspot File Churn (Top AI Blast Radius)</h3>
-                    <p className="text-xs text-[#8e8473] font-sans">Repository files touched repeatedly by agents</p>
-                  </div>
-
-                  <div className="space-y-2 text-xs">
-                    {[
-                      { path: 'components/dashboard/TeamDashboardView.tsx', edits: 142, lines: '+1,820 / -940', risk: 'High Churn' },
-                      { path: 'lib/team/stats.ts', edits: 88, lines: '+620 / -310', risk: 'Moderate' },
-                      { path: 'app/api/v1/team/stats/route.ts', edits: 45, lines: '+240 / -110', risk: 'Stable' },
-                      { path: 'lib/team/db.ts', edits: 12, lines: '+40 / -18', risk: 'Minimal' },
-                    ].map((f, i) => (
-                      <div key={i} className="p-3 rounded-xl bg-[#1c1712] flex items-center justify-between">
-                        <div className="min-w-0 flex-1 pr-3">
-                          <div className="text-white font-semibold truncate">{f.path}</div>
-                          <div className="text-[10px] text-[#8e8473]">{f.lines}</div>
-                        </div>
-                        <div className="text-right shrink-0">
-                          <span className="text-[#f5c485] font-bold">{f.edits} edits</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* 2. Tool Operation Failure Matrix */}
-                <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-white">Agent Tool Failure Matrix</h3>
-                    <p className="text-xs text-[#8e8473] font-sans">Error frequency by tool operation type</p>
-                  </div>
-
-                  <div className="space-y-3 text-xs">
-                    {[
-                      { tool: 'bash (Terminal commands)', failRate: '12.4%', calls: '482 calls', note: 'Permission & path errors' },
-                      { tool: 'editFile (Patch / String Replace)', failRate: '3.2%', calls: '1,840 calls', note: 'Unmatched target text' },
-                      { tool: 'searchFiles (ripgrep / grep)', failRate: '1.1%', calls: '920 calls', note: 'Regex syntax exceptions' },
-                      { tool: 'readFile (View file contents)', failRate: '0.4%', calls: '3,420 calls', note: 'Missing file path' },
-                    ].map((t, idx) => (
-                      <div key={idx} className="p-3 rounded-xl bg-[#1c1712] flex justify-between items-center">
-                        <div>
-                          <div className="text-white font-bold">{t.tool}</div>
-                          <div className="text-[10.5px] text-[#8e8473]">{t.calls} • {t.note}</div>
-                        </div>
-                        <span className="text-amber-400 font-bold">{t.failRate} failure</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* 3. Multi-File Edit Complexity */}
-                <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-white">Multi-File Edit Complexity</h3>
-                    <p className="text-xs text-[#8e8473] font-sans">Failure rate vs number of files touched in single turn</p>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-3 text-center text-xs">
-                    <div className="p-3 rounded-xl bg-[#1c1712]">
-                      <div className="text-xl font-bold text-emerald-400">1.8%</div>
-                      <div className="text-white mt-1">1 File</div>
-                    </div>
-                    <div className="p-3 rounded-xl bg-[#1c1712]">
-                      <div className="text-xl font-bold text-amber-400">8.4%</div>
-                      <div className="text-white mt-1">2-4 Files</div>
-                    </div>
-                    <div className="p-3 rounded-xl bg-[#1c1712] border border-red-500/20">
-                      <div className="text-xl font-bold text-red-400">24.5%</div>
-                      <div className="text-red-400 mt-1">5+ Files (Risk)</div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 4. Test-to-Production Code Ratio */}
-                <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-white">Test-to-Production Code Ratio</h3>
-                    <p className="text-xs text-[#8e8473] font-sans">Proportion of AI additions dedicated to unit tests</p>
-                  </div>
-
-                  <div className="p-4 rounded-xl bg-[#1c1712] flex items-center justify-between">
-                    <div>
-                      <div className="text-3xl font-bold text-emerald-400">32.8%</div>
-                      <div className="text-[10px] text-[#8e8473] uppercase mt-0.5">Test Code Coverage Volume</div>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-xl font-bold text-white">67.2%</div>
-                      <div className="text-[10px] text-[#8e8473]">Application logic</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
+          {activeTab === 'chat' && <AdminChatView />}
 
           {/* =========================================================================
               VIEW 5: INGESTION TRAFFIC & ENDPOINT VELOCITY
@@ -2455,6 +1656,19 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
                                 >
                                   <KeyRound className="h-3.5 w-3.5" />
                                 </Button>
+
+                                {/* Reset two-factor (privileged accounts only) */}
+                                {(u.role === 'admin' || u.role === 'superadmin') && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => handleResetMfa(u)}
+                                    className="h-7 w-7 p-0 text-[#8e8473] hover:text-[#f5c485] bg-[#1c1712] hover:bg-[rgba(226,163,85,0.15)] border border-[rgba(242,236,223,0.08)] hover:border-[#e2a355]/40 rounded-lg shrink-0"
+                                    title="Reset two-factor authenticator"
+                                  >
+                                    <ShieldAlert className="h-3.5 w-3.5" />
+                                  </Button>
+                                )}
 
                                 {/* Edit */}
                                 <Button

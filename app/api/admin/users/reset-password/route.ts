@@ -9,6 +9,7 @@ import { getSessionFromCookie, hashPassword } from '@/lib/auth';
 import { query } from '@/lib/team/db';
 import { recordAuditEvent } from '@/lib/team/audit';
 import crypto from 'node:crypto';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
@@ -49,6 +50,6 @@ export async function POST(req: NextRequest) {
     // Return the new password once (it will not be stored in plain text anywhere)
     return NextResponse.json({ ok: true, newPassword });
   } catch (err) {
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }

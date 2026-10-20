@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
 import { query } from '@/lib/team/db';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
@@ -53,6 +54,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ events: rows });
   } catch (err: any) {
     console.error('[admin/audit-log GET error]', err);
-    return NextResponse.json({ error: String(err?.message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }

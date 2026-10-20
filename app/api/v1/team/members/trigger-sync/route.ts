@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthorizedTeamId, getSessionFromCookie } from '@/lib/auth';
-import { verifyAdminToken, adminTokenFromCookie, memberFromAuthHeader } from '@/lib/team/auth';
+import { memberFromAuthHeader } from '@/lib/team/auth';
 import { query } from '@/lib/team/db';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,16 +18,7 @@ export async function OPTIONS() {
 
 function requireAdmin(req: NextRequest): boolean {
   const session = getSessionFromCookie(req.headers.get('cookie'));
-  if (session?.role === 'admin' || session?.role === 'superadmin' || session?.role === 'user') return true;
-
-  const authHeader = req.headers.get('authorization');
-  if (authHeader?.startsWith('Bearer ')) {
-    const token = authHeader.slice(7);
-    if (verifyAdminToken(token)) return true;
-  }
-  const cookieHeader = req.headers.get('cookie');
-  const token = adminTokenFromCookie(cookieHeader);
-  return verifyAdminToken(token);
+  return session?.role === 'admin' || session?.role === 'superadmin' || session?.role === 'user';
 }
 
 /** Admin triggers a sync signal for one or all team members. */
@@ -78,7 +70,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error('[trigger-sync POST error]', err);
     return NextResponse.json(
-      { error: String((err as Error).message || err) },
+      { error: publicError(err) },
       { status: 500, headers: corsHeaders },
     );
   }
@@ -106,7 +98,7 @@ export async function GET(req: NextRequest) {
   } catch (err) {
     console.error('[trigger-sync GET error]', err);
     return NextResponse.json(
-      { error: String((err as Error).message || err) },
+      { error: publicError(err) },
       { status: 500, headers: corsHeaders },
     );
   }

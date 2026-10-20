@@ -14,6 +14,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { getSessionFromCookie } from '@/lib/auth';
 import { getPlatformWhales, buildMemberUsageDeepDive } from '@/lib/admin/whale-analysis';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
@@ -63,6 +64,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(data);
   } catch (error: any) {
     console.error('[admin/top-usage] error:', error);
-    return NextResponse.json({ error: error.message || 'Internal server error' }, { status: 500 });
+    return NextResponse.json({ error: publicError(error) }, { status: 500 });
   }
 }

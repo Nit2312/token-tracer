@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "db:migrate": "node scripts/migrate.js",
-    "db:prune": "node scripts/run-rollup-prune.js"
+    "db:prune": "node scripts/run-rollup-prune.js",
+    "mfa:setup": "node scripts/mfa-setup.mjs",
+    "db:analyst-role": "node scripts/setup-analyst-role.mjs"
   },
   "dependencies": {
     "@radix-ui/react-context-menu": "^2.3.7",
@@ -28,12 +30,13 @@
     "cmdk": "^1.1.1",
     "framer-motion": "^13.2.0",
     "lucide-react": "^1.42.0",
-    "next": "16.2.10",
+    "next": "16.4.2",
     "pg": "^8.22.0",
     "playwright": "^1.62.1",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "recharts": "^3.10.1",
+    "server-only": "0.0.1",
     "sonner": "^2.0.8",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.3"
@@ -44,7 +47,8 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.2.10",
+    "eslint-config-next": "16.4.2",
+    "qrcode-terminal": "^0.12.0",
     "typescript": "^5"
   }
 }

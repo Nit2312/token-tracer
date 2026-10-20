@@ -1,21 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthorizedTeamId, getSessionFromCookie } from '@/lib/auth';
-import { adminTokenFromCookie, verifyAdminToken } from '@/lib/team/auth';
+import { getAuthorizedTeamId, getSessionFromCookie, isAdminRole } from '@/lib/auth';
 import { query } from '@/lib/team/db';
 import { recalculateTeamCosts } from '@/lib/team/stats';
 
 import defaultPricingData from '@/lib/pricing.json';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
   try {
     const session = getSessionFromCookie(req.headers.get('cookie'));
-    const authHeader = req.headers.get('authorization');
-    const legacyToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : adminTokenFromCookie(req.headers.get('cookie')) || '';
-    const isLegacyAdmin = verifyAdminToken(legacyToken);
 
-    if (!session && !isLegacyAdmin) {
+    if (!session) {
       return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
     }
 
@@ -60,12 +57,15 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ pricing: merged });
   } catch (err) {
     console.error('[team/pricing GET error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
 export async function POST(req: NextRequest) {
   try {
+    if (!isAdminRole(getSessionFromCookie(req.headers.get('cookie')))) {
+      return NextResponse.json({ error: 'admin access required' }, { status: 403 });
+    }
     const body = await req.json().catch(() => ({}));
     const rawTeamId = body.teamId ? String(body.teamId) : null;
     const teamId = getAuthorizedTeamId(req, rawTeamId);
@@ -98,12 +98,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ item: rows[0], recalc }, { status: 201 });
   } catch (err) {
     console.error('[team/pricing POST error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
 export async function DELETE(req: NextRequest) {
   try {
+    if (!isAdminRole(getSessionFromCookie(req.headers.get('cookie')))) {
+      return NextResponse.json({ error: 'admin access required' }, { status: 403 });
+    }
     const id = req.nextUrl.searchParams.get('id');
     const rawTeamId = req.nextUrl.searchParams.get('teamId');
     const teamId = getAuthorizedTeamId(req, rawTeamId);
@@ -117,7 +120,7 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ ok: true, deleted: (rowCount || 0) > 0 });
   } catch (err) {
     console.error('[team/pricing DELETE error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 

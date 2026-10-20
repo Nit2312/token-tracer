@@ -14,6 +14,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
 import { query } from '@/lib/team/db';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
@@ -48,7 +49,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ releases: rows });
   } catch (err) {
     console.error('[releases GET error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
@@ -140,7 +141,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ release: rows[0] }, { status: 201 });
   } catch (err) {
     console.error('[releases POST error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
@@ -171,7 +172,7 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ release: rows[0] });
   } catch (err) {
     console.error('[releases PATCH error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
@@ -192,6 +193,6 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ ok: true });
   } catch (err) {
     console.error('[releases DELETE error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }

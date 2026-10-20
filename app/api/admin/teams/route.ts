@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
 import { query } from '@/lib/team/db';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
@@ -28,7 +29,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ team: rows[0] }, { status: 201 });
   } catch (err: any) {
     console.error('[admin/teams POST error]', err);
-    return NextResponse.json({ error: String(err.message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
@@ -56,7 +57,7 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ team: rows[0] });
   } catch (err: any) {
     console.error('[admin/teams PUT error]', err);
-    return NextResponse.json({ error: String(err.message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
@@ -71,6 +72,6 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ ok: true, deleted: (rowCount || 0) > 0 });
   } catch (err: any) {
     console.error('[admin/teams DELETE error]', err);
-    return NextResponse.json({ error: String(err.message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }

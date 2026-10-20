@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
 import { ensureSchema } from '@/lib/team/db';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,6 +20,6 @@ export async function POST(req: NextRequest) {
     await ensureSchema();
     return NextResponse.json({ ok: true, message: 'Schema initialized.' });
   } catch (err) {
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }

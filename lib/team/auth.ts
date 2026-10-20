@@ -3,7 +3,7 @@
  * and cookie parsing. All secrets come from env vars — never hardcoded.
  */
 import crypto from 'node:crypto';
-import { adminPassword, sessionSecret } from './env';
+import { adminPassword } from './env';
 import { query } from './db';
 
 const KEY_PREFIX = 'av_live_';
@@ -43,40 +43,6 @@ export async function memberFromAuthHeader(authHeader: string | undefined | null
   if (!rows[0]) return null;
   await query('UPDATE member_keys SET last_used_at = now() WHERE key_hash = $1', [keyHash]);
   return rows[0] as { member_id: string; team_id: string; display_name: string; role: string };
-}
-
-/** Issue admin session token (stateless HMAC). */
-export function issueAdminToken(): string {
-  const secret = sessionSecret();
-  const password = adminPassword();
-  if (!password) throw new Error('ADMIN_PASSWORD is not configured');
-  return crypto.createHmac('sha256', secret).update(`admin:${password}`).digest('hex');
-}
-
-/** Verify admin token using timing-safe comparison. */
-export function verifyAdminToken(token: string | null | undefined): boolean {
-  if (!token) return false;
-  try {
-    const expected = issueAdminToken();
-    const a = Buffer.from(token);
-    const b = Buffer.from(expected);
-    if (a.length !== b.length) return false;
-    return crypto.timingSafeEqual(a, b);
-  } catch {
-    return false;
-  }
-}
-
-/** Parse admin token from Cookie header string. */
-export function adminTokenFromCookie(cookieHeader: string | undefined | null): string | null {
-  if (!cookieHeader) return null;
-  for (const part of cookieHeader.split(';')) {
-    // BUG-18 fix: cookie values can contain '=' (common in base64 tokens).
-    // Use rest spread to capture the full value, matching getSessionFromCookie's pattern.
-    const [k, ...rest] = part.trim().split('=');
-    if (k === 'team_admin') return decodeURIComponent(rest.join('=') || '');
-  }
-  return null;
 }
 
 /** Check admin password at login (timing-safe). */

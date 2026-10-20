@@ -10,6 +10,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
 import { query } from '@/lib/team/db';
 import { recalculateAllCosts } from '@/lib/team/stats';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
@@ -50,6 +51,6 @@ export async function POST(req: NextRequest) {
     });
   } catch (err: any) {
     console.error('[admin/pricing/sync POST error]', err);
-    return NextResponse.json({ error: String(err?.message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }

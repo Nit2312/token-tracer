@@ -40,3 +40,12 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 serviceAccountKey.json
+# credentials
+serviceAccountKey.json
+*serviceAccount*.json
+
+# database dumps / local exports (contain user data and credentials)
+db_dump.txt
+*.dump
+*_dump.txt
+*.sql.gz

@@ -1,15 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cronSecret } from '@/lib/team/env';
+import { safeEqual } from '@/lib/security/request';
 import { runResearchRollup } from '@/lib/team/research';
 
 function isCronAuthorized(req: NextRequest): boolean {
   const secret = cronSecret();
   if (!secret) return false; // CRON_SECRET not set → deny
   const auth = req.headers.get('authorization');
-  if (auth === `Bearer ${secret}`) return true;
+  if (safeEqual(auth, `Bearer ${secret}`)) return true;
   // Also allow direct header for Vercel Cron
   const cronHeader = req.headers.get('x-cron-secret');
-  return cronHeader === secret;
+  return safeEqual(cronHeader, secret);
 }
 
 export async function POST(req: NextRequest) {

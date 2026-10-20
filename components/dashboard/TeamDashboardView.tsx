@@ -505,7 +505,7 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
       const [statsRes, membersRes, pricingRes, promptsRes] = await Promise.all([
         fetch(`/api/v1/team/stats?from=${from}&to=${to}${teamParam}${memberParam}`),
         fetch(`/api/v1/team/members?teamId=${encodeURIComponent(selectedTeamId || '')}`),
-        fetch('/api/v1/team/pricing'),
+        fetch(`/api/v1/team/pricing?teamId=${encodeURIComponent(selectedTeamId || '')}`),
         fetch(`/api/v1/team/prompts?from=${from}&to=${to}&limit=100${teamParam}${memberParam}`)
       ]);
 
@@ -519,11 +519,7 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
       }
       if (pricingRes.ok) {
         const data = await pricingRes.json();
-        if (data.pricing && data.pricing.length > 0) {
-          setPricingRulesList(data.pricing);
-        } else if (data.rules && data.rules.length > 0) {
-          setPricingRulesList(data.rules);
-        }
+        setPricingRulesList(data.pricing || data.rules || []);
       }
       if (promptsRes.ok) {
         const data = await promptsRes.json();
@@ -589,57 +585,43 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
     }
   };
 
+  const [recalculating, setRecalculating] = React.useState(false);
+
   const handleRecalculateCosts = async () => {
+    if (recalculating) return;
+    setRecalculating(true);
+    // Fixed toast id: repeated clicks update one toast instead of stacking new ones.
+    const toastId = 'recalc-costs';
+    toast.loading('Recalculating historical token costs across all team telemetry...', { id: toastId });
     try {
-      toast.info('Recalculating historical token costs across all team telemetry...');
-      const res = await fetch('/api/v1/team/recalculate', { method: 'POST' });
+      const res = await fetch('/api/v1/team/recalculate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ teamId: selectedTeamId || null }),
+      });
+      const data = await res.json().catch(() => ({}));
       if (res.ok) {
-        toast.success('Historical costs recalculated successfully!');
+        toast.success(`Historical costs recalculated (${data.updatedCount ?? 0} sessions)`, { id: toastId });
         await fetchTeamData();
       } else {
-        toast.error('Failed to recalculate costs');
+        toast.error(`Failed to recalculate costs: ${data.error || res.status}`, { id: toastId });
       }
     } catch {
-      toast.error('Network error recalculating costs');
+      toast.error('Network error recalculating costs', { id: toastId });
+    } finally {
+      setRecalculating(false);
     }
   };
 
   const handleAddPricingRule = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newPricingForm.modelName) {
+    const form = newPricingForm;
+    if (!form.modelName) {
       toast.error('Please enter a model name');
       return;
     }
-    try {
-      const res = await fetch('/api/v1/team/pricing', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          modelPattern: newPricingForm.modelName,
-          provider: newPricingForm.provider,
-          inputCostPerM: Number(newPricingForm.inputRate),
-          outputCostPerM: Number(newPricingForm.outputRate),
-          cacheCostPerM: Number(newPricingForm.cacheRate),
-        })
-      });
-      if (res.ok) {
-        toast.success(`Pricing rule saved for ${newPricingForm.modelName}!`);
-        await fetchTeamData();
-      } else {
-        const newRule = {
-          id: String(Date.now()),
-          model_pattern: newPricingForm.modelName,
-          provider: newPricingForm.provider,
-          input_cost_per_m: Number(newPricingForm.inputRate),
-          output_cost_per_m: Number(newPricingForm.outputRate),
-          cache_cost_per_m: Number(newPricingForm.cacheRate),
-        };
-        setPricingRulesList(prev => [newRule, ...prev]);
-        toast.success(`Pricing rule added!`);
-      }
-    } catch {
-      toast.error('Failed to save pricing rule');
-    }
+
+    // Close the modal right away; the save + cost recalculation continue in the background.
     setShowAddPricingModal(false);
     setNewPricingForm({
       modelName: '',
@@ -648,6 +630,31 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
       outputRate: '15.00',
       cacheRate: '0.30'
     });
+
+    const toastId = `save-pricing-${form.modelName}`;
+    toast.loading(`Saving pricing for ${form.modelName} and recalculating costs...`, { id: toastId });
+    try {
+      const res = await fetch('/api/v1/team/pricing', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          teamId: selectedTeamId || null,
+          modelPattern: form.modelName,
+          costInPerM: Number(form.inputRate),
+          costOutPerM: Number(form.outputRate),
+          costCacheReadPerM: Number(form.cacheRate),
+        })
+      });
+      if (res.ok) {
+        toast.success(`Pricing rule saved for ${form.modelName}`, { id: toastId });
+        await fetchTeamData();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        toast.error(`Failed to save pricing rule: ${data.error || res.status}`, { id: toastId });
+      }
+    } catch {
+      toast.error('Failed to save pricing rule', { id: toastId });
+    }
   };
 
   // ── LIVE DEVELOPER ROSTER FROM DATABASE (DATE-FILTERED) ──────────────────────
@@ -874,6 +881,38 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
     }
     return [];
   }, [stats]);
+
+  // ── MODEL COVERAGE (models in use vs. available pricing info) ─────────────────
+  const modelCoverage: any[] = stats?.modelCoverage || [];
+  const unpricedModels = modelCoverage.filter((m) => !m.hasPricing);
+
+  const unpricedModelsAlert = unpricedModels.length > 0 && (
+    <div role="alert" className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-5 space-y-2">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="text-sm font-bold font-mono text-amber-300">
+          ⚠ No pricing information for {unpricedModels.length} model{unpricedModels.length > 1 ? 's' : ''} in use
+        </div>
+        <Button
+          onClick={() => setActiveTab('pricing')}
+          variant="outline"
+          className="border-amber-500/40 text-amber-300 hover:bg-amber-500/10 text-xs rounded-xl"
+        >
+          Add pricing
+        </Button>
+      </div>
+      <p className="text-xs text-amber-200/80">
+        Costs for these models are estimated with a fallback rate and may be inaccurate.
+      </p>
+      <ul className="text-xs font-mono text-amber-100 space-y-1">
+        {unpricedModels.map((m) => (
+          <li key={m.model}>
+            <span className="font-bold">{m.model === 'default' ? 'Unknown model' : m.model}</span>
+            {' — '}{m.sessions} session{m.sessions === 1 ? '' : 's'}, used by {m.members.join(', ')}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 
   // ── LIVE MODEL SHARE ─────────────────────────────────────────────────────────
   const modelShare = React.useMemo(() => {
@@ -1412,6 +1451,7 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
           )}
           {activeTab === 'overview' && (
             <div className="space-y-8 animate-fadeIn">
+              {unpricedModelsAlert}
               {/* Top 4 Spacious KPI Metric Cards */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
                 {/* 1. Total Token Burn */}
@@ -3357,6 +3397,43 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
              ========================================================================= */}
           {activeTab === 'pricing' && (
             <div className="space-y-8 animate-fadeIn">
+              {unpricedModelsAlert}
+              {/* Models in use by the team */}
+              <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4">
+                <h3 className="text-lg font-bold font-mono text-white">Models in Use</h3>
+                <div className="overflow-x-auto rounded-xl border border-[rgba(242,236,223,0.06)]">
+                  <table className="w-full text-left text-xs font-mono">
+                    <thead>
+                      <tr className="border-b border-[rgba(242,236,223,0.08)] bg-[#1c1712] text-[#8e8473]">
+                        <th className="py-3 px-4">Model</th>
+                        <th className="py-3 px-4">Used by</th>
+                        <th className="py-3 px-4">Sessions</th>
+                        <th className="py-3 px-4">Tokens</th>
+                        <th className="py-3 px-4">Pricing</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[rgba(242,236,223,0.05)]">
+                      {modelCoverage.length > 0 ? modelCoverage.map((m) => (
+                        <tr key={m.model} className="hover:bg-[rgba(226,163,85,0.04)]">
+                          <td className="py-3.5 px-4 font-bold text-white">{m.model === 'default' ? 'Unknown model' : m.model}</td>
+                          <td className="py-3.5 px-4 text-[#cbbfad]">{m.members.join(', ')}</td>
+                          <td className="py-3.5 px-4 text-[#cbbfad]">{m.sessions}</td>
+                          <td className="py-3.5 px-4 text-[#f5c485]">{formatCompactNumber(m.tokens)}</td>
+                          <td className="py-3.5 px-4">
+                            {m.hasPricing ? (
+                              <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-md text-[11px]">Priced</span>
+                            ) : (
+                              <span className="bg-amber-500/10 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded-md text-[11px]">No pricing info</span>
+                            )}
+                          </td>
+                        </tr>
+                      )) : (
+                        <tr><td colSpan={5} className="py-6 text-center text-[#8e8473]">No model usage in the selected window.</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
               {/* Header & Controls */}
               <div className="p-6 rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl flex items-center justify-between flex-wrap gap-4">
                 <div>
@@ -3375,6 +3452,7 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
 
                   <Button
                     onClick={handleRecalculateCosts}
+                    disabled={recalculating}
                     variant="outline"
                     className="border-[rgba(226,163,85,0.3)] text-[#f5c485] hover:bg-[rgba(226,163,85,0.1)] text-xs rounded-xl flex items-center gap-2"
                   >
@@ -3404,12 +3482,12 @@ export function TeamDashboardView({ session }: TeamDashboardProps) {
                           <tr key={idx} className="hover:bg-[rgba(226,163,85,0.04)]">
                             <td className="py-3.5 px-4 font-bold text-white">{m.model_pattern || m.name}</td>
                             <td className="py-3.5 px-4 text-[#8e8473]">{m.provider || 'Anthropic'}</td>
-                            <td className="py-3.5 px-4 text-[#f5c485] font-semibold">${Number(m.input_cost_per_m || m.inRate?.replace('$', '') || 3.00).toFixed(2)}</td>
-                            <td className="py-3.5 px-4 text-[#f5c485] font-semibold">${Number(m.output_cost_per_m || m.outRate?.replace('$', '') || 15.00).toFixed(2)}</td>
-                            <td className="py-3.5 px-4 text-[#cbbfad]">${Number(m.cache_cost_per_m || m.cacheRate?.replace('$', '') || 0.30).toFixed(2)}</td>
+                            <td className="py-3.5 px-4 text-[#f5c485] font-semibold">${Number(m.cost_in_per_m ?? m.input_cost_per_m ?? m.inRate?.replace('$', '') ?? 3.00).toFixed(2)}</td>
+                            <td className="py-3.5 px-4 text-[#f5c485] font-semibold">${Number(m.cost_out_per_m ?? m.output_cost_per_m ?? m.outRate?.replace('$', '') ?? 15.00).toFixed(2)}</td>
+                            <td className="py-3.5 px-4 text-[#cbbfad]">${Number(m.cost_cache_read_per_m ?? m.cache_cost_per_m ?? m.cacheRate?.replace('$', '') ?? 0.30).toFixed(2)}</td>
                             <td className="py-3.5 px-4">
                               <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-md text-[11px]">
-                                Active
+                                {m.isDefault ? 'Default' : 'Custom'}
                               </span>
                             </td>
                           </tr>

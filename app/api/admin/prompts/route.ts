@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { getSessionFromCookie } from '@/lib/auth';
 import { query } from '@/lib/team/db';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
@@ -143,15 +144,15 @@ export async function GET(req: NextRequest) {
     });
   } catch (err: any) {
     console.error('[admin-prompts-error]', err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
 export async function DELETE(req: NextRequest) {
   const cookieStore = await cookies();
   const session = getSessionFromCookie(cookieStore.toString());
-  if (!session || (session.role !== 'superadmin' && session.role !== 'admin')) {
-    return NextResponse.json({ error: 'Forbidden: Admin access required' }, { status: 403 });
+  if (!session || session.role !== 'superadmin') {
+    return NextResponse.json({ error: 'Forbidden: Superadmin access required' }, { status: 403 });
   }
 
   try {
@@ -263,6 +264,6 @@ export async function DELETE(req: NextRequest) {
     });
   } catch (err: any) {
     console.error('[admin-prompts DELETE error]', err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }

@@ -19,6 +19,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
 import { query } from '@/lib/team/db';
 import { normalizeDateParam } from '@/lib/analytics.mjs';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -582,7 +583,7 @@ export async function GET(req: NextRequest) {
       });
   } catch (err) {
     console.error('[stats GET error]', err);
-    return NextResponse.json({ error: String(err) }, {
+    return NextResponse.json({ error: publicError(err) }, {
       status: 500,
       headers: {
         'Cache-Control': 'no-store, no-cache, must-revalidate',

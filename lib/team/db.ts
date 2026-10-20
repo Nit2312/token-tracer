@@ -1,3 +1,4 @@
+import 'server-only';
 import pg from 'pg';
 import { requireDatabaseUrl } from './env';
 
@@ -414,7 +415,8 @@ export async function query<T extends pg.QueryResultRow = pg.QueryResultRow>(
       await ensureSchema();
       return await getPool().query<T>(text, params);
     }
-    console.error('[DATABASE-QUERY-ERROR]', err, '\nQuery:', text, '\nParams:', params);
+    // Never log bound parameters: they can contain password hashes, API keys or prompt text.
+    console.error('[DATABASE-QUERY-ERROR]', pgErr?.code, String((err as Error)?.message || '').slice(0, 200), '| query:', text.replace(/\s+/g, ' ').slice(0, 160));
     throw err;
   }
 }

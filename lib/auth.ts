@@ -3,28 +3,37 @@
  * Uses bcryptjs for password hashing and stateless HMAC tokens stored as
  * HTTP-only cookies for session management.
  */
-import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
-import { sessionSecret } from '@/lib/team/env';
 import { query } from '@/lib/team/db';
-import { adminTokenFromCookie, verifyAdminToken } from './team/auth';
 
-export const COOKIE_NAME = 'app_session';
-export const IMPERSONATION_COOKIE = 'sa_original_session';
-export const COOKIE_MAX_AGE = 7 * 24 * 60 * 60; // 7 days in seconds
+// Session tokens live in a pure module (shared with proxy.ts); re-exported for existing callers.
+export {
+  COOKIE_NAME,
+  IMPERSONATION_COOKIE,
+  encodeSessionToken,
+  decodeSessionToken,
+  getSessionFromCookie,
+  buildSessionCookie,
+  clearSessionCookie,
+  buildImpersonationCookie,
+  clearImpersonationCookie,
+  getOriginalSessionFromCookie,
+  getRawImpersonationToken,
+} from '@/lib/session-token';
+export type { Role, SessionPayload } from '@/lib/session-token';
+import { getSessionFromCookie, type Role, type SessionPayload } from '@/lib/session-token';
 
-export type Role = 'user' | 'admin' | 'superadmin';
+/** Superadmin or team-admin (any team). */
+export function isAdminRole(session: SessionPayload | null): session is SessionPayload {
+  return !!session && (session.role === 'admin' || session.role === 'superadmin');
+}
 
-export interface SessionPayload {
-  userId: string;   // For users: UUID from users table. For admin/superadmin: 'admin' | 'superadmin'
-  username: string;
-  displayName: string;
-  role: Role;
-  memberId: string | null;
-  teamId: string | null;
-  issuedAt: number;
-  impersonatedBy?: string;      // original superadmin userId (set during impersonation)
-  impersonatedByName?: string;  // original superadmin display name
+/**
+ * Platform owner: superadmin, or the built-in `team` admin (not bound to a single team).
+ * Team admins created through signup have a teamId and are NOT system admins.
+ */
+export function isSystemAdmin(session: SessionPayload | null): session is SessionPayload {
+  return !!session && (session.role === 'superadmin' || (session.role === 'admin' && !session.teamId));
 }
 
 // ── Password helpers ──────────────────────────────────────────────────────────
@@ -35,108 +44,6 @@ export async function hashPassword(plain: string): Promise<string> {
 
 export async function verifyPassword(plain: string, hash: string): Promise<boolean> {
   return bcrypt.compare(plain, hash);
-}
-
-// ── Token helpers (HMAC-based stateless session) ──────────────────────────────
-
-function tokenSecret(): string {
-  return sessionSecret();
-}
-
-/** Encode a session payload into a signed token string. */
-export function encodeSessionToken(payload: SessionPayload): string {
-  const data = JSON.stringify(payload);
-  const b64 = Buffer.from(data).toString('base64url');
-  const sig = crypto
-    .createHmac('sha256', tokenSecret())
-    .update(b64)
-    .digest('base64url');
-  return `${b64}.${sig}`;
-}
-
-/** Decode and verify a session token. Returns null if invalid or expired. */
-export function decodeSessionToken(token: string | null | undefined): SessionPayload | null {
-  if (!token) return null;
-  try {
-    const dot = token.lastIndexOf('.');
-    if (dot < 0) return null;
-    const b64 = token.slice(0, dot);
-    const sig = token.slice(dot + 1);
-    const expectedSig = crypto
-      .createHmac('sha256', tokenSecret())
-      .update(b64)
-      .digest('base64url');
-    // Timing-safe compare
-    const a = Buffer.from(sig);
-    const b = Buffer.from(expectedSig);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
-
-    const payload = JSON.parse(Buffer.from(b64, 'base64url').toString()) as SessionPayload;
-    // Expire after 7 days
-    if (Date.now() - payload.issuedAt > COOKIE_MAX_AGE * 1000) return null;
-    return payload;
-  } catch {
-    return null;
-  }
-}
-
-/** Read and verify the session token from a cookie header string. */
-export function getSessionFromCookie(cookieHeader: string | null | undefined): SessionPayload | null {
-  if (!cookieHeader) return null;
-  for (const part of cookieHeader.split(';')) {
-    const [k, ...rest] = part.trim().split('=');
-    if (k.trim() === COOKIE_NAME) {
-      return decodeSessionToken(decodeURIComponent(rest.join('=')));
-    }
-  }
-  return null;
-}
-
-/** Build the Set-Cookie header value for the session token. */
-export function buildSessionCookie(payload: SessionPayload, secure: boolean): string {
-  const token = encodeSessionToken(payload);
-  return `${COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${COOKIE_MAX_AGE}${secure ? '; Secure' : ''}`;
-}
-
-/** Build a cookie that clears the session. */
-export function clearSessionCookie(secure?: boolean): string {
-  return `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT${secure ? '; Secure' : ''}`;
-}
-
-// ── Impersonation cookie helpers ──────────────────────────────────────────────
-
-/** Store the original superadmin session token in a backup cookie during impersonation. */
-export function buildImpersonationCookie(originalToken: string, secure: boolean): string {
-  return `${IMPERSONATION_COOKIE}=${encodeURIComponent(originalToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${COOKIE_MAX_AGE}${secure ? '; Secure' : ''}`;
-}
-
-/** Clear the impersonation backup cookie. */
-export function clearImpersonationCookie(secure?: boolean): string {
-  return `${IMPERSONATION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT${secure ? '; Secure' : ''}`;
-}
-
-/** Read the original superadmin session from the backup impersonation cookie. */
-export function getOriginalSessionFromCookie(cookieHeader: string | null | undefined): SessionPayload | null {
-  if (!cookieHeader) return null;
-  for (const part of cookieHeader.split(';')) {
-    const [k, ...rest] = part.trim().split('=');
-    if (k.trim() === IMPERSONATION_COOKIE) {
-      return decodeSessionToken(decodeURIComponent(rest.join('=')));
-    }
-  }
-  return null;
-}
-
-/** Extract the raw impersonation cookie token string (not decoded). */
-export function getRawImpersonationToken(cookieHeader: string | null | undefined): string | null {
-  if (!cookieHeader) return null;
-  for (const part of cookieHeader.split(';')) {
-    const [k, ...rest] = part.trim().split('=');
-    if (k.trim() === IMPERSONATION_COOKIE) {
-      return decodeURIComponent(rest.join('=')) || null;
-    }
-  }
-  return null;
 }
 
 // ── Database user helpers ─────────────────────────────────────────────────────
@@ -218,18 +125,6 @@ export function getAuthorizedTeamId(req: any, paramTeamId: string | null | undef
       // BUG-04 fix: users must NEVER access another team's data via a param override
       return session.teamId || null;
     }
-  }
-
-  // Fallback check for legacy static admin password token
-  const authHeader = req.headers.get('authorization');
-  let legacyToken = '';
-  if (authHeader?.startsWith('Bearer ')) {
-    legacyToken = authHeader.slice(7);
-  } else {
-    legacyToken = adminTokenFromCookie(req.headers.get('cookie')) || '';
-  }
-  if (verifyAdminToken(legacyToken)) {
-    return paramTeamId || null;
   }
 
   return null;

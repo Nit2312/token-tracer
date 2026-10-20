@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { memberFromAuthHeader } from '@/lib/team/auth';
 import { ingestSessions } from '@/lib/team/ingest';
 import { query } from '@/lib/team/db';
+import { publicError } from '@/lib/security/errors';
 
 
 export const dynamic = 'force-dynamic';
@@ -45,7 +46,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error('[ingest POST error]', err);
     return NextResponse.json(
-      { error: String((err as Error).message || err) },
+      { error: publicError(err) },
       { status: 500, headers: corsHeaders },
     );
   }

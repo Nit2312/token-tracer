@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthorizedTeamId, getSessionFromCookie } from '@/lib/auth';
 import { buildTeamStats } from '@/lib/team/stats';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,6 +31,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(stats);
   } catch (err) {
     console.error('[team/stats GET error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }

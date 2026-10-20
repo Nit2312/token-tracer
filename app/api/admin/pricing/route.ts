@@ -10,6 +10,7 @@ import { getSessionFromCookie } from '@/lib/auth';
 import { query } from '@/lib/team/db';
 import { recalculateAllCosts, recalculateTeamCosts } from '@/lib/team/stats';
 import { recordAuditEvent } from '@/lib/team/audit';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
@@ -63,7 +64,7 @@ export async function GET(req: NextRequest) {
     });
   } catch (err: any) {
     console.error('[admin/pricing GET error]', err);
-    return NextResponse.json({ error: String(err?.message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
@@ -153,7 +154,7 @@ export async function POST(req: NextRequest) {
     }, { status: 201 });
   } catch (err: any) {
     console.error('[admin/pricing POST error]', err);
-    return NextResponse.json({ error: String(err?.message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
@@ -192,6 +193,6 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ ok: true, deleted: (rowCount || 0) > 0 });
   } catch (err: any) {
     console.error('[admin/pricing DELETE error]', err);
-    return NextResponse.json({ error: String(err?.message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }

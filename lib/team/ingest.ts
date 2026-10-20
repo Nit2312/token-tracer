@@ -82,7 +82,8 @@ export async function ingestSessions(
     const s = item as Record<string, any>;
     const source = String(s.source || 'cursor');
     const sessionId = String(s.sessionId || s.id || s.session_id || `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-    const model = String(s.model || 'default');
+    const rawModel = String(s.model || 'default');
+    const model = rawModel.toLowerCase() === '<synthetic>' ? 'default' : rawModel;
 
     let tokensIn = Number(s.tokensIn ?? s.tokens_in ?? 0);
     let tokensOut = Number(s.tokensOut ?? s.tokens_out ?? 0);

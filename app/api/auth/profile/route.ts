@@ -135,14 +135,15 @@ export async function PUT(req: NextRequest) {
   }
 
   // Build new session payload with updated display name
+  // Spread the existing session so issuedAt (absolute lifetime), MFA state and impersonation fields are preserved.
   const updatedPayload: SessionPayload = {
-    userId: session.userId,
+    ...session,
     username: currentUser.username,
     displayName: updatedDisplayName,
     role: currentUser.role,
     memberId: currentUser.member_id,
     teamId: currentUser.team_id,
-    issuedAt: Date.now(),
+    lastActive: Date.now(),
   };
 
   const isSecure = req.headers.get('x-forwarded-proto') === 'https' || req.nextUrl.protocol === 'https:';

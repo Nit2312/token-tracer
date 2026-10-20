@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthorizedTeamId, getSessionFromCookie } from '@/lib/auth';
 import { query } from '@/lib/team/db';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,6 +24,7 @@ export async function GET(req: NextRequest) {
     const params: any[] = [];
     let paramIdx = 1;
 
+    let scopedTeamId: string | null = null;
     if (session.role === 'user') {
       let memberId = session.memberId;
       if (!memberId) {
@@ -35,15 +37,17 @@ export async function GET(req: NextRequest) {
           console.warn('[prompts user lookup error]', err);
         }
       }
-      if (memberId) {
-        conditions.push(`ss.member_id = $${paramIdx}::uuid`);
-        params.push(memberId);
-        paramIdx++;
+      if (!memberId) {
+        return NextResponse.json({ error: 'No member profile is linked to this account' }, { status: 403 });
       }
+      conditions.push(`ss.member_id = $${paramIdx}::uuid`);
+      params.push(memberId);
+      paramIdx++;
     } else {
       const rawTeamId = req.nextUrl.searchParams.get('teamId') || req.nextUrl.searchParams.get('team_id');
       const teamId = getAuthorizedTeamId(req, rawTeamId);
       if (!teamId) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+      scopedTeamId = teamId;
 
       conditions.push("(ss.team_id = $1 OR ss.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $1))");
       params.push(teamId);
@@ -91,7 +95,7 @@ export async function GET(req: NextRequest) {
     const countQuery = `
       SELECT COUNT(*)::int AS total
       FROM session_turns st
-      JOIN sync_sessions ss ON ss.session_id = st.session_id
+      JOIN sync_sessions ss ON ss.session_id = st.session_id AND st.org_id = ss.team_id::text AND st.user_id = ss.member_id::text AND st.tool = ss.source
       WHERE ${whereClause}
     `;
     const countResult = await query(countQuery, params);
@@ -116,7 +120,7 @@ export async function GET(req: NextRequest) {
         COALESCE(ss.agent, 'default') AS "project",
         ss.started_at AS "createdAt"
       FROM session_turns st
-      JOIN sync_sessions ss ON ss.session_id = st.session_id
+      JOIN sync_sessions ss ON ss.session_id = st.session_id AND st.org_id = ss.team_id::text AND st.user_id = ss.member_id::text AND st.tool = ss.source
       LEFT JOIN session_turns ast ON ast.session_id = st.session_id 
                                  AND ast.turn_index = st.turn_index 
                                  AND ast.turn_role = 'assistant'
@@ -146,6 +150,13 @@ export async function GET(req: NextRequest) {
           sessionParams.push(memberId);
           sIdx++;
         }
+      } else if (scopedTeamId) {
+        sessionConditions.push(`(ss.team_id = $${sIdx}::uuid OR ss.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $${sIdx}::uuid))`);
+        sessionParams.push(scopedTeamId);
+        sIdx++;
+      } else {
+        // Never fall back to an unscoped, platform-wide listing.
+        return NextResponse.json({ prompts: [], page, limit, totalPages: 0, totalCount: 0 });
       }
       if (from) {
         sessionConditions.push(`COALESCE(ss.ended_at, ss.started_at, ss.synced_at)::date >= $${sIdx}::date`);
@@ -225,7 +236,7 @@ export async function GET(req: NextRequest) {
     });
   } catch (err: any) {
     console.error('[team-prompts GET error]', err);
-    return NextResponse.json({ error: err.message }, {
+    return NextResponse.json({ error: publicError(err) }, {
       status: 500,
       headers: {
         'Cache-Control': 'no-store, no-cache, must-revalidate',
@@ -253,16 +264,7 @@ export async function DELETE(req: NextRequest) {
         );
       }
     } else {
-      const authHeader = req.headers.get('authorization');
-      let legacyToken = '';
-      if (authHeader?.startsWith('Bearer ')) {
-        legacyToken = authHeader.slice(7);
-      }
-      if (legacyToken) {
-        isSuperAdmin = true;
-      } else {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-      }
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     let ids: string[] = [];
@@ -303,7 +305,7 @@ export async function DELETE(req: NextRequest) {
     let deletedCount = 0;
 
     if (ids.length > 0) {
-      const numericIds = ids.filter((id) => /^\d+$/.test(id)).map((id) => BigInt(id));
+      let numericIds = ids.filter((id) => /^\d+$/.test(id)).map((id) => BigInt(id));
       const nonNumericIds = ids.filter((id) => !/^\d+$/.test(id));
 
       if (numericIds.length > 0) {
@@ -319,6 +321,8 @@ export async function DELETE(req: NextRequest) {
           if (verifyRows.length === 0) {
             return NextResponse.json({ error: 'Forbidden: No authorized prompts found to delete' }, { status: 403 });
           }
+          // Only delete the turns that were verified as belonging to this team — never the rest of the list.
+          numericIds = verifyRows.map((r) => BigInt(r.id as string));
         }
 
         await query(`DELETE FROM prompt_embeddings WHERE turn_id = ANY($1::bigint[])`, [numericIds]);
@@ -405,6 +409,6 @@ export async function DELETE(req: NextRequest) {
     });
   } catch (err: any) {
     console.error('[team-prompts DELETE error]', err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }

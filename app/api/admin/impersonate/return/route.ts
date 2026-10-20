@@ -11,9 +11,9 @@ import {
   getRawImpersonationToken,
   buildSessionCookie,
   clearImpersonationCookie,
-  COOKIE_NAME,
 } from '@/lib/auth';
 import { recordAuditEvent } from '@/lib/team/audit';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
@@ -51,7 +51,8 @@ export async function POST(req: NextRequest) {
     // Restore the original superadmin session and clear the backup
     const res = NextResponse.json({ ok: true, redirect: '/admin' });
     // Set the active session back to the original superadmin token
-    res.headers.append('Set-Cookie', `${COOKIE_NAME}=${encodeURIComponent(originalToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}${secure ? '; Secure' : ''}`);
+    // Re-issue with a fresh activity timestamp (the backup token sat idle during impersonation).
+    res.headers.append('Set-Cookie', buildSessionCookie({ ...originalSession, lastActive: Date.now() }, secure));
     // Clear the backup cookie
     res.headers.append('Set-Cookie', clearImpersonationCookie());
 
@@ -68,6 +69,6 @@ export async function POST(req: NextRequest) {
     return res;
   } catch (err) {
     console.error('[impersonate/return error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }

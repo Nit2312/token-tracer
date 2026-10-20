@@ -11,6 +11,7 @@ import { getSessionFromCookie, hashPassword } from '@/lib/auth';
 import { generateApiKey, hashApiKey } from '@/lib/team/auth';
 import { query } from '@/lib/team/db';
 import { recordAuditEvent } from '@/lib/team/audit';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
@@ -86,11 +87,11 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ users: rows, unlinkedMembers, teams });
   } catch (err: any) {
-    const errMsg = String(err?.message || err);
-    if (errMsg.includes('relation "users" does not exist')) {
+    const rawMsg = String(err?.message || err);
+    if (rawMsg.includes('relation "users" does not exist')) {
       return NextResponse.json({ users: [], unlinkedMembers: [], teams: [], needsMigration: true });
     }
-    return NextResponse.json({ error: errMsg }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
@@ -251,7 +252,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Username is already taken. Please choose another one.' }, { status: 409 });
     }
     console.error('[admin/users POST error]', err);
-    return NextResponse.json({ error: String(err.message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
@@ -407,7 +408,7 @@ export async function PUT(req: NextRequest) {
       installCommandWin
     });
   } catch (err) {
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
@@ -443,6 +444,6 @@ export async function DELETE(req: NextRequest) {
 
     return NextResponse.json({ ok: true, deleted: (rowCount || 0) > 0 });
   } catch (err) {
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }

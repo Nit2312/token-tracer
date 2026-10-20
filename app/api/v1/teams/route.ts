@@ -1,22 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getSessionFromCookie } from '@/lib/auth';
-import { verifyAdminToken, adminTokenFromCookie } from '@/lib/team/auth';
+import { getSessionFromCookie, isAdminRole } from '@/lib/auth';
 import { query } from '@/lib/team/db';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
 function requireAdmin(req: NextRequest): boolean {
   const session = getSessionFromCookie(req.headers.get('cookie'));
-  if (session?.role === 'admin' || session?.role === 'superadmin' || session?.role === 'user') return true;
-
-  const authHeader = req.headers.get('authorization');
-  if (authHeader?.startsWith('Bearer ')) {
-    const token = authHeader.slice(7);
-    if (verifyAdminToken(token)) return true;
-  }
-  const cookieHeader = req.headers.get('cookie');
-  const token = adminTokenFromCookie(cookieHeader);
-  return verifyAdminToken(token);
+  return session?.role === 'admin' || session?.role === 'superadmin' || session?.role === 'user';
 }
 
 export async function GET(req: NextRequest) {
@@ -46,13 +37,16 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ teams: rows });
   } catch (err) {
     console.error('[teams GET error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
 export async function POST(req: NextRequest) {
   try {
-    if (!requireAdmin(req)) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+    // Creating teams is an admin action — plain members must not be able to.
+    if (!isAdminRole(getSessionFromCookie(req.headers.get('cookie')))) {
+      return NextResponse.json({ error: 'admin access required' }, { status: 403 });
+    }
     let body: Record<string, unknown> = {};
     try {
       body = await req.json();
@@ -67,6 +61,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ team: rows[0] }, { status: 201 });
   } catch (err) {
     console.error('[teams POST error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }

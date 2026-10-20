@@ -121,6 +121,29 @@ export default async function LoginPage() {
                 <span id="login-error-text"></span>
               </div>
             </form>
+            <form id="mfa-form" autoComplete="off" noValidate hidden>
+              <div id="mfa-enroll" hidden style={{ marginBottom: '14px', padding: '12px', borderRadius: '10px', background: 'var(--raised)', border: '1px solid var(--border)', fontSize: '12.5px', lineHeight: 1.5 }}>
+                <strong>First-time setup.</strong> Add this account to an authenticator app (Google Authenticator, 1Password, Authy…):
+                <ol style={{ margin: '8px 0 8px 18px', padding: 0 }}>
+                  <li>Choose &quot;Enter a setup key&quot; (or open the link below on your phone).</li>
+                  <li>Key: <code id="mfa-secret" style={{ userSelect: 'all', wordBreak: 'break-all', fontWeight: 'bold', color: 'var(--brand-hi)' }}></code></li>
+                  <li>Then enter the 6-digit code it shows.</li>
+                </ol>
+                <a id="mfa-uri" href="#" style={{ color: 'var(--brand)' }}>Open in authenticator app</a>
+              </div>
+              <div className="login-field">
+                <label htmlFor="mfa-code">Authentication code</label>
+                <input id="mfa-code" name="code" type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]*" maxLength={6} placeholder="123456" required />
+              </div>
+              <button type="submit" className="login-submit" id="mfa-submit">
+                <span className="login-submit-spinner" aria-hidden="true" />
+                <span className="login-submit-label">Verify and sign in</span>
+              </button>
+              <div id="mfa-error" className="login-error" role="alert" aria-live="assertive" hidden>
+                <span aria-hidden="true">!</span>
+                <span id="mfa-error-text"></span>
+              </div>
+            </form>
             <div style={{ textAlign: 'center', marginTop: '16px', fontSize: '13px', color: 'var(--muted)' }}>
               <a href="#" id="auth-mode-toggle" style={{ color: 'var(--brand)', textDecoration: 'none', fontWeight: '500' }}>
                 Don't have an account? Sign up
@@ -166,6 +189,58 @@ export default async function LoginPage() {
             var usernameInput = document.getElementById('login-username');
             var displayNameInput = document.getElementById('login-displayname');
             var teamNameInput = document.getElementById('login-teamname');
+
+            var mfaForm = document.getElementById('mfa-form');
+            var mfaCode = document.getElementById('mfa-code');
+            var mfaBtn = document.getElementById('mfa-submit');
+            var mfaErr = document.getElementById('mfa-error');
+            var mfaErrText = document.getElementById('mfa-error-text');
+
+            // Second step for admin / superadmin accounts: authenticator code.
+            function showMfa(data) {
+              pwInput.value = '';
+              form.hidden = true;
+              if (modeToggle && modeToggle.parentElement) modeToggle.parentElement.hidden = true;
+              mfaForm.hidden = false;
+              if (taglineEl) taglineEl.textContent = data.enroll ? 'Set up two-factor authentication' : 'Enter your authentication code';
+              if (data.enroll) {
+                document.getElementById('mfa-enroll').hidden = false;
+                document.getElementById('mfa-secret').textContent = data.enroll.secret;
+                document.getElementById('mfa-uri').setAttribute('href', data.enroll.otpauthUri);
+              }
+              mfaCode.focus();
+            }
+
+            if (mfaForm) {
+              mfaForm.addEventListener('submit', async function(e) {
+                e.preventDefault();
+                mfaErr.hidden = true;
+                mfaBtn.disabled = true;
+                mfaBtn.classList.add('is-busy');
+                try {
+                  var r = await fetch('/api/auth/mfa/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code: mfaCode.value.trim() }),
+                    credentials: 'same-origin',
+                  });
+                  var d = await r.json().catch(function() { return {}; });
+                  if (r.ok && d.redirect) {
+                    window.location.href = d.redirect;
+                    return;
+                  }
+                  mfaErrText.textContent = d.error || 'Verification failed.';
+                  mfaErr.hidden = false;
+                  mfaCode.value = '';
+                  if (d.restart) setTimeout(function() { window.location.reload(); }, 2500);
+                } catch (err) {
+                  mfaErrText.textContent = 'Network error. Please try again.';
+                  mfaErr.hidden = false;
+                }
+                mfaBtn.disabled = false;
+                mfaBtn.classList.remove('is-busy');
+              });
+            }
 
             if (pwToggle) {
               var eyeOpen = pwToggle.querySelector('.eye-open');
@@ -238,7 +313,10 @@ export default async function LoginPage() {
                     credentials: 'same-origin',
                   });
                   var data = await res.json().catch(function() { return {}; });
-                  if (res.ok && data.redirect) {
+                  if (res.ok && data.mfaRequired) {
+                    showMfa(data);
+                    setBusy(false);
+                  } else if (res.ok && data.redirect) {
                     window.location.href = data.redirect;
                   } else {
                     errText.textContent = data.error || 'Sign in failed. Please try again.';
@@ -283,7 +361,10 @@ export default async function LoginPage() {
                       credentials: 'same-origin',
                     });
                     var loginData = await loginRes.json().catch(function() { return {}; });
-                    if (loginRes.ok && loginData.redirect) {
+                    if (loginRes.ok && loginData.mfaRequired) {
+                      showMfa(loginData);
+                      setBusy(false);
+                    } else if (loginRes.ok && loginData.redirect) {
                       window.location.href = loginData.redirect;
                     } else {
                       window.location.reload();

@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthorizedTeamId, getSessionFromCookie } from '@/lib/auth';
+import { getAuthorizedTeamId, getSessionFromCookie, isAdminRole, isSystemAdmin } from '@/lib/auth';
 import { createMemberWithKey, createTeamUserWithMember, updateMember, deleteMember } from '@/lib/team/stats';
 import { query } from '@/lib/team/db';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
@@ -61,7 +62,7 @@ export async function GET(req: NextRequest) {
 
   } catch (err) {
     console.error('[team/members GET error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
@@ -76,7 +77,12 @@ export async function POST(req: NextRequest) {
     const rawTeamId = body.teamId ? String(body.teamId) : null;
     const teamId = getAuthorizedTeamId(req, rawTeamId);
     if (!teamId) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+    const session = getSessionFromCookie(req.headers.get('cookie'));
+    if (!isAdminRole(session)) return NextResponse.json({ error: 'admin access required' }, { status: 403 });
     if (!body.displayName) return NextResponse.json({ error: 'displayName required' }, { status: 400 });
+    if (String(body.role ?? 'member') === 'admin' && !isSystemAdmin(session)) {
+      return NextResponse.json({ error: 'Only a platform administrator can create admin accounts' }, { status: 403 });
+    }
 
     const result = await createTeamUserWithMember({
       teamId,
@@ -102,7 +108,7 @@ export async function POST(req: NextRequest) {
     }, { status: 201 });
   } catch (err) {
     console.error('[team/members POST error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
@@ -117,8 +123,23 @@ export async function PUT(req: NextRequest) {
     const rawTeamId = body.teamId ? String(body.teamId) : null;
     const teamId = getAuthorizedTeamId(req, rawTeamId);
     if (!teamId) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+    const session = getSessionFromCookie(req.headers.get('cookie'));
+    if (!isAdminRole(session)) return NextResponse.json({ error: 'admin access required' }, { status: 403 });
     if (!body.id || !body.displayName) {
       return NextResponse.json({ error: 'id and displayName required' }, { status: 400 });
+    }
+    const targetId = String(body.id);
+
+    // The target must actually belong to the selected team — no cross-team edits.
+    const { rows: membership } = await query('SELECT 1 FROM team_members WHERE team_id = $1 AND member_id = $2', [teamId, targetId]);
+    if (!membership.length) return NextResponse.json({ error: 'member does not belong to this team' }, { status: 403 });
+
+    const { rows: targetUsers } = await query('SELECT role FROM users WHERE member_id = $1', [targetId]);
+    if (targetUsers.some((u) => u.role === 'superadmin') && session.role !== 'superadmin') {
+      return NextResponse.json({ error: 'Cannot modify a superadmin account' }, { status: 403 });
+    }
+    if (body.role === 'admin' && !isSystemAdmin(session)) {
+      return NextResponse.json({ error: 'Only a platform administrator can grant the admin role' }, { status: 403 });
     }
 
     const member = await updateMember(
@@ -168,7 +189,7 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ ok: true, member });
   } catch (err) {
     console.error('[team/members PUT error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
 
@@ -182,6 +203,10 @@ export async function DELETE(req: NextRequest) {
     if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
 
     const session = getSessionFromCookie(req.headers.get('cookie'));
+    if (!isAdminRole(session)) return NextResponse.json({ error: 'admin access required' }, { status: 403 });
+    if (hard && !isSystemAdmin(session)) {
+      return NextResponse.json({ error: 'Only a platform administrator can permanently delete members' }, { status: 403 });
+    }
     if (session?.memberId === id) {
       return NextResponse.json({ error: 'You cannot remove your own administrator account' }, { status: 400 });
     }
@@ -198,6 +223,6 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json(res);
   } catch (err) {
     console.error('[team/members DELETE error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }

@@ -5,10 +5,11 @@
  * Body: { memberId?: string, userId?: string, newPassword?: string, teamId?: string }
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthorizedTeamId, getSessionFromCookie, hashPassword } from '@/lib/auth';
+import { getAuthorizedTeamId, getSessionFromCookie, hashPassword, isSystemAdmin } from '@/lib/auth';
 import { query } from '@/lib/team/db';
 import { recordAuditEvent } from '@/lib/team/audit';
 import crypto from 'node:crypto';
+import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
 
@@ -72,13 +73,15 @@ export async function POST(req: NextRequest) {
     }
 
     const passwordHash = await hashPassword(newPassword);
+    // Team admins may only reset ordinary members, never other admins or a superadmin.
+    const roleClause = isSystemAdmin(session) ? '' : " AND role = 'user'";
 
     let updatedUserId: string | null = null;
     let targetUsername: string | null = null;
 
     if (userId) {
       const { rows } = await query(
-        'UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2 RETURNING id, username',
+        `UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2${roleClause} RETURNING id, username`,
         [passwordHash, userId]
       );
       if (rows[0]) {
@@ -87,13 +90,18 @@ export async function POST(req: NextRequest) {
       }
     } else if (memberId) {
       const { rows } = await query(
-        'UPDATE users SET password_hash = $1, updated_at = now() WHERE member_id = $2 RETURNING id, username',
+        `UPDATE users SET password_hash = $1, updated_at = now() WHERE member_id = $2${roleClause} RETURNING id, username`,
         [passwordHash, memberId]
       );
       if (rows[0]) {
         updatedUserId = rows[0].id;
         targetUsername = rows[0].username;
       } else {
+        // An account exists but the role restriction excluded it: refuse instead of creating a duplicate.
+        const { rows: existingUser } = await query('SELECT 1 FROM users WHERE member_id = $1', [memberId]);
+        if (existingUser.length) {
+          return NextResponse.json({ error: 'Only a platform administrator can reset an administrator password' }, { status: 403 });
+        }
         // If user account doesn't exist yet for this member, create one
         const { rows: memRows } = await query<{ display_name: string }>(
           'SELECT display_name FROM members WHERE id = $1',
@@ -135,6 +143,6 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     console.error('[team/members/reset-password error]', err);
-    return NextResponse.json({ error: String((err as Error).message || err) }, { status: 500 });
+    return NextResponse.json({ error: publicError(err) }, { status: 500 });
   }
 }
