@@ -55,3 +55,18 @@ export async function addUsage(tokens: number): Promise<void> {
     console.error('[chat-usage write error]', (err as Error).message);
   }
 }
+
+/** Housekeeping must never hold up an answer: give up after `ms` and use the fallback. */
+export async function withTimeout<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}

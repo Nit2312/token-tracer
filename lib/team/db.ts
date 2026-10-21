@@ -25,6 +25,14 @@ export function getPool(): pg.Pool {
       max: 5,
       connectionTimeoutMillis: 20000, // Allow 20s for Neon compute endpoint wake up
       idleTimeoutMillis: 30000,
+      // Never let a query hang forever if the server silently drops the connection.
+      query_timeout: 60000,
+      keepAlive: true,
+    });
+    // Neon closes idle connections. Without this handler the pool's 'error' event is
+    // unhandled and surfaces as an uncaughtException that can strand in-flight requests.
+    globalForDb.conn.on('error', (err) => {
+      console.error('[pg pool] idle client error (connection will be replaced):', err.message);
     });
   }
   return globalForDb.conn;

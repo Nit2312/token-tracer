@@ -82,7 +82,7 @@ export function compactHistory(history: ChatTurn[]): ChatTurn[] {
   );
 }
 
-async function callGroq(messages: GroqMessage[], useTools: boolean, signal?: AbortSignal, retried = false) {
+async function callGroq(messages: GroqMessage[], useTools: boolean, signal?: AbortSignal, onWait?: (sec: number) => void, retried = false) {
   const key = groqApiKey();
   if (!key) throw new GroqConfigError('GROQ_API_KEY is not configured on the server.');
 
@@ -103,9 +103,10 @@ async function callGroq(messages: GroqMessage[], useTools: boolean, signal?: Abo
 
   // Groq enforces a tokens-per-minute limit. A short wait-and-retry avoids failing the user's question.
   if (res.status === 429 && !retried) {
-    const wait = Math.min(Number(res.headers.get('retry-after')) || 5, 15);
+    const wait = Math.min(Math.ceil(Number(res.headers.get('retry-after')) || 8), 30);
+    onWait?.(wait);
     await new Promise((r) => setTimeout(r, wait * 1000));
-    return callGroq(messages, useTools, signal, true);
+    return callGroq(messages, useTools, signal, onWait, true);
   }
 
   if (!res.ok) {
@@ -142,7 +143,7 @@ export async function runAnalystChat(
     let msg;
     onEvent({ type: 'status', text: round === 0 ? 'Thinking…' : 'Analysing results…' });
     try {
-      msg = await callGroq(messages, true, signal);
+      msg = await callGroq(messages, true, signal, (sec) => onEvent({ type: 'status', text: `Groq is rate limiting — retrying in ${sec}s…` }));
       tally(msg.usage);
     } catch (err) {
       if ((err as { toolUseFailed?: boolean }).toolUseFailed && malformedRetries < 1) {
@@ -183,7 +184,7 @@ export async function runAnalystChat(
 
   // Tool budget exhausted: force a final answer from what was gathered.
   onEvent({ type: 'status', text: 'Writing the answer…' });
-  const final = await callGroq(messages, false, signal);
+  const final = await callGroq(messages, false, signal, (sec) => onEvent({ type: 'status', text: `Groq is rate limiting — retrying in ${sec}s…` }));
   tally(final.usage);
   return { reply: (final.content || '').trim() || 'I could not complete the analysis within the tool budget.', steps, usage };
 }

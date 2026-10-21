@@ -322,7 +322,7 @@ function CopyButton({ text }: { text: string }) {
 
 function Avatar({ role }: { role: 'user' | 'assistant' }) {
   return (
-    <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border ${role === 'assistant' ? 'border-emerald-500/30 bg-emerald-500/15 text-emerald-400' : 'border-[rgba(226,163,85,0.3)] bg-[rgba(226,163,85,0.15)] text-[#f5c485]'}`}>
+    <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border ${role === 'assistant' ? 'border-emerald-500/30 bg-emerald-500/15 text-emerald-400' : 'border-[rgba(226,163,85,0.3)] bg-[rgba(226,163,85,0.15)] text-[#f5c485]'}`}>
       {role === 'assistant' ? <Bot className="h-4 w-4" /> : <User className="h-4 w-4" />}
     </div>
   );
@@ -460,60 +460,59 @@ export function AdminChatView() {
   const visibleSteps = (steps?: Step[]) => (steps || []).filter((s) => s.tool !== 'get_schema');
   const lastChartStep = (steps?: Step[]) => [...visibleSteps(steps)].reverse().find((s) => s.ok);
 
+  const [menuOpen, setMenuOpen] = React.useState(false);
+
   return (
-    <div className="flex h-[calc(100vh-12rem)] min-h-[460px] animate-fadeIn flex-col font-mono">
-      {/* Header */}
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-emerald-500/25 bg-gradient-to-r from-[rgba(16,185,129,0.12)] via-[#14100c] to-[rgba(226,163,85,0.08)] px-4 py-3">
-        <div className="flex items-center gap-3">
-          <div className="rounded-xl bg-emerald-500/20 p-2 text-emerald-400"><Sparkles className="h-5 w-5" /></div>
-          <div>
-            <h2 className="text-base font-bold text-white">Ask the Data</h2>
-            <p className="text-[11px] text-[#8e8473]">Answers come from live, read-only database queries — expand a step to see the SQL.</p>
-          </div>
+    <div className="flex h-full min-h-0 animate-fadeIn flex-col overflow-hidden rounded-2xl border border-[rgba(242,236,223,0.08)] bg-[#14100c]/90 font-mono">
+      {/* Slim toolbar */}
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[rgba(242,236,223,0.07)] px-4 py-2">
+        <div className="flex items-center gap-2">
+          <Sparkles className="h-4 w-4 text-emerald-400" />
+          <h2 className="text-sm font-bold text-white">Ask the Data</h2>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {usage && (
             <span
-              className={`inline-flex items-center gap-2 rounded-lg border px-2.5 py-1 text-[11px] ${usage.budget > 0 && usage.usedToday >= usage.budget ? 'border-red-500/30 bg-red-500/10 text-red-300' : 'border-[rgba(242,236,223,0.1)] text-[#cbbfad]'}`}
+              className={`inline-flex items-center gap-2 rounded-md px-2 py-0.5 text-[11px] ${usage.budget > 0 && usage.usedToday >= usage.budget ? 'bg-red-500/10 text-red-300' : 'text-[#8e8473]'}`}
               title={usage.budget > 0 ? `AI tokens used today (UTC). Daily budget ${usage.budget.toLocaleString()}. Quick reports and cached answers cost nothing.` : 'AI tokens used today. No daily budget set.'}
               data-testid="chat-usage"
             >
-              <Zap className="h-3.5 w-3.5 text-[#e2a355]" />
+              <Zap className="h-3 w-3 text-[#e2a355]" />
               AI tokens today: {fmtTokens(usage.usedToday)}{usage.budget > 0 ? ` / ${fmtTokens(usage.budget)}` : ''}
               {usage.budget > 0 && (
-                <span className="h-1.5 w-12 overflow-hidden rounded-full bg-[#0d0a07]">
+                <span className="h-1 w-10 overflow-hidden rounded-full bg-[#0d0a07]">
                   <span className="block h-full rounded-full bg-[#e2a355]" style={{ width: `${Math.min(100, (usage.usedToday / usage.budget) * 100)}%` }} />
                 </span>
               )}
             </span>
           )}
-          <span className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[11px] text-emerald-300" title="Prompt text, credentials, API keys, audit logs and raw event payloads are blocked at the database level. Conversations are not saved in your browser.">
-            <ShieldCheck className="h-3.5 w-3.5" /> Read-only · private fields excluded
+          <span className="inline-flex items-center gap-1 text-[11px] text-emerald-300/80" title="Prompt text, credentials, API keys, audit logs and raw event payloads are blocked at the database level. Conversations are not saved in your browser.">
+            <ShieldCheck className="h-3 w-3" /> Read-only · private fields excluded
           </span>
           {messages.length > 0 && !busy && (
-            <button onClick={() => setMessages([])} className="inline-flex items-center gap-1.5 rounded-lg border border-[rgba(242,236,223,0.1)] px-2.5 py-1 text-[11px] text-[#cbbfad] hover:text-white">
-              <Trash2 className="h-3.5 w-3.5" /> Clear
+            <button onClick={() => setMessages([])} className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] text-[#8e8473] hover:text-white">
+              <Trash2 className="h-3 w-3" /> Clear
             </button>
           )}
         </div>
       </div>
 
-      {/* Conversation */}
-      <div className="flex-1 space-y-5 overflow-y-auto rounded-2xl border border-[rgba(242,236,223,0.08)] bg-[#14100c]/90 p-4" aria-live="polite">
+      {/* Conversation — takes all remaining height */}
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4" aria-live="polite">
         {messages.length === 0 && !busy && (
           <div className="mx-auto flex h-full max-w-4xl flex-col justify-center gap-5">
             <div className="text-center">
               <p className="text-sm text-white">What would you like to know?</p>
-              <p className="mt-1 text-xs text-[#8e8473]">Ask in plain English. Pick a starter or type your own question below.</p>
+              <p className="mt-1 text-xs text-[#8e8473]">Ask in plain English, pick a starter, or open ⚡ Quick reports below.</p>
             </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               {SUGGESTION_GROUPS.map((g) => (
                 <div key={g.title} className="rounded-xl border border-[rgba(242,236,223,0.08)] bg-[#1c1712]/60 p-3">
                   <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-[#e2a355]">{g.title}</div>
-                  <div className="space-y-1.5">
-                    {g.items.map((s) => (
-                      <button key={s} onClick={() => send(s)} className="block w-full rounded-lg px-2.5 py-2 text-left text-xs text-[#cbbfad] transition-colors hover:bg-[rgba(226,163,85,0.08)] hover:text-white">
-                        {s}
+                  <div className="space-y-1">
+                    {g.items.map((q) => (
+                      <button key={q} onClick={() => send(q)} className="block w-full rounded-lg px-2.5 py-1.5 text-left text-xs text-[#cbbfad] transition-colors hover:bg-[rgba(226,163,85,0.08)] hover:text-white">
+                        {q}
                       </button>
                     ))}
                   </div>
@@ -527,10 +526,10 @@ export function AdminChatView() {
           const chart = m.role === 'assistant' && !m.error ? lastChartStep(m.steps) : undefined;
           const steps = visibleSteps(m.steps);
           return (
-            <div key={i} className={`flex gap-3 ${m.role === 'user' ? 'flex-row-reverse' : ''}`} data-testid={`chat-msg-${m.role}`}>
+            <div key={i} className={`flex gap-2.5 ${m.role === 'user' ? 'flex-row-reverse' : ''}`} data-testid={`chat-msg-${m.role}`}>
               <Avatar role={m.role} />
-              <div className="min-w-0 max-w-[88%]">
-                <div className={`rounded-2xl px-4 py-3 ${
+              <div className={`min-w-0 ${m.role === 'user' ? 'max-w-[75%]' : 'w-full max-w-[96%]'}`}>
+                <div className={`rounded-2xl px-4 py-2.5 ${
                   m.role === 'user'
                     ? 'border border-[rgba(226,163,85,0.3)] bg-[rgba(226,163,85,0.14)] text-sm text-white'
                     : m.error
@@ -541,7 +540,7 @@ export function AdminChatView() {
                   {chart && <MiniBars step={chart} hint={m.content} />}
                 </div>
                 {m.role === 'assistant' && !m.error && (
-                  <div className="mt-1.5 flex items-center gap-3 px-1">
+                  <div className="mt-1 flex items-center gap-3 px-1">
                     <CopyButton text={m.content} />
                     {steps.length > 0 && <span className="text-[11px] text-[#8e8473]">{steps.length} quer{steps.length === 1 ? 'y' : 'ies'} run</span>}
                     {m.meta && (
@@ -558,8 +557,8 @@ export function AdminChatView() {
                   </div>
                 )}
                 {steps.length > 0 && (
-                  <div className="mt-2 space-y-1.5">
-                    {steps.map((s, j) => <StepView key={j} step={s} defaultOpen={m.role === 'assistant' && !m.meta?.quick && j === steps.length - 1} />)}
+                  <div className="mt-1.5 space-y-1.5">
+                    {steps.map((st, j) => <StepView key={j} step={st} defaultOpen={m.role === 'assistant' && !m.meta?.quick && j === steps.length - 1} />)}
                   </div>
                 )}
               </div>
@@ -568,37 +567,54 @@ export function AdminChatView() {
         })}
 
         {busy && (
-          <div className="flex gap-3">
+          <div className="flex gap-2.5">
             <Avatar role="assistant" />
-            <div className="min-w-0 max-w-[88%] space-y-2">
-              <div className="inline-flex items-center gap-2 rounded-2xl border border-[rgba(242,236,223,0.08)] bg-[#1c1712] px-4 py-3 text-xs text-[#cbbfad]">
+            <div className="min-w-0 max-w-[96%] space-y-2">
+              <div className="inline-flex items-center gap-2 rounded-2xl border border-[rgba(242,236,223,0.08)] bg-[#1c1712] px-4 py-2.5 text-xs text-[#cbbfad]">
                 <Loader2 className="h-4 w-4 animate-spin text-emerald-400" />
                 <span data-testid="chat-status">{status || 'Working…'}</span>
               </div>
-              {liveSteps.map((s, j) => <StepView key={j} step={s} />)}
+              {liveSteps.map((st, j) => <StepView key={j} step={st} />)}
             </div>
           </div>
         )}
         <div ref={endRef} />
       </div>
 
-      {/* Composer */}
-      <div className="mt-3 flex flex-wrap items-center gap-1.5" data-testid="chat-quick">
-        <span className="mr-1 inline-flex items-center gap-1 text-[11px] text-[#8e8473]"><Zap className="h-3 w-3 text-[#e2a355]" /> Quick reports · no AI tokens</span>
-        {QUICK_REPORTS.map((q) => (
+      {/* Composer — one compact row; quick reports live in a menu */}
+      <form onSubmit={(e) => { e.preventDefault(); send(input); }} className="relative shrink-0 border-t border-[rgba(242,236,223,0.07)] p-3">
+        {menuOpen && (
+          <>
+            <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} aria-hidden="true" />
+            <div className="absolute bottom-full left-3 z-20 mb-2 w-56 rounded-xl border border-[rgba(242,236,223,0.1)] bg-[#1c1712] p-1.5 shadow-2xl" role="menu" data-testid="chat-quick">
+              <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-[#8e8473]">Instant reports · no AI tokens</div>
+              {QUICK_REPORTS.map((q) => (
+                <button
+                  key={q.name}
+                  type="button"
+                  role="menuitem"
+                  onClick={() => { setMenuOpen(false); quick(q.name, q.label); }}
+                  disabled={busy}
+                  className="block w-full rounded-lg px-2.5 py-1.5 text-left text-xs text-[#cbbfad] hover:bg-[rgba(226,163,85,0.1)] hover:text-white disabled:opacity-40"
+                >
+                  {q.label}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+        <div className="flex items-end gap-2 rounded-xl border border-[rgba(242,236,223,0.1)] bg-[#1c1712] p-1.5 focus-within:border-[#e2a355]">
           <button
-            key={q.name}
-            onClick={() => quick(q.name, q.label)}
+            type="button"
+            onClick={() => setMenuOpen((v) => !v)}
             disabled={busy}
-            className="rounded-lg border border-[rgba(242,236,223,0.1)] bg-[#1c1712] px-2.5 py-1 text-[11px] text-[#cbbfad] transition-colors hover:border-[rgba(226,163,85,0.4)] hover:text-white disabled:opacity-40"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            title="Quick reports (no AI tokens)"
+            className="flex h-9 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs text-[#cbbfad] hover:bg-[rgba(226,163,85,0.1)] hover:text-white disabled:opacity-40"
           >
-            {q.label}
+            <Zap className="h-4 w-4 text-[#e2a355]" /> Quick reports
           </button>
-        ))}
-      </div>
-
-      <form onSubmit={(e) => { e.preventDefault(); send(input); }} className="mt-2">
-        <div className="flex items-end gap-2 rounded-2xl border border-[rgba(242,236,223,0.1)] bg-[#1c1712] p-2 focus-within:border-[#e2a355]">
           <textarea
             ref={taRef}
             value={input}
@@ -607,24 +623,20 @@ export function AdminChatView() {
             rows={1}
             maxLength={4000}
             disabled={busy}
-            placeholder="Ask a question about your data…"
+            placeholder="Ask a question about your data…   (Enter to send · Shift+Enter for a new line)"
             aria-label="Ask a question about your data"
             data-testid="chat-input"
-            className="max-h-36 flex-1 resize-none bg-transparent px-3 py-2 text-sm text-white placeholder-[#8e8473] focus:outline-none disabled:opacity-60"
+            className="max-h-36 min-w-0 flex-1 resize-none bg-transparent px-2 py-2 text-sm text-white placeholder-[#8e8473] focus:outline-none disabled:opacity-60"
           />
           {busy ? (
-            <button type="button" onClick={stop} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-500/20 text-red-300 hover:bg-red-500/30" aria-label="Stop generating" title="Stop">
+            <button type="button" onClick={stop} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-red-500/20 text-red-300 hover:bg-red-500/30" aria-label="Stop generating" title="Stop">
               <Square className="h-4 w-4 fill-current" />
             </button>
           ) : (
-            <button type="submit" disabled={!input.trim()} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-r from-[#e2a355] to-[#f5c485] text-[#170f05] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40" aria-label="Send">
+            <button type="submit" disabled={!input.trim()} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-r from-[#e2a355] to-[#f5c485] text-[#170f05] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40" aria-label="Send">
               <ArrowUp className="h-5 w-5" />
             </button>
           )}
-        </div>
-        <div className="mt-1.5 flex justify-between px-2 text-[10.5px] text-[#8e8473]">
-          <span>Enter to send · Shift+Enter for a new line</span>
-          {input.length > 3000 && <span>{input.length}/4000</span>}
         </div>
       </form>
     </div>

@@ -17,7 +17,7 @@ import { groqApiKey } from '@/lib/team/env';
 import { GroqConfigError, runAnalystChat, type ChatStep, type ChatTurn, type TokenUsage } from '@/lib/admin/chat/groq';
 import { REPORTS, REPORT_TITLES, clampDays, executeTool, quickMarkdown, type ReportName } from '@/lib/admin/chat/tools';
 import { cacheGet, cacheSet } from '@/lib/admin/chat/cache';
-import { addUsage, dailyBudget, usedToday } from '@/lib/admin/chat/usage';
+import { addUsage, dailyBudget, usedToday, withTimeout } from '@/lib/admin/chat/usage';
 import { clientIp, rateLimit } from '@/lib/security/request';
 import { recordAuditEvent } from '@/lib/team/audit';
 
@@ -45,7 +45,7 @@ function superadmin(req: NextRequest) {
 
 export async function GET(req: NextRequest) {
   if (!superadmin(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-  const [{ tokens, requests }, budget] = [await usedToday(), dailyBudget()];
+  const [{ tokens, requests }, budget] = [await withTimeout(usedToday(), 5000, { tokens: 0, requests: 0 }), dailyBudget()];
   return NextResponse.json({ usedToday: tokens, requestsToday: requests, budget, remaining: budget > 0 ? Math.max(0, budget - tokens) : null });
 }
 
@@ -85,7 +85,7 @@ export async function POST(req: NextRequest) {
             send({ type: 'error', error: friendlyError(err) });
           } finally {
             // Audit trail: what was asked and which queries ran (never the result rows).
-            await recordAuditEvent({
+            await withTimeout(recordAuditEvent({
               actorUserId,
               actorUsername: session.username,
               action: 'chat.query',
@@ -95,7 +95,7 @@ export async function POST(req: NextRequest) {
                 ...result.audit,
                 tools: result.steps.map((s) => ({ tool: s.tool, ok: s.ok, rows: s.result?.rowCount ?? 0, sql: s.sql?.slice(0, 600) })),
               },
-            });
+            }), 5000, undefined);
             try { controller.close(); } catch { /* already closed */ }
           }
         },
@@ -157,7 +157,8 @@ export async function POST(req: NextRequest) {
 
   const budget = dailyBudget();
   if (budget > 0) {
-    const { tokens } = await usedToday();
+    // Fail open: if the usage table is slow to answer, do not block the user's question.
+    const { tokens } = await withTimeout(usedToday(), 4000, { tokens: 0, requests: 0 });
     if (tokens >= budget) {
       return NextResponse.json(
         { error: `Daily AI token budget reached (${budget.toLocaleString()} tokens). Quick reports still work and cost nothing; the budget resets at 00:00 UTC.`, budgetExceeded: true },
@@ -168,7 +169,7 @@ export async function POST(req: NextRequest) {
 
   return streamResponse(async (send) => {
     const result = await runAnalystChat(history, (e) => send(e), req.signal);
-    await addUsage(result.usage.total);
+    await withTimeout(addUsage(result.usage.total), 4000, undefined);
     if (history.length === 1) cacheSet(question, result.reply, result.steps);
     send({ type: 'final', reply: result.reply, usage: result.usage });
     return {

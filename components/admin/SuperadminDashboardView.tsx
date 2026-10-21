@@ -750,8 +750,9 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
       </aside>
 
       {/* 2. MAIN SUPERADMIN CONTENT */}
-      <main className="flex-1 flex flex-col min-w-0 overflow-y-auto">
+      <main className={`flex-1 flex flex-col min-w-0 ${activeTab === 'chat' ? 'h-screen overflow-hidden' : 'overflow-y-auto'}`}>
         {/* Sticky Header */}
+        {activeTab !== 'chat' && (
         <header className="sticky top-0 z-20 border-b border-[rgba(242,236,223,0.08)] bg-[#14100c]/85 backdrop-blur-xl px-8 py-4 flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-3">
             <h1 className="text-xl font-bold font-mono tracking-tight text-white flex items-center gap-2">
@@ -791,8 +792,9 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
             </Button>
           </div>
         </header>
+        )}
 
-        <div className="p-8 space-y-8 max-w-[1600px] w-full mx-auto">
+        <div className={activeTab === 'chat' ? 'flex-1 min-h-0 p-3' : 'p-8 space-y-8 max-w-[1600px] w-full mx-auto'}>
           
           {/* =========================================================================
               VIEW 1: OVERVIEW & FREE-TIER GUARDRAILS
