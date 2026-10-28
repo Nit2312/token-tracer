@@ -493,15 +493,28 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
     }
   };
 
-  const handleOpenSetupModal = (u: any) => {
-    const serverUrl = typeof window !== 'undefined' ? window.location.origin : 'https://token-tracer-three.vercel.app';
-    const macCmd = u.api_key ? `curl -fsSL ${serverUrl}/install.sh | bash -s -- --key ${u.api_key}` : `curl -fsSL ${serverUrl}/install.sh | bash`;
-    const winCmd = u.api_key ? `$ApiKey="${u.api_key}"; iex (irm ${serverUrl}/install.ps1)` : `iex (irm ${serverUrl}/install.ps1)`;
-    setViewSetupModal({
-      ...u,
-      macCmd,
-      winCmd,
-    });
+  const handleOpenSetupModal = async (u: any) => {
+    // The users list never carries raw API keys; fetch them on demand (audit-logged server-side).
+    const toastId = toast.loading('Fetching setup commands…');
+    try {
+      const res = await fetch('/api/admin/users/setup-command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: u.id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to load setup commands');
+      if (!data.apiKey) throw new Error('This user has no linked member, so no API key can be issued. Link a member first.');
+      toast.dismiss(toastId);
+      setViewSetupModal({
+        ...u,
+        api_key: data.apiKey,
+        macCmd: data.installCommandMac,
+        winCmd: data.installCommandWin,
+      });
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to load setup commands', { id: toastId });
+    }
   };
 
   // Filtered users calculation
@@ -2295,6 +2308,9 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
               <pre className="p-2.5 rounded-xl bg-[#0d0a07] border border-[rgba(242,236,223,0.08)] text-[11px] text-[#cbbfad] overflow-x-auto whitespace-pre-wrap break-all font-mono">
                 {viewSetupModal.winCmd}
               </pre>
+              <p className="text-[10px] text-[#8e8473] font-sans">
+                Run in PowerShell (not CMD). Needs Node.js 18+. Safe to re-run any time to reinstall or repair the daemon.
+              </p>
             </div>
 
             <Button
