@@ -14,15 +14,25 @@
 # own session, where `exit` would close their terminal.
 
 function Install-TokenTracer {
+    # Read optional caller variables via Get-Variable: a plain $global:Foo throws when
+    # Foo is undefined if the user's session has Set-StrictMode on (e.g. VS Code terminal).
+    function Get-CallerVar([string]$Name) {
+        $v = Get-Variable -Name $Name -Scope Global -ErrorAction SilentlyContinue
+        if ($v) { return $v.Value }
+        return $null
+    }
+
     $Server = "https://token-tracer-three.vercel.app"
     $Interval = 60
-    if ($global:ServerUrl)   { $Server = $global:ServerUrl }
-    if ($global:IntervalMin) { $Interval = [int]$global:IntervalMin }
+    $customServer = Get-CallerVar 'ServerUrl'
+    $customInterval = Get-CallerVar 'IntervalMin'
+    if ($customServer)   { $Server = [string]$customServer }
+    if ($customInterval) { $Interval = [int]$customInterval }
 
     # Accept the key from $env:TOKEN_TRACER_KEY, or a bare $ApiKey / $key variable
     $Key = $env:TOKEN_TRACER_KEY
-    if (-not $Key -and $global:ApiKey) { $Key = $global:ApiKey }
-    if (-not $Key -and $global:key)    { $Key = $global:key }
+    if (-not $Key) { $Key = Get-CallerVar 'ApiKey' }
+    if (-not $Key) { $Key = Get-CallerVar 'key' }
 
     if (-not $Key) {
         Write-Host "ERROR: API key is required." -ForegroundColor Red
