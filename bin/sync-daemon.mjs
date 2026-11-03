@@ -79,6 +79,33 @@ async function postBatch(apiUrl, apiKey, sessions) {
   return body;
 }
 
+// Vercel rejects request bodies over 4.5 MB (before our handler runs, so nothing is
+// logged server-side) and each session costs several DB round-trips, so cap both the
+// bytes and the session count per request.
+var MAX_BATCH_BYTES = 3 * 1024 * 1024;
+var MAX_BATCH_SESSIONS = 25;
+function chunkPayloads(payloads) {
+  const batches = [];
+  let cur = [];
+  let curBytes = 0;
+  for (const p of payloads) {
+    let size = JSON.stringify(p).length;
+    if (size > MAX_BATCH_BYTES) {
+      // A single oversized session: drop its message bodies, keep stats/tools/files.
+      p.events = [];
+      size = JSON.stringify(p).length;
+    }
+    if (cur.length && (cur.length >= MAX_BATCH_SESSIONS || curBytes + size > MAX_BATCH_BYTES)) {
+      batches.push(cur);
+      cur = [];
+      curBytes = 0;
+    }
+    cur.push(p);
+    curBytes += size;
+  }
+  if (cur.length) batches.push(cur);
+  return batches;
+}
 async function runSync(configPath, statePath, logPath) {
   const config = loadJson(configPath, null);
   if (!config?.apiUrl || !config?.apiKey) {
@@ -110,17 +137,24 @@ async function runSync(configPath, statePath, logPath) {
   }
 
   let accepted = 0;
-  for (let i = 0; i < pending.length; i += BATCH_SIZE) {
-    const batch = pending.slice(i, i + BATCH_SIZE);
-    const result = await postBatch(config.apiUrl, config.apiKey, batch);
+  const batches = chunkPayloads(pending);
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b];
+    let result;
+    try {
+      result = await postBatch(config.apiUrl, config.apiKey, batch);
+    } catch (err) {
+      appendLog(logPath, `error: batch ${b + 1}/${batches.length} (${batch.length} sessions, ${(JSON.stringify(batch).length / 1024).toFixed(0)} KB) failed: ${err.message}`);
+      throw err;
+    }
     accepted += result.accepted ?? 0;
     for (const p of batch) {
       state.synced[`${p.source}:${p.sessionId}`] = p.payloadHash;
     }
+    // Persist after every batch so a later failure doesn't redo finished work.
+    fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 448 });
+    fs.writeFileSync(statePath, JSON.stringify(state, null, 2), { mode: 384 });
   }
-
-  fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(statePath, JSON.stringify(state, null, 2), { mode: 0o600 });
   appendLog(logPath, `ok: sent ${pending.length} updated, accepted ${accepted}`);
 }
 

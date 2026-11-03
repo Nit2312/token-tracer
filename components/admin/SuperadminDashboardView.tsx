@@ -72,7 +72,7 @@ interface SuperadminProps {
 
 export function SuperadminDashboardView({ session }: SuperadminProps) {
   const [activeTab, setActiveTab] = React.useState<
-    'overview' | 'chat' | 'pricing' | 'traffic' | 'whales' | 'storage' | 'users'
+    'overview' | 'chat' | 'pricing' | 'traffic' | 'whales' | 'storage' | 'users' | 'daemon'
   >('overview');
 
   const [infraData, setInfraData] = React.useState<any | null>(null);
@@ -83,6 +83,9 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
   const [unlinkedMembers, setUnlinkedMembers] = React.useState<any[]>([]);
   const [teamsList, setTeamsList] = React.useState<any[]>([]);
   const [releasesList, setReleasesList] = React.useState<any[]>([]);
+  const [releaseMandatory, setReleaseMandatory] = React.useState(false);
+  const [releaseNotes, setReleaseNotes] = React.useState('');
+  const [publishingRelease, setPublishingRelease] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
   const [searchWhale, setSearchWhale] = React.useState('');
   const [hoveredTrafficIndex, setHoveredTrafficIndex] = React.useState<number | null>(null);
@@ -493,6 +496,57 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
     }
   };
 
+  const handlePublishRelease = async () => {
+    setPublishingRelease(true);
+    const toastId = toast.loading('Publishing the daemon this deployment serves…');
+    try {
+      const res = await fetch('/api/internal/releases/publish-current', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mandatory: releaseMandatory, releaseNotes }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to publish release');
+      toast.success(`Daemon v${data.release.version} is now the active release`, { id: toastId });
+      setReleaseNotes('');
+      setReleaseMandatory(false);
+      loadAdminData();
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to publish release', { id: toastId });
+    } finally {
+      setPublishingRelease(false);
+    }
+  };
+
+  const handleToggleRelease = async (r: any) => {
+    try {
+      const res = await fetch('/api/internal/releases', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: r.id, active: !r.active }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update release');
+      toast.success(`v${r.version} ${r.active ? 'deactivated' : 'activated'}`);
+      loadAdminData();
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to update release');
+    }
+  };
+
+  const handleDeleteRelease = async (r: any) => {
+    if (!window.confirm(`Permanently delete release v${r.version}?`)) return;
+    try {
+      const res = await fetch(`/api/internal/releases?id=${encodeURIComponent(r.id)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to delete release');
+      toast.success(`v${r.version} deleted`);
+      loadAdminData();
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to delete release');
+    }
+  };
+
   const handleOpenSetupModal = async (u: any) => {
     // The users list never carries raw API keys; fetch them on demand (audit-logged server-side).
     const toastId = toast.loading('Fetching setup commands…');
@@ -691,6 +745,23 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
                 </div>
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-[rgba(226,163,85,0.15)] text-[#f5c485] border border-[rgba(226,163,85,0.3)] font-bold">
                   {pricingList.length}
+                </span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('daemon')}
+                className={`w-full relative flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs transition-all ${
+                  activeTab === 'daemon'
+                    ? 'bg-gradient-to-r from-[rgba(226,163,85,0.18)] to-[rgba(226,163,85,0.04)] text-[#f5c485] font-bold border border-[rgba(226,163,85,0.3)] shadow-sm before:absolute before:left-0 before:top-2 before:bottom-2 before:w-1 before:rounded-r-full before:bg-[#e2a355]'
+                    : 'text-[#cbbfad] hover:text-white hover:bg-[#1a140f] border border-transparent'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <Cpu className={`h-4 w-4 ${activeTab === 'daemon' ? 'text-[#e2a355]' : 'text-[#8e8473]'}`} />
+                  <span>Daemon Releases</span>
+                </div>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#1c1712] text-[#f5c485] border border-[rgba(242,236,223,0.1)] font-bold">
+                  {releasesList.length}
                 </span>
               </button>
             </div>
@@ -1294,6 +1365,113 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
               </div>
             </div>
           )}
+
+          {/* =========================================================================
+              VIEW: DAEMON RELEASES (publish / activate / roll back)
+             ========================================================================= */}
+          {activeTab === 'daemon' && (() => {
+            const adoption: Record<string, number> = {};
+            for (const u of usersList) {
+              if (!u.member_id) continue;
+              const v = u.daemon_version || 'never connected';
+              adoption[v] = (adoption[v] || 0) + 1;
+            }
+            const activeRelease = releasesList.find((r) => r.active);
+            return (
+              <div className="space-y-6 animate-fadeIn font-mono">
+                <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl p-6 space-y-4">
+                  <div>
+                    <h3 className="text-base font-bold text-white">Publish a new daemon release</h3>
+                    <p className="text-xs text-[#8e8473] font-sans mt-1">
+                      Publishes whatever <code className="text-[#f5c485]">/sync-daemon.mjs</code> this deployment is serving right now. The version and
+                      SHA-256 are read from the file automatically. Deploy the new daemon first, then publish. Running daemons pick it up
+                      within 24 hours; reinstalling a device picks it up immediately.
+                    </p>
+                  </div>
+                  <textarea
+                    value={releaseNotes}
+                    onChange={(e) => setReleaseNotes(e.target.value)}
+                    placeholder="Release notes (optional)"
+                    rows={2}
+                    className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-xl p-2.5 text-xs text-white placeholder:text-[#8e8473] focus:outline-none focus:border-[#e2a355]/50"
+                  />
+                  <div className="flex items-center justify-between flex-wrap gap-3">
+                    <label className="flex items-center gap-2 text-xs text-[#cbbfad] cursor-pointer">
+                      <input type="checkbox" checked={releaseMandatory} onChange={(e) => setReleaseMandatory(e.target.checked)} />
+                      Mandatory (daemons skip syncing until they update)
+                    </label>
+                    <Button
+                      onClick={handlePublishRelease}
+                      disabled={publishingRelease}
+                      className="bg-gradient-to-r from-[#e2a355] to-[#f5c485] text-[#170f05] font-bold text-xs font-mono"
+                    >
+                      {publishingRelease ? 'Publishing…' : 'Publish current daemon'}
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl p-6 space-y-3">
+                  <h3 className="text-base font-bold text-white">Fleet versions</h3>
+                  <div className="flex flex-wrap gap-2">
+                    {Object.entries(adoption).map(([v, n]) => (
+                      <span
+                        key={v}
+                        className={`text-[11px] px-2.5 py-1 rounded-lg border ${
+                          v === 'never connected'
+                            ? 'bg-red-500/10 text-red-400 border-red-500/30'
+                            : v === activeRelease?.version
+                              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                              : 'bg-[#1c1712] text-[#cbbfad] border-[rgba(242,236,223,0.1)]'
+                        }`}
+                      >
+                        {v}: <strong>{n}</strong> {n === 1 ? 'user' : 'users'}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-left text-[10px] uppercase text-[#8e8473] border-b border-[rgba(242,236,223,0.08)]">
+                        <th className="p-3">Version</th>
+                        <th className="p-3">Status</th>
+                        <th className="p-3">Released</th>
+                        <th className="p-3">Notes</th>
+                        <th className="p-3 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {releasesList.length === 0 && (
+                        <tr><td colSpan={5} className="p-6 text-center text-[#8e8473]">No releases published yet.</td></tr>
+                      )}
+                      {releasesList.map((r) => (
+                        <tr key={r.id} className="border-b border-[rgba(242,236,223,0.05)]">
+                          <td className="p-3 text-white font-bold">v{r.version}</td>
+                          <td className="p-3">
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] border ${r.active ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'bg-[#1c1712] text-[#8e8473] border-[rgba(242,236,223,0.1)]'}`}>
+                              {r.active ? 'active' : 'inactive'}
+                            </span>
+                            {r.mandatory && <span className="ml-1.5 px-2 py-0.5 rounded-full text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/30">mandatory</span>}
+                          </td>
+                          <td className="p-3 text-[#cbbfad]">{r.released_at ? new Date(r.released_at).toLocaleString() : '—'}</td>
+                          <td className="p-3 text-[#8e8473] font-sans max-w-xs truncate" title={r.release_notes || ''}>{r.release_notes || '—'}</td>
+                          <td className="p-3 text-right space-x-2 whitespace-nowrap">
+                            <Button variant="ghost" size="sm" onClick={() => handleToggleRelease(r)} className="h-7 px-2.5 text-[11px] text-[#f5c485] bg-[#1c1712] border border-[rgba(242,236,223,0.1)]">
+                              {r.active ? 'Deactivate' : 'Activate'}
+                            </Button>
+                            <Button variant="ghost" size="sm" onClick={() => handleDeleteRelease(r)} className="h-7 px-2.5 text-[11px] text-red-400 bg-[#1c1712] border border-red-500/20">
+                              Delete
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* =========================================================================
               VIEW 7: DATABASE STORAGE & ZERO-COST PRUNING
