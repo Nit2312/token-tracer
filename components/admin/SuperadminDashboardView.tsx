@@ -496,6 +496,8 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
     }
   };
 
+  const serverOrigin = typeof window !== 'undefined' ? window.location.origin : 'https://token-tracer-three.vercel.app';
+
   const handlePublishRelease = async () => {
     setPublishingRelease(true);
     const toastId = toast.loading('Publishing the daemon this deployment serves…');
@@ -2489,6 +2491,33 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
               <p className="text-[10px] text-[#8e8473] font-sans">
                 Run in PowerShell (not CMD). Needs Node.js 18+. Safe to re-run any time to reinstall or repair the daemon.
               </p>
+            </div>
+
+            <div className="space-y-1.5 pt-1 border-t border-[rgba(242,236,223,0.08)]">
+              <label className="text-[11px] text-[#8e8473] uppercase font-bold">⚡ Test: sync now &amp; show result</label>
+              <p className="text-[10px] text-[#8e8473] font-sans">
+                Run on the user&apos;s device after setup. Pushes their data immediately and prints OK / FAILED, so you can confirm it works without waiting for the next sync.
+              </p>
+              {[
+                { label: '🪟 Windows', cmd: `iex (irm ${serverOrigin}/sync-now.ps1)` },
+                { label: '🍎 macOS / Linux', cmd: `curl -fsSL ${serverOrigin}/sync-now.sh | bash` },
+              ].map(({ label, cmd }) => (
+                <div key={label} className="flex items-start gap-2 bg-[#0d0a07] border border-[rgba(242,236,223,0.08)] rounded-xl p-2.5">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[10px] text-[#8e8473] mb-0.5">{label}</div>
+                    <code className="text-[11px] text-[#cbbfad] break-all">{cmd}</code>
+                  </div>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(cmd);
+                      toast.success('Sync command copied!');
+                    }}
+                    className="text-[#8e8473] hover:text-white p-1 shrink-0"
+                  >
+                    <Copy className="h-4 w-4" />
+                  </button>
+                </div>
+              ))}
             </div>
 
             <Button

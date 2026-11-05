@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
 import { query } from '@/lib/team/db';
+import { statsCache } from '@/lib/team/cache';
 import { generateApiKey, hashApiKey } from '@/lib/team/auth';
 import { publicError } from '@/lib/security/errors';
 
@@ -100,6 +101,10 @@ export async function PUT(req: NextRequest) {
     if (!rows[0]) {
       return NextResponse.json({ error: 'member not found' }, { status: 404 });
     }
+
+    // Keep the linked login's display name in step with the member's.
+    await query(`UPDATE users SET display_name = $2, updated_at = now() WHERE member_id = $1`, [id, rows[0].display_name]);
+    statsCache.clear();
 
     // Sync team_members if teamIds provided
     if (teamIds) {

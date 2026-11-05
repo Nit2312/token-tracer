@@ -37,7 +37,8 @@ export async function memberFromAuthHeader(authHeader: string | undefined | null
             m.display_name, m.role
      FROM member_keys k
      JOIN members m ON m.id = k.member_id
-     WHERE k.key_hash = $1 AND k.revoked_at IS NULL`,
+     WHERE k.key_hash = $1 AND k.revoked_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM users u WHERE u.member_id = m.id AND u.active = false)`,
     [keyHash],
   );
   if (!rows[0]) return null;

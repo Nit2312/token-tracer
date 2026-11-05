@@ -39,9 +39,18 @@ export async function GET(req: NextRequest) {
     const { rows: userRows } = await query(
       // BUG-6 fix: Don't query users.api_key — raw keys should never be stored/read.
       // The key is only shown once at creation time. The hash is in member_keys.
-      `SELECT u.display_name, u.member_id, u.team_id FROM users u WHERE u.id = $1`,
+      `SELECT u.username, u.role, u.active, u.display_name, u.member_id, u.team_id FROM users u WHERE u.id = $1`,
       [session.userId],
     );
+    // The session cookie is stateless, so a superadmin edit (username, role, deactivation,
+    // deletion) would otherwise not reach this user until their cookie expires. If the
+    // account no longer matches what the cookie says, end the session so they sign in afresh.
+    const row = userRows[0];
+    if (!row || row.active === false || row.role !== session.role || row.username !== session.username) {
+      const res = NextResponse.json({ error: 'session out of date — please sign in again' }, { status: 401 });
+      res.cookies.set('app_session', '', { path: '/', httpOnly: true, sameSite: 'lax', maxAge: 0, expires: new Date(0) });
+      return res;
+    }
     if (userRows[0]) {
       memberId = userRows[0].member_id ?? memberId;
       teamId = userRows[0].team_id ?? teamId;

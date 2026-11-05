@@ -12,6 +12,7 @@ import { generateApiKey, hashApiKey } from '@/lib/team/auth';
 import { query } from '@/lib/team/db';
 import { recordAuditEvent } from '@/lib/team/audit';
 import { publicError } from '@/lib/security/errors';
+import { statsCache } from '@/lib/team/cache';
 
 export const dynamic = 'force-dynamic';
 
@@ -391,6 +392,20 @@ export async function PUT(req: NextRequest) {
     `, [id, username ?? null, displayName ?? null, role ?? null, active ?? null, finalMemberId ?? null, finalTeamId ?? null, rawApiKey]);
 
     if (!rows[0]) return NextResponse.json({ error: 'user not found' }, { status: 404 });
+
+    // Keep the member's display name in step with the user's — team dashboards, prompts,
+    // pipeline health etc. all read members.display_name.
+    const newName = typeof displayName === 'string' ? displayName.trim() : '';
+    if (newName && rows[0].member_id) {
+      await query(`UPDATE members SET display_name = $2 WHERE id = $1`, [rows[0].member_id, newName]);
+    }
+    // Team-level role mirrors the account role (admin ↔ admin, user ↔ member).
+    if ((role === 'admin' || role === 'user') && rows[0].member_id) {
+      const teamRole = role === 'admin' ? 'admin' : 'member';
+      await query(`UPDATE team_members SET role = $2 WHERE member_id = $1`, [rows[0].member_id, teamRole]);
+      await query(`UPDATE members SET role = $2 WHERE id = $1`, [rows[0].member_id, teamRole]);
+    }
+    statsCache.clear();
 
     const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || 'https://token-tracer-three.vercel.app';
     const effectiveApiKey = rawApiKey || existingApiKey || null;
