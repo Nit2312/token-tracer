@@ -24,6 +24,13 @@ function Sync-TokenTracerNow {
         return
     }
 
+    # Repair: older installs wrote config.json with a UTF-8 BOM, which the daemon cannot parse.
+    $bytes = [System.IO.File]::ReadAllBytes($Config)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        [System.IO.File]::WriteAllBytes($Config, $bytes[3..($bytes.Length - 1)])
+        Write-Host "Repaired config.json (removed a hidden BOM that blocked the daemon from reading it)."
+    }
+
     if ($env:TOKEN_TRACER_FORCE -eq "1") {
         $State = Join-Path $env:TEMP "token-tracer-force-state.json"
         Remove-Item $State -Force -ErrorAction SilentlyContinue

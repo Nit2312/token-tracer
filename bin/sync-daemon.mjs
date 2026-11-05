@@ -27,7 +27,8 @@ const arg = (name) => {
 };
 
 function loadJson(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
+  // strip a UTF-8 BOM (Windows PowerShell 5.1 writes one) — JSON.parse rejects it
+  try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return fallback; }
 }
 
 function appendLog(logPath, line) {
@@ -109,7 +110,7 @@ function chunkPayloads(payloads) {
 async function runSync(configPath, statePath, logPath) {
   const config = loadJson(configPath, null);
   if (!config?.apiUrl || !config?.apiKey) {
-    throw new Error(`missing apiUrl/apiKey in ${configPath}`);
+    throw new Error(`missing apiUrl/apiKey in ${configPath} (file absent, unreadable or not valid JSON)`);
   }
 
   if (isLowBattery()) {

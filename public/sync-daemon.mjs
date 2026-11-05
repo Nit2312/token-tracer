@@ -1190,7 +1190,8 @@ var arg = (name) => {
 };
 function loadJson(file, fallback) {
   try {
-    return JSON.parse(fs3.readFileSync(file, "utf8"));
+    // strip a UTF-8 BOM (Windows PowerShell 5.1 writes one) — JSON.parse rejects it
+    return JSON.parse(fs3.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
   } catch {
     return fallback;
   }
@@ -1383,7 +1384,7 @@ function chunkPayloads(payloads) {
 async function runSync(configPath, statePath, logPath) {
   const config = loadJson(configPath, null);
   if (!config?.apiUrl || !config?.apiKey) {
-    throw new Error(`missing apiUrl/apiKey in ${configPath}`);
+    throw new Error(`missing apiUrl/apiKey in ${configPath} (file absent, unreadable or not valid JSON)`);
   }
   if (isLowBattery()) {
     appendLog(logPath, "skip: low battery");
@@ -1426,12 +1427,32 @@ async function runSync(configPath, statePath, logPath) {
   }
   appendLog(logPath, `ok: sent ${pending.length} updated, accepted ${accepted}`);
 }
+// Record every session currently on this machine as "already synced" WITHOUT uploading it.
+// Used when a PC changes hands, so the previous user's history isn't attributed to the new one.
+function runBaseline(statePath, logPath) {
+  const pricing = loadPricing();
+  const { sessions } = scanSessions({ cache: new Map() });
+  const state = { synced: {} };
+  for (const session of sessions) {
+    const payload = sanitizeForTeamSync(session, pricing);
+    state.synced[`${payload.source}:${payload.sessionId}`] = payload.payloadHash;
+  }
+  fs3.mkdirSync(path4.dirname(statePath), { recursive: true, mode: 448 });
+  fs3.writeFileSync(statePath, JSON.stringify(state, null, 2), { mode: 384 });
+  appendLog(logPath, `baseline: marked ${sessions.length} existing sessions as already synced (not uploaded)`);
+  console.log(`Fresh start: ${sessions.length} existing sessions on this PC were skipped and will not be uploaded.`);
+}
 async function main() {
   const configPath = arg("--config") || process.env.DEVMETRICS_CONFIG || DEFAULT_CONFIG;
   const statePath = arg("--state") || process.env.DEVMETRICS_STATE || DEFAULT_STATE;
   const logPath = arg("--log") || process.env.DEVMETRICS_LOG || DEFAULT_LOG;
   const updateLogPath = arg("--update-log") || process.env.DEVMETRICS_UPDATE_LOG || DEFAULT_UPDATE_LOG;
   const intervalMin = Number(arg("--interval-min")) || SYNC_INTERVAL_MIN;
+
+  if (args.includes("--baseline")) {
+    runBaseline(statePath, logPath);
+    return;
+  }
 
   // Attempt an update check before the very first sync.
   // checkForUpdate() re-execs and exits if an update is applied, so if we

@@ -59,18 +59,34 @@ function Install-TokenTracer {
     New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
     Write-Host "Bootstrapping Token Tracer daemon in $TargetDir ..."
 
-    # -- Write config.json (overwrites any previous key) ------------------------
     $ConfigPath = Join-Path $TargetDir "config.json"
-    @{
-        apiUrl      = $Server
-        apiKey      = $Key
-        intervalMin = $Interval
-    } | ConvertTo-Json | Set-Content -Path $ConfigPath -Force -Encoding UTF8
+    $StatePath  = Join-Path $TargetDir "sync-state.json"
+    $SyncLog    = Join-Path $TargetDir "sync.log"
+    $UpdateLog  = Join-Path $TargetDir "update.log"
+
+    # -- Was this PC set up for a DIFFERENT user before? ------------------------
+    # If so, the history already on disk belongs to them, so we do a "fresh start" below.
+    # Set $env:TOKEN_TRACER_IMPORT_HISTORY="1" to upload the existing history anyway.
+    $OldKey = $null
+    if (Test-Path $ConfigPath) {
+        try { $OldKey = (Get-Content $ConfigPath -Raw | ConvertFrom-Json).apiKey } catch {}
+    }
+    $FreshStart = ($OldKey -and ($OldKey -ne $Key) -and ($env:TOKEN_TRACER_IMPORT_HISTORY -ne "1"))
 
     # -- Stop any existing daemon before replacing its files --------------------
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -like "*sync-daemon.mjs*" } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+    # -- Write config.json (overwrites any previous key) ------------------------
+    $configJson = @{
+        apiUrl      = $Server
+        apiKey      = $Key
+        intervalMin = $Interval
+    } | ConvertTo-Json
+    # Write UTF-8 WITHOUT a BOM: Windows PowerShell 5.1's `Set-Content -Encoding UTF8` adds one,
+    # and Node's JSON.parse rejects it, so the daemon would see an empty config.
+    [System.IO.File]::WriteAllText($ConfigPath, $configJson, (New-Object System.Text.UTF8Encoding($false)))
 
     # -- Download daemon --------------------------------------------------------
     $DaemonPath = Join-Path $TargetDir "sync-daemon.mjs"
@@ -82,11 +98,17 @@ function Install-TokenTracer {
         return
     }
 
-    # -- Launcher VBS (runs Node hidden, no console window) ---------------------
-    $StatePath = Join-Path $TargetDir "sync-state.json"
-    $SyncLog   = Join-Path $TargetDir "sync.log"
-    $UpdateLog = Join-Path $TargetDir "update.log"
+    # -- Fresh start for a reused PC: skip (do not upload) sessions already on disk --
+    if ($FreshStart) {
+        Write-Host "This PC was set up for a different user before - starting fresh."
+        if (-not (Select-String -Path $DaemonPath -Pattern "--baseline" -SimpleMatch -Quiet)) {
+            Write-Host "ERROR: the downloaded daemon does not support fresh start yet. Aborting so the previous user's history is not uploaded. Ask the admin to deploy the latest version." -ForegroundColor Red
+            return
+        }
+        & node $DaemonPath --baseline --state $StatePath --log $SyncLog
+    }
 
+    # -- Launcher VBS (runs Node hidden, no console window) ---------------------
     $VbsPath = Join-Path $TargetDir "run-daemon.vbs"
     $VbsContent = @"
 CreateObject("Wscript.Shell").Run "node `"`"$DaemonPath`"`" --config `"`"$ConfigPath`"`" --state `"`"$StatePath`"`" --log `"`"$SyncLog`"`" --update-log `"`"$UpdateLog`"`"", 0, False

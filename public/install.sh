@@ -58,6 +58,13 @@ echo "📦 Bootstrapping Token Tracer daemon in $TARGET_DIR …"
 
 # ── Write config.json ────────────────────────────────────────────────────────
 CONFIG_PATH="$TARGET_DIR/config.json"
+
+# Was this machine set up for a DIFFERENT user before? If so the history already on disk is
+# theirs, so we do a "fresh start" below. TOKEN_TRACER_IMPORT_HISTORY=1 uploads it anyway.
+OLD_KEY=""
+if [ -f "$CONFIG_PATH" ]; then
+  OLD_KEY="$(node -e 'try{process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8").replace(/^\uFEFF/,"")).apiKey||"")}catch{}' "$CONFIG_PATH" 2>/dev/null || true)"
+fi
 cat > "$CONFIG_PATH" <<EOF
 {
   "apiUrl": "$SERVER_URL",
@@ -72,6 +79,16 @@ DAEMON_PATH="$TARGET_DIR/sync-daemon.mjs"
 echo "⬇️  Downloading daemon …"
 curl -fsSL "$SERVER_URL/sync-daemon.mjs" -o "$DAEMON_PATH"
 chmod 755 "$DAEMON_PATH"
+
+# ── Fresh start for a reused machine: skip (do not upload) sessions already on disk ──
+if [ -n "$OLD_KEY" ] && [ "$OLD_KEY" != "$API_KEY" ] && [ "${TOKEN_TRACER_IMPORT_HISTORY:-}" != "1" ]; then
+  echo "This machine was set up for a different user before - starting fresh."
+  if ! grep -q -- "--baseline" "$DAEMON_PATH"; then
+    echo "ERROR: the downloaded daemon does not support fresh start yet. Aborting so the previous user's history is not uploaded. Ask the admin to deploy the latest version."
+    exit 1
+  fi
+  node "$DAEMON_PATH" --baseline --state "$TARGET_DIR/sync-state.json" --log "$TARGET_DIR/sync.log"
+fi
 
 # ── macOS: register as LaunchAgent (persists across reboots) ─────────────────
 if [[ "$(uname)" == "Darwin" ]]; then
