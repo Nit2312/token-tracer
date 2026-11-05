@@ -142,6 +142,16 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
   // View Setup / API Key Modal State
   const [viewSetupModal, setViewSetupModal] = React.useState<any | null>(null);
 
+  // Manage a user's synced sessions (delete / reassign)
+  const [sessionsModal, setSessionsModal] = React.useState<any | null>(null);
+  const [sessAction, setSessAction] = React.useState<'delete' | 'reassign'>('delete');
+  const [sessFrom, setSessFrom] = React.useState('');
+  const [sessTo, setSessTo] = React.useState('');
+  const [sessTarget, setSessTarget] = React.useState('');
+  const [sessConfirm, setSessConfirm] = React.useState('');
+  const [sessPreview, setSessPreview] = React.useState<any | null>(null);
+  const [sessBusy, setSessBusy] = React.useState(false);
+
   // Fetch superadmin analytics
   const loadAdminData = React.useCallback(async () => {
     setLoading(true);
@@ -497,6 +507,64 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
   };
 
   const serverOrigin = typeof window !== 'undefined' ? window.location.origin : 'https://token-tracer-three.vercel.app';
+
+  const sessionsRequest = async (body: Record<string, unknown>) => {
+    const res = await fetch('/api/admin/users/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: sessionsModal.id,
+        from: sessFrom ? new Date(`${sessFrom}T00:00:00`).toISOString() : undefined,
+        to: sessTo ? new Date(`${sessTo}T23:59:59.999`).toISOString() : undefined,
+        ...body,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Request failed');
+    return data;
+  };
+
+  const openSessionsModal = (u: any) => {
+    setSessionsModal(u);
+    setSessAction('delete');
+    setSessFrom('');
+    setSessTo('');
+    setSessTarget('');
+    setSessConfirm('');
+    setSessPreview(null);
+  };
+
+  React.useEffect(() => {
+    if (!sessionsModal) return;
+    let cancelled = false;
+    setSessPreview(null);
+    sessionsRequest({ action: 'preview' })
+      .then((d) => { if (!cancelled) setSessPreview(d.preview); })
+      .catch((e) => { if (!cancelled) toast.error(e.message); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionsModal?.id, sessFrom, sessTo]);
+
+  const handleSessionsAction = async () => {
+    setSessBusy(true);
+    const toastId = toast.loading(sessAction === 'delete' ? 'Deleting sessions…' : 'Reassigning sessions…');
+    try {
+      const data = await sessionsRequest({ action: sessAction, targetUserId: sessTarget || undefined, confirm: sessConfirm });
+      const r = data.result || {};
+      toast.success(
+        sessAction === 'delete'
+          ? `Deleted ${r.sessionsDeleted ?? 0} sessions`
+          : `Moved ${r.sessionsMoved ?? 0} sessions${r.duplicatesRemoved ? ` (${r.duplicatesRemoved} duplicates dropped)` : ''}`,
+        { id: toastId },
+      );
+      setSessionsModal(null);
+      loadAdminData();
+    } catch (err: any) {
+      toast.error(err.message || 'Action failed', { id: toastId });
+    } finally {
+      setSessBusy(false);
+    }
+  };
 
   const handlePublishRelease = async () => {
     setPublishingRelease(true);
@@ -1476,6 +1544,286 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
           })()}
 
           {/* =========================================================================
+              VIEW: MODEL PRICING & TOKEN RATES CONFIGURATION
+             ========================================================================= */}
+          {activeTab === 'pricing' && (
+            <div className="space-y-8 animate-fadeIn">
+              {/* Question Banner at the Top */}
+              <div className="rounded-2xl bg-gradient-to-r from-[rgba(226,163,85,0.15)] via-[#14100c] to-[rgba(16,185,129,0.1)] border border-[rgba(226,163,85,0.3)] p-6 shadow-xl backdrop-blur-xl">
+                <div className="flex items-start justify-between gap-4 flex-wrap">
+                  <div className="flex items-start gap-4">
+                    <div className="p-3 rounded-xl bg-[rgba(226,163,85,0.18)] text-[#f5c485] font-bold shrink-0">
+                      <Tag className="h-6 w-6" />
+                    </div>
+                    <div>
+                      <div className="text-xs font-mono text-[#e2a355] uppercase font-bold tracking-wider">
+                        Platform Economic Governance &amp; Rate Configuration
+                      </div>
+                      <h2 className="text-lg font-bold font-mono text-white mt-1 leading-snug">
+                        How are foundation models and custom deployments monetized across input, output, and prompt-cached tokens?
+                      </h2>
+                      <p className="text-xs text-[#8e8473] font-mono mt-1">
+                        Configure custom per-1M token rates for frontier models, set team-specific discount overrides, and retroactively recalculate historical telemetry costs.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Primary Action Buttons */}
+                  <div className="flex items-center gap-2.5 flex-wrap">
+                    <Button
+                      onClick={() => openCreatePricingModal()}
+                      className="bg-gradient-to-r from-[#e2a355] to-[#f5c485] text-[#170f05] font-bold text-xs font-mono shadow-md hover:brightness-105"
+                    >
+                      <Plus className="h-3.5 w-3.5 mr-1" />
+                      Add Model Pricing Rule
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={handleGlobalRecalculate}
+                      disabled={recalculatingCosts}
+                      className="border-[rgba(242,236,223,0.1)] text-[#cbbfad] hover:text-white bg-[#1c1712] text-xs font-mono"
+                      title="Recalculates all historical telemetry costs with the latest pricing rules"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 mr-1.5 text-[#e2a355] ${recalculatingCosts ? 'animate-spin' : ''}`} />
+                      {recalculatingCosts ? 'Recalculating…' : 'Sync & Recalculate Historical Costs'}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Quick Model Presets Bar */}
+              <div className="p-4 rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl space-y-2.5 font-mono">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-[#8e8473] font-bold uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                    <Sparkles className="h-3.5 w-3.5 text-[#e2a355]" />
+                    Quick Add Model Presets
+                  </span>
+                  <span className="text-[10px] text-[#8e8473]">Click to load standard baseline rates into editor</span>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {[
+                    { label: 'Claude 3.7 Sonnet', pattern: 'claude-3-7-sonnet', costIn: 3.0, costOut: 15.0, costCache: 0.30 },
+                    { label: 'Claude 3.5 Haiku', pattern: 'claude-3-5-haiku', costIn: 0.8, costOut: 4.0, costCache: 0.08 },
+                    { label: 'GPT-4o', pattern: 'gpt-4o', costIn: 2.5, costOut: 10.0, costCache: 1.25 },
+                    { label: 'GPT-4.5 Preview', pattern: 'gpt-4.5-preview', costIn: 75.0, costOut: 150.0, costCache: 37.5 },
+                    { label: 'o3-mini', pattern: 'o3-mini', costIn: 1.1, costOut: 4.4, costCache: 0.55 },
+                    { label: 'Gemini 2.0 Flash', pattern: 'gemini-2.0-flash', costIn: 0.10, costOut: 0.40, costCache: 0.025 },
+                    { label: 'DeepSeek R1', pattern: 'deepseek-r1', costIn: 0.55, costOut: 2.19, costCache: 0.14 },
+                    { label: 'Llama 3.3 70B', pattern: 'llama-3.3-70b', costIn: 0.20, costOut: 0.60, costCache: 0.05 },
+                  ].map((p, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => openCreatePricingModal(p)}
+                      className="px-3 py-1.5 rounded-xl bg-[#1c1712] border border-[rgba(242,236,223,0.08)] text-[11px] text-[#cbbfad] hover:text-white hover:border-[#e2a355]/40 hover:bg-[#251e18] transition-all flex items-center gap-1.5"
+                    >
+                      <Plus className="h-3 w-3 text-[#e2a355]" />
+                      <span>{p.label}</span>
+                      <span className="text-[10px] text-[#8e8473]">(${p.costIn}/${p.costOut})</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Custom Pricing Rules Table Card */}
+              <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4 font-mono">
+                <div className="flex items-center justify-between flex-wrap gap-4">
+                  <div>
+                    <h3 className="text-base font-bold text-white flex items-center gap-2">
+                      <Tag className="h-4 w-4 text-[#e2a355]" />
+                      Active Custom Pricing Overrides ({pricingList.length})
+                    </h3>
+                    <p className="text-xs text-[#8e8473] font-sans">
+                      Overrides take precedence over system default rates when matching session model strings.
+                    </p>
+                  </div>
+
+                  <div className="relative w-64">
+                    <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-[#8e8473]" />
+                    <input
+                      type="text"
+                      placeholder="Filter model pattern…"
+                      value={pricingSearch}
+                      onChange={(e) => setPricingSearch(e.target.value)}
+                      className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-xl pl-9 pr-3 py-1.5 text-xs text-white placeholder-[#8e8473] focus:outline-none focus:border-[#e2a355]"
+                    />
+                  </div>
+                </div>
+
+                {/* Table */}
+                <div className="overflow-x-auto rounded-xl border border-[rgba(242,236,223,0.06)] bg-[#0d0a07]">
+                  <table className="w-full text-left text-xs border-collapse font-mono">
+                    <thead>
+                      <tr className="border-b border-[rgba(242,236,223,0.08)] bg-[#14100c] text-[#8e8473] uppercase tracking-wider text-[10.5px]">
+                        <th className="py-3 px-4">Model Pattern</th>
+                        <th className="py-3 px-4">Scope</th>
+                        <th className="py-3 px-4 text-right">Input ($/1M)</th>
+                        <th className="py-3 px-4 text-right">Output ($/1M)</th>
+                        <th className="py-3 px-4 text-right">Cache Read ($/1M)</th>
+                        <th className="py-3 px-4 text-center">Cache Discount</th>
+                        <th className="py-3 px-4 text-center">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[rgba(242,236,223,0.04)]">
+                      {pricingList
+                        .filter((r) => {
+                          if (!pricingSearch) return true;
+                          const q = pricingSearch.toLowerCase();
+                          return (
+                            (r.model_pattern && r.model_pattern.toLowerCase().includes(q)) ||
+                            (r.team_name && r.team_name.toLowerCase().includes(q))
+                          );
+                        })
+                        .map((rule: any) => {
+                          const costIn = Number(rule.cost_in_per_m || 0);
+                          const costCache = Number(rule.cost_cache_read_per_m || 0);
+                          const discountPct = costIn > 0 ? Math.max(0, Math.round(((costIn - costCache) / costIn) * 100)) : 0;
+                          return (
+                            <tr key={rule.id} className="hover:bg-[rgba(226,163,85,0.04)] transition-colors">
+                              <td className="py-3 px-4">
+                                <div className="font-bold text-white flex items-center gap-1.5">
+                                  <code className="text-[#f5c485] font-semibold">{rule.model_pattern}</code>
+                                </div>
+                              </td>
+                              <td className="py-3 px-4">
+                                {rule.team_id ? (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
+                                    Team: {rule.team_name || rule.team_id.slice(0, 8)}
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-bold">
+                                    Global (All Teams)
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-3 px-4 text-right font-bold text-white">
+                                ${costIn.toFixed(2)}
+                              </td>
+                              <td className="py-3 px-4 text-right font-bold text-[#f5c485]">
+                                ${Number(rule.cost_out_per_m || 0).toFixed(2)}
+                              </td>
+                              <td className="py-3 px-4 text-right text-emerald-400 font-semibold">
+                                ${costCache.toFixed(3)}
+                              </td>
+                              <td className="py-3 px-4 text-center">
+                                <span className="inline-flex items-center px-2 py-0.5 rounded text-[10.5px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                                  {discountPct}% OFF
+                                </span>
+                              </td>
+                              <td className="py-3 px-4 text-center">
+                                <div className="flex items-center justify-center gap-1">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => openEditPricingModal(rule)}
+                                    className="h-7 px-2 text-xs text-[#8e8473] hover:text-white hover:bg-[#1c1712]"
+                                    title="Edit Rule"
+                                  >
+                                    <Edit3 className="h-3.5 w-3.5" />
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => setPricingDeleteConfirm(rule)}
+                                    className="h-7 px-2 text-xs text-red-400/80 hover:text-red-400 hover:bg-red-500/10"
+                                    title="Delete Rule"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </Button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      {pricingList.length === 0 && (
+                        <tr>
+                          <td colSpan={7} className="py-8 text-center text-[#8e8473]">
+                            <div className="space-y-2">
+                              <div>No custom pricing overrides configured yet. Platform is using built-in system defaults.</div>
+                              <Button
+                                size="sm"
+                                onClick={() => openCreatePricingModal()}
+                                className="bg-gradient-to-r from-[#e2a355] to-[#f5c485] text-[#170f05] font-bold text-xs"
+                              >
+                                <Plus className="h-3.5 w-3.5 mr-1" />
+                                Create First Custom Rate
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Built-in System Defaults Reference Table */}
+              <div className="rounded-2xl bg-[#14100c]/90 border border-[rgba(242,236,223,0.08)] shadow-xl backdrop-blur-xl p-6 space-y-4 font-mono">
+                <div>
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Database className="h-4 w-4 text-[#8e8473]" />
+                    Built-in System Fallback Defaults ({defaultPricingRules.length || 10})
+                  </h3>
+                  <p className="text-xs text-[#8e8473] font-sans">
+                    These default rates apply automatically when no custom override matches a session model string.
+                  </p>
+                </div>
+
+                <div className="overflow-x-auto rounded-xl border border-[rgba(242,236,223,0.06)] bg-[#0d0a07]">
+                  <table className="w-full text-left text-xs border-collapse font-mono">
+                    <thead>
+                      <tr className="border-b border-[rgba(242,236,223,0.08)] bg-[#14100c] text-[#8e8473] uppercase tracking-wider text-[10.5px]">
+                        <th className="py-2.5 px-4">Model Pattern</th>
+                        <th className="py-2.5 px-4">Model Description</th>
+                        <th className="py-2.5 px-4 text-right">Input ($/1M)</th>
+                        <th className="py-2.5 px-4 text-right">Output ($/1M)</th>
+                        <th className="py-2.5 px-4 text-right">Cache Read ($/1M)</th>
+                        <th className="py-2.5 px-4 text-center">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[rgba(242,236,223,0.04)]">
+                      {(defaultPricingRules.length > 0 ? defaultPricingRules : [
+                        { model_pattern: 'claude-3-7-sonnet', label: 'Claude 3.7 Sonnet', cost_in_per_m: 3.0, cost_out_per_m: 15.0, cost_cache_read_per_m: 0.3 },
+                        { model_pattern: 'claude-3-5-sonnet', label: 'Claude 3.5 Sonnet', cost_in_per_m: 3.0, cost_out_per_m: 15.0, cost_cache_read_per_m: 0.3 },
+                        { model_pattern: 'claude-3-5-haiku', label: 'Claude 3.5 Haiku', cost_in_per_m: 0.8, cost_out_per_m: 4.0, cost_cache_read_per_m: 0.08 },
+                        { model_pattern: 'gpt-4o', label: 'GPT-4o', cost_in_per_m: 2.5, cost_out_per_m: 10.0, cost_cache_read_per_m: 1.25 },
+                        { model_pattern: 'gpt-4o-mini', label: 'GPT-4o Mini', cost_in_per_m: 0.15, cost_out_per_m: 0.6, cost_cache_read_per_m: 0.075 },
+                        { model_pattern: 'o1', label: 'OpenAI o1', cost_in_per_m: 15.0, cost_out_per_m: 60.0, cost_cache_read_per_m: 7.5 },
+                        { model_pattern: 'o3-mini', label: 'OpenAI o3-mini', cost_in_per_m: 1.1, cost_out_per_m: 4.4, cost_cache_read_per_m: 0.55 },
+                        { model_pattern: 'deepseek-r1', label: 'DeepSeek R1', cost_in_per_m: 0.55, cost_out_per_m: 2.19, cost_cache_read_per_m: 0.14 },
+                        { model_pattern: 'deepseek-v3', label: 'DeepSeek V3', cost_in_per_m: 0.14, cost_out_per_m: 0.28, cost_cache_read_per_m: 0.014 },
+                        { model_pattern: '', label: 'Default / Unmatched Fallback', cost_in_per_m: 3.0, cost_out_per_m: 15.0, cost_cache_read_per_m: 0.3 },
+                      ]).map((def: any, idx: number) => (
+                        <tr key={idx} className="hover:bg-[rgba(226,163,85,0.04)] transition-colors">
+                          <td className="py-2.5 px-4 font-bold text-white">
+                            <code>{def.model_pattern || '* (catch-all)'}</code>
+                          </td>
+                          <td className="py-2.5 px-4 text-[#cbbfad]">{def.label || def.model_pattern}</td>
+                          <td className="py-2.5 px-4 text-right text-white">${Number(def.cost_in_per_m || 0).toFixed(2)}</td>
+                          <td className="py-2.5 px-4 text-right text-[#f5c485]">${Number(def.cost_out_per_m || 0).toFixed(2)}</td>
+                          <td className="py-2.5 px-4 text-right text-emerald-400">${Number(def.cost_cache_read_per_m || 0).toFixed(3)}</td>
+                          <td className="py-2.5 px-4 text-center">
+                            <button
+                              onClick={() => openCreatePricingModal({
+                                pattern: def.model_pattern,
+                                costIn: def.cost_in_per_m,
+                                costOut: def.cost_out_per_m,
+                                costCache: def.cost_cache_read_per_m,
+                              })}
+                              className="text-[11px] text-[#e2a355] hover:underline font-bold"
+                            >
+                              + Override
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* =========================================================================
               VIEW 7: DATABASE STORAGE & ZERO-COST PRUNING
              ========================================================================= */}
           {activeTab === 'storage' && (
@@ -1840,6 +2188,19 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
                                 >
                                   <Terminal className="h-3.5 w-3.5" />
                                 </Button>
+
+                                {/* Manage synced sessions */}
+                                {u.member_id && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => openSessionsModal(u)}
+                                    className="h-7 w-7 p-0 text-[#8e8473] hover:text-[#f5c485] bg-[#1c1712] hover:bg-[rgba(226,163,85,0.15)] border border-[rgba(242,236,223,0.08)] hover:border-[#e2a355]/40 rounded-lg shrink-0"
+                                    title="Manage synced sessions (delete / reassign)"
+                                  >
+                                    <Database className="h-3.5 w-3.5" />
+                                  </Button>
+                                )}
 
                                 {/* Reset Password */}
                                 <Button
@@ -2526,6 +2887,106 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
             >
               Close
             </Button>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: MANAGE A USER'S SYNCED SESSIONS (delete / reassign)
+         ========================================================================= */}
+      {sessionsModal && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="w-full max-w-lg bg-[#14100c] border border-[rgba(242,236,223,0.15)] rounded-2xl p-6 shadow-2xl space-y-4 font-mono max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-[rgba(242,236,223,0.08)]">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <Database className="h-4 w-4 text-[#e2a355]" />
+                  Manage synced sessions
+                </h3>
+                <p className="text-xs text-[#8e8473] font-sans mt-0.5">
+                  @{sessionsModal.username} ({sessionsModal.displayName}) — e.g. a PC changed hands and the previous person&apos;s history was uploaded here.
+                </p>
+              </div>
+              <button onClick={() => setSessionsModal(null)} className="text-[#8e8473] hover:text-white p-1 rounded-lg hover:bg-[#1c1712]">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <label className="space-y-1 text-[11px] text-[#8e8473] uppercase font-bold">
+                From (optional)
+                <input type="date" value={sessFrom} onChange={(e) => setSessFrom(e.target.value)}
+                  className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-lg p-2 text-xs text-white normal-case" />
+              </label>
+              <label className="space-y-1 text-[11px] text-[#8e8473] uppercase font-bold">
+                To (optional)
+                <input type="date" value={sessTo} onChange={(e) => setSessTo(e.target.value)}
+                  className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-lg p-2 text-xs text-white normal-case" />
+              </label>
+            </div>
+
+            <div className="rounded-xl bg-[#0d0a07] border border-[rgba(242,236,223,0.08)] p-3 text-xs text-[#cbbfad]">
+              {sessPreview === null ? (
+                'Counting matching sessions…'
+              ) : (
+                <>
+                  <strong className="text-white">{sessPreview.sessions}</strong> sessions match
+                  {sessPreview.sessions > 0 && (
+                    <>
+                      {' '}· {Number(sessPreview.tokens).toLocaleString()} tokens · ${Number(sessPreview.cost).toFixed(2)}
+                      <div className="text-[10px] text-[#8e8473] mt-1">
+                        {new Date(sessPreview.first_at).toLocaleDateString()} → {new Date(sessPreview.last_at).toLocaleDateString()}
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+              <div className="text-[10px] text-[#8e8473] mt-1 font-sans">Leave both dates empty to match every session for this user.</div>
+            </div>
+
+            <div className="flex gap-2">
+              {(['delete', 'reassign'] as const).map((a) => (
+                <button key={a} onClick={() => setSessAction(a)}
+                  className={`flex-1 text-xs py-2 rounded-lg border ${sessAction === a ? 'bg-[rgba(226,163,85,0.18)] text-[#f5c485] border-[#e2a355]/40 font-bold' : 'bg-[#1c1712] text-[#8e8473] border-[rgba(242,236,223,0.1)]'}`}>
+                  {a === 'delete' ? '🗑 Delete sessions' : '↪ Reassign to another user'}
+                </button>
+              ))}
+            </div>
+
+            {sessAction === 'reassign' && (
+              <select value={sessTarget} onChange={(e) => setSessTarget(e.target.value)}
+                className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-lg p-2 text-xs text-white">
+                <option value="">Move these sessions to…</option>
+                {usersList.filter((x) => x.id !== sessionsModal.id && x.member_id).map((x) => (
+                  <option key={x.id} value={x.id}>{x.displayName || x.display_name || x.username} (@{x.username})</option>
+                ))}
+              </select>
+            )}
+
+            <p className="text-[11px] text-[#8e8473] font-sans">
+              {sessAction === 'delete'
+                ? 'Permanently removes the sessions and their prompts/turn analytics. Daily rollup history is cleared only when no dates are set.'
+                : 'Moves the sessions and their turn analytics. Sessions the target already has are dropped from this user. Daily rollup history is not moved.'}
+              {' '}This cannot be undone.
+            </p>
+
+            <input value={sessConfirm} onChange={(e) => setSessConfirm(e.target.value)}
+              placeholder={`Type "${sessionsModal.username}" to confirm`}
+              className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-lg p-2 text-xs text-white placeholder:text-[#8e8473]" />
+
+            <div className="flex gap-2">
+              <Button onClick={() => setSessionsModal(null)}
+                className="flex-1 bg-[#1c1712] text-white border border-[rgba(242,236,223,0.1)] hover:bg-[#251f18] text-xs font-mono">
+                Cancel
+              </Button>
+              <Button
+                onClick={handleSessionsAction}
+                disabled={sessBusy || sessConfirm !== sessionsModal.username || !sessPreview?.sessions || (sessAction === 'reassign' && !sessTarget)}
+                className="flex-1 bg-red-500/80 hover:bg-red-500 text-white font-bold text-xs font-mono disabled:opacity-40"
+              >
+                {sessAction === 'delete' ? 'Delete sessions' : 'Reassign sessions'}
+              </Button>
+            </div>
           </div>
         </div>
       )}
