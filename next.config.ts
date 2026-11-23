@@ -55,7 +55,7 @@ const nextConfig: NextConfig = {
 
 
   // Server external packages (Node.js built-ins used by adapters)
-  serverExternalPackages: ['pg'],
+  serverExternalPackages: ['pg', 'libpg-query'],
 
   // Use Turbopack (Next.js 16 default) — no webpack config needed
   turbopack: {},

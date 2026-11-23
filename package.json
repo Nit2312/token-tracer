@@ -10,7 +10,9 @@
     "db:migrate": "node scripts/migrate.js",
     "db:prune": "node scripts/run-rollup-prune.js",
     "mfa:setup": "node scripts/mfa-setup.mjs",
-    "db:analyst-role": "node scripts/setup-analyst-role.mjs"
+    "db:analyst-role": "node scripts/setup-analyst-role.mjs",
+    "test": "NODE_OPTIONS=--conditions=react-server tsx --test tests/*.test.ts",
+    "db:analyst-login": "node scripts/setup-analyst-login.mjs"
   },
   "dependencies": {
     "@radix-ui/react-context-menu": "^2.3.7",
@@ -29,6 +31,7 @@
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "framer-motion": "^13.2.0",
+    "libpg-query": "18.2.5",
     "lucide-react": "^1.42.0",
     "next": "16.4.2",
     "pg": "^8.22.0",
@@ -49,6 +52,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.4.2",
     "qrcode-terminal": "^0.12.0",
+    "tsx": "4.23.15",
     "typescript": "^5"
   }
 }

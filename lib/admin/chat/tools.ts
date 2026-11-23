@@ -87,7 +87,7 @@ function clampInt(v: unknown, def: number, min: number, max: number): number {
 
 const NOT_SYNTHETIC = "LOWER(COALESCE(s.model, '')) <> '<synthetic>'";
 
-function builtSql(name: string, args: Record<string, unknown>): string | null {
+export function builtSql(name: string, args: Record<string, unknown>): string | null {
   const days = clampInt(args.days, 30, 1, 365);
   const limit = clampInt(args.limit, 10, 1, 50);
   const since = `${ACTIVITY} >= NOW() - INTERVAL '${days} days'`;
@@ -134,7 +134,7 @@ function builtSql(name: string, args: Record<string, unknown>): string | null {
       return `SELECT f.path, SUM(f.edits)::int AS edits, SUM(f.additions)::int AS additions,
         SUM(f.deletions)::int AS deletions, COUNT(DISTINCT f.sync_session_id)::int AS sessions
         FROM sync_session_files f JOIN sync_sessions s ON s.id = f.sync_session_id
-        WHERE ${since} GROUP BY f.path ORDER BY edits DESC, additions + deletions DESC LIMIT ${limit}`;
+        WHERE ${since} GROUP BY f.path ORDER BY edits DESC, SUM(f.additions) + SUM(f.deletions) DESC LIMIT ${limit}`;
     case 'friction_report':
       return `WITH peak AS (
           SELECT st.session_id, st.org_id, st.user_id, st.tool, MAX(st.cumulative_input_tokens) AS peak_ctx
