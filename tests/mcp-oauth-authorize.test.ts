@@ -120,8 +120,21 @@ describe('OAuth consent step (live test branch)', { skip: SKIP_DB ? SKIP_REASON 
         ['impersonated', mkSession({ impersonatedBy: 'superadmin' })], ['plain user', mkSession({ userId: plain, role: 'user' })],
         ['inactive', mkSession({ userId: inactive })], ['no team', mkSession({ userId: noTeam, teamId: null })], ['stale team', mkSession({ teamId: other })],
         ['no mfa', mkSession({ mfa: false })], ['unknown user', mkSession({ userId: crypto.randomUUID() })],
+        ['plain user, old login', mkSession({ userId: plain, role: 'user', issuedAt: Date.now() - 3600_000 })], // never-eligible: told so, NOT asked to re-login
       ];
       for (const [name, s] of cases) { const v = await prep(query(), s); assert.equal(v.kind, 'ineligible', name); assert.ok(!JSON.stringify(v).includes('consentToken'), name); }
+    });
+    it('a login older than 15 minutes is sent to /oauth/reauthenticate (carrying the exact request); a login within 15 minutes is not', async () => {
+      const stale = await prep(query(), mkSession({ issuedAt: Date.now() - 16 * 60_000 })); assert.equal(stale.kind, 'reauth');
+      const url = (stale as { url: string }).url; assert.ok(url.startsWith('/oauth/reauthenticate?returnTo='));
+      const rt = decodeURIComponent(url.slice('/oauth/reauthenticate?returnTo='.length));
+      assert.ok(rt.startsWith('/oauth/authorize?')); assert.equal(new URL(rt, 'https://x').searchParams.get('state'), 'st-1');
+      assert.equal((await prep(query(), mkSession({ issuedAt: Date.now() - 14 * 60_000 }))).kind, 'consent');
+      assert.equal((await prep(query(), mkSession({ issuedAt: Date.now() - 11 * 3600_000 }))).kind, 'reauth');
+      // a request too long to carry through login (safeReturnTo limit) is a fatal error page, never a redirect loop
+      assert.equal((await prep(query({ junk: 'a'.repeat(2100) }), mkSession({ issuedAt: Date.now() - 3600_000 }))).kind, 'fatal');
+      assert.equal((await prep(query({ junk: 'a'.repeat(2100) }), null)).kind, 'fatal');
+      assert.equal((await prep(query({ state: 'x'.repeat(500), scope: 'mcp:read', resource: cfg.resource }), mkSession({ issuedAt: Date.now() - 3600_000 }))).kind === 'reauth', true);
     });
     it('an eligible admin gets a consent view bound to them; loopback is flagged; the hostile client name is data, not markup', async () => {
       const s = mkSession(); const v = await consentOf(s);
@@ -184,6 +197,16 @@ describe('OAuth consent step (live test branch)', { skip: SKIP_DB ? SKIP_REASON 
       await owner.query('UPDATE oauth_clients SET disabled_at = now() WHERE client_id = $1', [loopbackClientId]);
       assert.equal((await decide({ consent: v2.consentToken, decision: 'approve' }, { session: s2 })).body.error, 'invalid_request');
       await owner.query('UPDATE oauth_clients SET disabled_at = NULL WHERE client_id = $1', [loopbackClientId]);
+    });
+    it('recent login is re-checked AT THE CLICK: a consent shown to a 14-minute-old login and approved 2 minutes later is refused with login_required (no code, no audit noise)', async () => {
+      const s = mkSession({ issuedAt: Date.now() - 14 * 60_000 }); const v = await consentOf(s);
+      const codesBefore = Number((await owner.query('SELECT count(*) FROM oauth_authorization_codes WHERE user_id = $1', [adminId])).rows[0].count);
+      const deniedBefore = await auditCount('mcp.access_denied', started);
+      const late = await decide({ consent: v.consentToken, decision: 'approve' }, { session: s, now: Date.now() + 2 * 60_000 });
+      assert.deepEqual([late.status, late.body.error], [401, 'login_required']);
+      assert.equal(Number((await owner.query('SELECT count(*) FROM oauth_authorization_codes WHERE user_id = $1', [adminId])).rows[0].count), codesBefore);
+      assert.equal(await auditCount('mcp.access_denied', started), deniedBefore);
+      assert.equal((await decide({ consent: v.consentToken, decision: 'approve' }, { session: s, now: Date.now() + 30_000 })).status, 200); // still inside the window
     });
     it('reads the real session cookie when no session is injected, and the flag / host gates apply', async () => {
       const s = mkSession(); process.env.SESSION_SECRET ||= 'x'; const v = await consentOf(s);

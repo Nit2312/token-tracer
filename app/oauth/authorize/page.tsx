@@ -38,6 +38,7 @@ export default async function AuthorizePage({ searchParams }: { searchParams: Pr
     case 'not_found': notFound();
     case 'redirect': redirect(view.url);
     case 'login': redirect(`/?returnTo=${encodeURIComponent(view.returnTo)}`);
+    case 'reauth': redirect(view.url);
     case 'unavailable': return <Message title="Temporarily unavailable" text="Authorization is not available right now. Try again later." />;
     case 'fatal': return <Message title="Cannot authorize" text={view.message} />;
     case 'ineligible': return <Message title="Not allowed" text={view.message} />;

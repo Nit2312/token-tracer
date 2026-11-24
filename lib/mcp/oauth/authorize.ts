@@ -3,7 +3,8 @@
  * without rendering. The page and the route are thin shells around these.
  *
  * Rules, in order, for the page: flag/config/Host → client + redirect_uri verified (else an ERROR PAGE, never a redirect) → other parameter
- * errors go back to the verified redirect_uri → no session → login with a safe returnTo → eligibility re-read from the database → consent view.
+ * errors go back to the verified redirect_uri → no session → login with a safe returnTo → eligibility re-read from the database → login not older
+ * than 15 minutes (else /oauth/reauthenticate → fresh password + TOTP) → consent view.
  * The decision route trusts nothing from the browser except a signed consent token bound to the session user, and re-checks everything.
  */
 import { withMcpTx } from '../db';
@@ -15,7 +16,7 @@ import { buildRedirect, flattenQuery, parseClientAndRedirect, parseRest, type Ra
 import { signConsent, verifyConsent } from './consent';
 import { classifyRedirectUri } from './redirect-rules';
 import { NO_STORE_HEADERS, OAuthError, oauthErrorResponse } from './errors';
-import { INELIGIBLE_MESSAGE, evaluateGrantEligibility, loadGrantUser } from './grant-user';
+import { GRANT_MAX_LOGIN_AGE_MS, INELIGIBLE_MESSAGE, evaluateGrantEligibility, loadGrantUser } from './grant-user';
 import { hasContentType, isBrowserCrossSite, readLimitedText } from './http';
 import { createAuthorizationCode } from './tokens';
 import { fail, limited, preflight, type EndpointDeps } from './endpoints';
@@ -36,6 +37,7 @@ export type AuthorizeView =
   | { kind: 'fatal'; message: string }
   | { kind: 'redirect'; url: string }
   | { kind: 'login'; returnTo: string }
+  | { kind: 'reauth'; url: string }
   | { kind: 'ineligible'; message: string }
   | { kind: 'consent'; view: ConsentView };
 
@@ -63,13 +65,15 @@ export async function prepareAuthorize(i: PrepareInput, deps: EndpointDeps = {},
   if (!rest.ok) return { kind: 'redirect', url: buildRedirect(base.redirectUri, { error: rest.error, state: rest.state, iss: cfg.baseUrl }) };
   const p = rest.params;
 
-  if (!i.session) {
-    const returnTo = safeReturnTo(`/oauth/authorize?${new URLSearchParams([...q]).toString()}`);
-    return returnTo ? { kind: 'login', returnTo } : FATAL(BAD_LINK);
-  }
+  const returnTo = safeReturnTo(`/oauth/authorize?${new URLSearchParams([...q]).toString()}`);
+  if (!i.session) return returnTo ? { kind: 'login', returnTo } : FATAL(BAD_LINK);
 
-  const elig = evaluateGrantEligibility(i.session, UUID_RE.test(i.session.userId) ? await loadGrantUser(pool, i.session.userId) : null);
-  if (!elig.ok) return { kind: 'ineligible', message: INELIGIBLE_MESSAGE[elig.reason] };
+  const elig = evaluateGrantEligibility(i.session, UUID_RE.test(i.session.userId) ? await loadGrantUser(pool, i.session.userId) : null, now);
+  if (!elig.ok) {
+    // Logged in but not recently: force a fresh password + TOTP login (the session cookie is cleared by /oauth/reauthenticate), then come back here.
+    if (elig.reason === 'login_not_recent') return returnTo ? { kind: 'reauth', url: `/oauth/reauthenticate?returnTo=${encodeURIComponent(returnTo)}` } : FATAL(BAD_LINK);
+    return { kind: 'ineligible', message: INELIGIBLE_MESSAGE[elig.reason] };
+  }
 
   const kind = classifyRedirectUri(p.redirectUri, policy);
   return {
@@ -105,7 +109,8 @@ export async function handleDecision(req: Request, deps: DecisionDeps = {}): Pro
     if (!body || typeof body !== 'object' || (body.decision !== 'approve' && body.decision !== 'deny')) throw new OAuthError('invalid_request', 'Invalid decision.');
 
     const secret = deps.secret ?? (await import('../../team/env')).sessionSecret();
-    const c = verifyConsent(body.consent, secret, (deps.now ?? Date.now)());
+    const now = (deps.now ?? Date.now)();
+    const c = verifyConsent(body.consent, secret, now);
     if (!c || c.uid !== session.userId || c.sia !== session.issuedAt) throw new OAuthError('invalid_request', 'This consent request has expired. Reload the page and try again.');
 
     const pool = pre.pool();
@@ -114,7 +119,11 @@ export async function handleDecision(req: Request, deps: DecisionDeps = {}): Pro
     const client = await getClient(pool, c.cid);
     if (!client || !clientAllowsRedirect(client, c.ru, { allowLoopback: cfg.allowLoopback }) || c.rs !== cfg.resource) throw new OAuthError('invalid_request', 'This authorization request is no longer valid.');
 
-    const elig = evaluateGrantEligibility(session, await loadGrantUser(pool, c.uid));
+    const elig = evaluateGrantEligibility(session, await loadGrantUser(pool, c.uid), now);
+    if (!elig.ok && elig.reason === 'login_not_recent') {
+      // The page asked for a fresh login, but time passed before the click. Not an attack: no audit row, just ask again.
+      return Response.json({ error: 'login_required', error_description: INELIGIBLE_MESSAGE.login_not_recent }, { status: 401, headers: NO_STORE_HEADERS });
+    }
     if (!elig.ok) {
       await withMcpTx(pool, (tx) => audit(tx, 'access_denied', c.uid, 'oauth_client', c.cid, { reason: elig.reason }));
       throw new OAuthError('access_denied', INELIGIBLE_MESSAGE[elig.reason], 403);
@@ -127,4 +136,33 @@ export async function handleDecision(req: Request, deps: DecisionDeps = {}): Pro
     const code = await createAuthorizationCode(pool, { clientId: c.cid, userId: c.uid, redirectUri: c.ru, codeChallenge: c.cc, resource: c.rs, scope: c.sc });
     return Response.json({ redirect: buildRedirect(c.ru, { code, state: c.st, iss: cfg.baseUrl }) }, { headers: NO_STORE_HEADERS });
   } catch (e) { return e instanceof OAuthError ? oauthErrorResponse(e) : fail(e); }
+}
+
+// ── GET /oauth/reauthenticate ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+/**
+ * Step between "logged in too long ago" and the login form. app/page.tsx sends any logged-in admin straight to /team, so the stale session
+ * cookie has to be cleared first. Only acts on a session that is VALID but older than the recency window; every other case just forwards.
+ * `returnTo` must pass safeReturnTo (exactly /oauth/authorize?…), so this can neither redirect off-site nor clear a cookie for any other purpose
+ * than re-login. A cross-site link that triggers it can at worst make an admin sign in again (logout-CSRF with no data impact).
+ */
+export function handleReauthenticate(req: Request, deps: DecisionDeps = {}): Response {
+  const pre = preflight(req, deps);
+  if (pre instanceof Response) return pre;
+  const returnTo = safeReturnTo(new URL(req.url).searchParams.get('returnTo'));
+  if (!returnTo) return new Response(null, { status: 404, headers: NO_STORE_HEADERS });
+  const session = (deps.session ?? ((r: Request) => getSessionFromCookie(r.headers.get('cookie'))))(req);
+  const now = (deps.now ?? Date.now)();
+  const headers = new Headers(NO_STORE_HEADERS);
+  if (session && now - session.issuedAt <= GRANT_MAX_LOGIN_AGE_MS) {
+    headers.set('Location', returnTo); // already fresh: nothing to do
+  } else {
+    if (session) {
+      const secure = pre.cfg.baseUrl.startsWith('https:') ? '; Secure' : '';
+      headers.append('Set-Cookie', `app_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT${secure}`);
+    }
+    headers.set('Location', `/?returnTo=${encodeURIComponent(returnTo)}`);
+  }
+  return new Response(null, { status: 303, headers });
 }

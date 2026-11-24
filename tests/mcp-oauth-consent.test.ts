@@ -5,7 +5,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { CONSENT_TTL_MS, signConsent, verifyConsent, type ConsentClaims } from '../lib/mcp/oauth/consent';
 import { buildRedirect, flattenQuery, parseClientAndRedirect, parseRest } from '../lib/mcp/oauth/authorize-request';
-import { evaluateGrantEligibility, type GrantUser } from '../lib/mcp/oauth/grant-user';
+import { GRANT_MAX_LOGIN_AGE_MS, evaluateGrantEligibility, type GrantUser } from '../lib/mcp/oauth/grant-user';
+import { handleReauthenticate } from '../lib/mcp/oauth/authorize';
+import { loadOAuthConfig } from '../lib/mcp/oauth/config';
 import { decodeSessionToken, encodeSessionToken, signObject, type SessionPayload } from '../lib/session-token';
 import { s256Challenge } from '../lib/mcp/oauth/crypto';
 
@@ -78,7 +80,7 @@ describe('authorize request parsing', () => {
 
 describe('eligibility', () => {
   const uid = '11111111-1111-4111-8111-111111111111'; const team = '22222222-2222-4222-8222-222222222222';
-  const session = (o: Partial<SessionPayload> = {}): SessionPayload => ({ userId: uid, username: 'a', displayName: 'A', role: 'admin', memberId: null, teamId: team, issuedAt: 1, mfa: true, ...o });
+  const session = (o: Partial<SessionPayload> = {}): SessionPayload => ({ userId: uid, username: 'a', displayName: 'A', role: 'admin', memberId: null, teamId: team, issuedAt: Date.now() - 1000, mfa: true, ...o });
   const user = (o: Partial<GrantUser> = {}): GrantUser => ({ id: uid, displayName: 'A', role: 'admin', teamId: team, teamName: 'T', active: true, ...o });
   const why = (s: SessionPayload, u: GrantUser | null) => { const r = evaluateGrantEligibility(s, u); return r.ok ? 'ok' : r.reason; };
   it('only a DB admin with a team, MFA-complete, not impersonating, still active, and consistent with the database qualifies', () => {
@@ -94,6 +96,18 @@ describe('eligibility', () => {
     assert.equal(why(session(), user({ role: 'user' })), 'not_admin'); // demoted since login: the DATABASE decides
     assert.equal(why(session(), user({ teamId: null })), 'no_team');
     assert.equal(why(session(), user({ teamId: '33333333-3333-4333-8333-333333333333' })), 'stale_session');
+  });
+  it('recent login: authenticated within 15 minutes qualifies; older, or an issuedAt from the future, does not; other refusals take precedence', () => {
+    const now = 1_800_000_000_000; const at = (age: number) => session({ issuedAt: now - age });
+    const r = (s: SessionPayload, u: GrantUser | null = user()) => { const x = evaluateGrantEligibility(s, u, now); return x.ok ? 'ok' : x.reason; };
+    assert.equal(GRANT_MAX_LOGIN_AGE_MS, 15 * 60 * 1000);
+    assert.equal(r(at(0)), 'ok'); assert.equal(r(at(14 * 60_000 + 59_000)), 'ok'); assert.equal(r(at(GRANT_MAX_LOGIN_AGE_MS)), 'ok');
+    assert.equal(r(at(GRANT_MAX_LOGIN_AGE_MS + 1)), 'login_not_recent'); assert.equal(r(at(16 * 60_000)), 'login_not_recent'); assert.equal(r(at(11 * 3600_000)), 'login_not_recent');
+    assert.equal(r(at(-30_000)), 'ok'); assert.equal(r(at(-120_000)), 'login_not_recent'); // small skew tolerated, future-dated is not
+    assert.equal(r(session({ issuedAt: Number.NaN })), 'login_not_recent');
+    assert.equal(r(session({ role: 'user', issuedAt: now - 3600_000 })), 'not_admin'); // never-eligible accounts are not asked to sign in again
+    assert.equal(r(session({ userId: 'admin', issuedAt: now - 3600_000 })), 'builtin_account');
+    assert.equal(r(at(3600_000), null), 'inactive');
   });
 });
 
@@ -120,5 +134,43 @@ describe('static guards on the consent UI and the login hook', () => {
   });
   it('the decision route delegates to handleDecision and the authorize page is dynamic', () => {
     assert.match(read('app/oauth/decision/route.ts'), /handleDecision/); assert.match(read('app/oauth/authorize/page.tsx'), /dynamic = 'force-dynamic'/);
+  });
+});
+
+describe('GET /oauth/reauthenticate', () => {
+  const cfg = loadOAuthConfig({ MCP_PUBLIC_BASE_URL: 'https://token-tracer-three.vercel.app', NODE_ENV: 'production' })!;
+  const noDb = (() => { throw new Error('the database must not be touched'); }) as never;
+  const RT = '/oauth/authorize?client_id=tt_abc&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&state=s';
+  const mk = (returnTo: string | null, cookie?: string, o: { host?: string } = {}) =>
+    new Request(`https://x/oauth/reauthenticate${returnTo === null ? '' : `?returnTo=${encodeURIComponent(returnTo)}`}`, { headers: { host: o.host ?? cfg.host, ...(cookie ? { cookie } : {}) } });
+  const deps = { enabled: true, config: cfg, pool: noDb };
+  const sess = (issuedAt: number): SessionPayload => ({ userId: '11111111-1111-4111-8111-111111111111', username: 'a', displayName: 'A', role: 'admin', memberId: null, teamId: 't', issuedAt, lastActive: Date.now(), mfa: true });
+  const cookie = (s: SessionPayload) => { process.env.SESSION_SECRET = SECRET; return `app_session=${encodeURIComponent(encodeSessionToken(s))}`; };
+
+  it('a stale session is cleared and the admin is sent to a fresh login that returns to the authorize request', () => {
+    const r = handleReauthenticate(mk(RT, cookie(sess(Date.now() - 20 * 60_000))), deps);
+    assert.equal(r.status, 303); assert.equal(r.headers.get('location'), `/?returnTo=${encodeURIComponent(RT)}`);
+    const c = r.headers.get('set-cookie') ?? '';
+    assert.match(c, /^app_session=;/); assert.match(c, /Max-Age=0/); assert.match(c, /HttpOnly/); assert.match(c, /SameSite=Lax/); assert.match(c, /Secure/); assert.match(c, /Path=\//);
+    assert.equal(r.headers.get('cache-control'), 'no-store');
+  });
+  it('a fresh session is NOT logged out (it is simply returned to the authorize request); no session just goes to login', () => {
+    const fresh = handleReauthenticate(mk(RT, cookie(sess(Date.now() - 60_000))), deps);
+    assert.equal(fresh.headers.get('location'), RT); assert.equal(fresh.headers.get('set-cookie'), null);
+    const none = handleReauthenticate(mk(RT), deps);
+    assert.equal(none.headers.get('location'), `/?returnTo=${encodeURIComponent(RT)}`); assert.equal(none.headers.get('set-cookie'), null);
+  });
+  it('only /oauth/authorize can be the return target (no open redirect), the Host must be canonical, the flag gates it', () => {
+    for (const bad of [null, '', 'https://evil.example/oauth/authorize', '//evil.example/oauth/authorize', '/team', '/oauth/authorize/../../team', '/oauth/authorize#x', '/oauth/./authorize?x=1', '\\evil.example', 'javascript:alert(1)']) {
+      const r = handleReauthenticate(mk(bad, cookie(sess(1))), deps);
+      assert.equal(r.status, 404, String(bad)); assert.equal(r.headers.get('set-cookie'), null, String(bad)); assert.equal(r.headers.get('location'), null);
+    }
+    assert.equal(handleReauthenticate(mk(RT, undefined, { host: 'evil.example' }), deps).status, 404);
+    assert.equal(handleReauthenticate(mk(RT), { ...deps, enabled: false }).status, 404);
+    assert.equal(handleReauthenticate(mk(RT), { ...deps, config: null }).status, 503);
+  });
+  it('an invalid or forged session cookie is not "cleared" (nothing to clear) and simply goes to login', () => {
+    const r = handleReauthenticate(mk(RT, 'app_session=forged.value'), deps);
+    assert.equal(r.status, 303); assert.equal(r.headers.get('set-cookie'), null); assert.match(r.headers.get('location') ?? '', /^\/\?returnTo=/);
   });
 });

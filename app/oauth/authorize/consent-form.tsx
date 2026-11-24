@@ -22,6 +22,7 @@ export default function ConsentForm({ consentToken, clientName, destination, loo
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && typeof data.redirect === 'string') { window.location.assign(data.redirect); return; }
+      if (data.error === 'login_required') { window.location.reload(); return; } // the page then asks for a fresh sign-in
       setError(typeof data.error_description === 'string' ? data.error_description : 'Something went wrong. Reload the page and try again.');
     } catch {
       setError('Network error. Try again.');
