@@ -1,0 +1,28 @@
+{
+  "_comment": "Exact privileges of the mcp_auth database role (identity plane: OAuth clients/codes/tokens + the minimum user lookup for consent). Source of truth for scripts/setup-mcp-roles.mjs (provision AND exact-match verify). Anything not listed is denied. No DELETE/TRUNCATE/REFERENCES/TRIGGER anywhere. NO privilege on audit_log: security events go through the allowlisting SECURITY DEFINER function mcp_audit_event. users.username/password_hash/api_key/member_id, members, team_members and every session/prompt/event table are unreadable. mcp_reader (data plane) is NOT defined here: it is designed and reviewed in Phase 4, where members/team_members access is justified.",
+  "mcp_auth": {
+    "select": {
+      "users": ["id", "display_name", "role", "team_id", "active"],
+      "teams": ["id", "name"],
+      "oauth_clients": ["client_id", "client_name", "redirect_uris", "grant_types", "token_endpoint_auth_method", "scope", "registration", "created_at", "created_ip_hash", "last_used_at", "disabled_at"],
+      "oauth_authorization_codes": ["code_hash", "client_id", "user_id", "redirect_uri", "code_challenge", "resource", "scope", "family_id", "created_at", "expires_at", "consumed_at"],
+      "oauth_tokens": ["id", "token_hash", "kind", "family_id", "client_id", "user_id", "resource", "scope", "created_at", "expires_at", "absolute_expires_at", "last_used_at", "rotated_at", "replaced_by_id", "revoked_at", "revoked_reason"],
+      "mcp_rate_limits": ["key", "window_start", "count"]
+    },
+    "insert": {
+      "oauth_clients": ["client_id", "client_name", "redirect_uris", "grant_types", "token_endpoint_auth_method", "scope", "registration", "created_ip_hash"],
+      "oauth_authorization_codes": ["code_hash", "client_id", "user_id", "redirect_uri", "code_challenge", "resource", "scope", "family_id", "expires_at"],
+      "oauth_tokens": ["token_hash", "kind", "family_id", "client_id", "user_id", "resource", "scope", "expires_at", "absolute_expires_at"],
+      "mcp_rate_limits": ["key", "window_start", "count"],
+      "mcp_access_log": ["user_id", "team_id", "client_id", "token_id", "event", "tool", "target_member_ids", "outcome", "status", "row_count", "duration_ms", "ip_hash"]
+    },
+    "update": {
+      "oauth_clients": ["last_used_at"],
+      "oauth_authorization_codes": ["consumed_at"],
+      "oauth_tokens": ["last_used_at", "rotated_at", "replaced_by_id", "revoked_at", "revoked_reason"],
+      "mcp_rate_limits": ["count"]
+    },
+    "sequences": ["mcp_access_log_id_seq"],
+    "functions": ["mcp_audit_event(text, uuid, text, text, jsonb)"]
+  }
+}
