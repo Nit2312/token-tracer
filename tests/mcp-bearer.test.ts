@@ -7,6 +7,7 @@ import { authenticateRequest, challenge, parseAuthorization } from '../lib/mcp/b
 import { MCP_MAX_BODY_BYTES, type McpConfig } from '../lib/mcp/config';
 import type { OAuthConfig } from '../lib/mcp/oauth/config';
 import type { McpPrincipal } from '../lib/mcp/oauth/principal';
+import type { McpToolContext } from '../lib/mcp/context';
 
 const logs: string[] = [];
 console.warn = (...a: unknown[]) => { logs.push(a.map(String).join(' ')); };
@@ -21,6 +22,34 @@ const PING = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' });
 const call = (headers: Record<string, string>, deps: McpDeps, o: { url?: string; method?: string; cfg?: McpConfig } = {}) =>
   handleMcpRequest(new Request(o.url ?? `https://${HOST}/mcp`, { method: o.method ?? 'POST', headers: { host: HOST, 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers }, body: (o.method ?? 'POST') === 'POST' ? PING : undefined }), o.cfg ?? CFG, deps);
 const bearer = (t: string) => ({ authorization: `Bearer ${t}` });
+
+/** Test-only: a server whose `whoami` tool closes over THIS request's context and waits on a shared barrier, so overlapping requests are forced
+ *  to be in flight at the same time inside the one shared SDK handler. (Phase 4 tools will use the same closure pattern.) */
+function barrierWhoami(parties: number, timeoutMs = 5000) {
+  let arrived = 0; let release!: () => void; let fail!: (e: Error) => void;
+  const gate = new Promise<void>((res, rej) => { release = res; fail = rej; });
+  const timer = setTimeout(() => fail(new Error(`barrier timeout: only ${arrived}/${parties} requests were in flight together`)), timeoutMs);
+  const createServer = (ctx: McpToolContext) => {
+    const server = new McpServer({ name: 'iso-test', version: '0' });
+    server.registerTool('whoami', { description: 'test only' }, async () => {
+      await new Promise((r) => setTimeout(r, Math.random() * 20)); // jitter: arrival order varies
+      if (++arrived >= parties) release();
+      await gate; // nobody proceeds until ALL requests are inside their tool handler
+      await new Promise((r) => setTimeout(r, Math.random() * 20));
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ u: ctx.principal.userId, t: ctx.principal.teamId, c: ctx.principal.clientId }) }] };
+    });
+    return server;
+  };
+  return { createServer, done: () => clearTimeout(timer) };
+}
+const toolBody = (text: string): { u: string; t: string; c: string } => {
+  const data = text.split('\n').find((l) => l.startsWith('data:'));
+  const msg = JSON.parse(data ? data.slice(5).trim() : text);
+  assert.equal(msg.error, undefined, text.slice(0, 200));
+  return JSON.parse(msg.result.content[0].text);
+};
+const CALL = JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'whoami', arguments: {} } });
+
 
 describe('Authorization header parsing', () => {
   it('only "Bearer <one token>" yields a token; other schemes count as no credentials; malformed Bearer headers are invalid', () => {
@@ -81,7 +110,7 @@ describe('the exact WWW-Authenticate challenge', () => {
   });
 });
 
-describe('check order: flag → configuration → Host → canonical Host → Origin → token', () => {
+describe('check order: flag → configuration → canonical Host (404) → allow-list backstop (403) → Origin (403) → token', () => {
   const never: McpDeps = { oauth: OAUTH, authenticate: async () => assert.fail('must not authenticate') };
   it('flag off → 404 and nothing else happens (the kill switch)', async () => {
     const r = await call(bearer(tok('a')), never, { cfg: { ...CFG, enabled: false } }); assert.equal(r.status, 404); assert.equal(await r.text(), '');
@@ -89,10 +118,26 @@ describe('check order: flag → configuration → Host → canonical Host → Or
   it('invalid OAuth configuration → 503 (fail closed), even with a token', async () => {
     assert.equal((await call(bearer(tok('a')), { oauth: null, authenticate: async () => P() })).status, 503);
   });
-  it('a Host outside the allow-list → 403; an allowed Host that is NOT the canonical one → 403; neither reaches authentication', async () => {
-    assert.equal((await call({ ...bearer(tok('a')), host: 'evil.example' }, never)).status, 403);
-    assert.equal((await call({ ...bearer(tok('a')), host: 'other.example' }, never)).status, 403); // allowed by MCP_ALLOWED_HOSTS, but tokens are bound to the canonical resource
-    assert.equal((await call({ ...bearer(tok('a')), 'x-forwarded-host': 'evil.example' }, never)).status, 403);
+  it('any Host that is not the canonical one — unknown, allowed-but-not-canonical, spoofed X-Forwarded-Host, absent — is an empty 404 and never reaches authentication', async () => {
+    const wrongHosts: Array<Record<string, string>> = [{ host: 'evil.example' }, { host: 'other.example' } /* allowed by MCP_ALLOWED_HOSTS, but tokens are bound to the canonical resource */, { 'x-forwarded-host': 'evil.example' }, { host: `${HOST}:8443` }];
+    for (const h of wrongHosts) {
+      const r = await call({ ...bearer(tok('a')), ...h }, never); assert.equal(r.status, 404, JSON.stringify(h)); assert.equal(await r.text(), '');
+    }
+    const noHost = await handleMcpRequest(new Request(`https://${HOST}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', ...bearer(tok('a')) }, body: PING }), CFG, never);
+    assert.equal(noHost.status, 404);
+  });
+  it('the SAME Host answer on the discovery and OAuth routes (one policy for every MCP-related route)', async () => {
+    const { handleAuthorizationServerMetadata, handleProtectedResourceMetadata, handleRegister, handleToken, handleRevoke } = await import('../lib/mcp/oauth/endpoints');
+    const { handleDecision, handleReauthenticate } = await import('../lib/mcp/oauth/authorize');
+    const d = { enabled: true, config: OAUTH, pool: (() => { throw new Error('no db'); }) as never };
+    const bad = (path: string, method = 'POST') => new Request(`https://x${path}`, { method, headers: { host: 'token-tracer-puce.vercel.app' } });
+    const answers = [
+      handleAuthorizationServerMetadata(bad('/.well-known/oauth-authorization-server', 'GET'), d), handleProtectedResourceMetadata(bad('/.well-known/oauth-protected-resource/mcp', 'GET'), d),
+      await handleRegister(bad('/oauth/register'), d), await handleToken(bad('/oauth/token'), d), await handleRevoke(bad('/oauth/revoke'), d),
+      await handleDecision(bad('/oauth/decision'), d), handleReauthenticate(bad('/oauth/reauthenticate?returnTo=%2Foauth%2Fauthorize', 'GET'), d),
+      await call({ ...bearer(tok('a')), host: 'token-tracer-puce.vercel.app' }, never),
+    ];
+    for (const r of answers) { assert.equal(r.status, 404); assert.equal(await r.text(), ''); }
   });
   it('a foreign Origin → 403 before any token check (browsers learn nothing about tokens)', async () => {
     assert.equal((await call({ ...bearer(tok('a')), origin: 'https://evil.example' }, never)).status, 403);
@@ -146,5 +191,41 @@ describe('the principal reaches the server layer, only from the validated token,
     assert.equal((await call(bearer(tok('a')), deps, { method: 'GET' })).status, 405);
     const bad = await handleMcpRequest(new Request(`https://${HOST}/mcp`, { method: 'POST', headers: { host: HOST, 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...bearer(tok('a')) }, body: '{bad' }), CFG, deps);
     assert.equal(bad.status, 400);
+  });
+});
+
+describe('request isolation: overlapping requests never share a principal (AsyncLocalStorage + one shared SDK handler)', () => {
+  const people: Record<string, McpPrincipal> = {
+    [tok('a')]: P({ userId: 'user-A', teamId: 'team-A', clientId: 'client-A' }),
+    [tok('b')]: P({ userId: 'user-B', teamId: 'team-B', clientId: 'client-B' }),
+  };
+  const deps = (createServer: McpDeps['createServer']): McpDeps => ({ oauth: OAUTH, authenticate: async (t) => { await new Promise((r) => setTimeout(r, Math.random() * 15)); return people[t] ?? null; }, createServer });
+  const callWhoami = (token: string, d: McpDeps) => handleMcpRequest(new Request(`https://${HOST}/mcp`, { method: 'POST', headers: { host: HOST, 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...bearer(token) }, body: CALL }), CFG, d);
+
+  it('two requests for different users in different teams, forced to overlap inside the tool handler, each see only their own principal', async () => {
+    for (let round = 0; round < 15; round++) {
+      const b = barrierWhoami(2);
+      const d = deps(b.createServer);
+      const order = round % 2 ? [tok('a'), tok('b')] : [tok('b'), tok('a')];
+      const [r1, r2] = await Promise.all(order.map((t) => callWhoami(t, d)));
+      b.done();
+      const got = [toolBody(await r1.text()), toolBody(await r2.text())];
+      assert.deepEqual(got[0], { u: people[order[0]].userId, t: people[order[0]].teamId, c: people[order[0]].clientId }, `round ${round}`);
+      assert.deepEqual(got[1], { u: people[order[1]].userId, t: people[order[1]].teamId, c: people[order[1]].clientId }, `round ${round}`);
+    }
+  });
+  it('many overlapping requests (alternating users) are all answered with their own principal', async () => {
+    const n = 16; const b = barrierWhoami(n, 8000); const d = deps(b.createServer);
+    const tokens = Array.from({ length: n }, (_, i) => (i % 2 ? tok('a') : tok('b')));
+    const results = await Promise.all(tokens.map(async (t) => toolBody(await (await callWhoami(t, d)).text())));
+    b.done();
+    results.forEach((r, i) => assert.deepEqual(r, { u: people[tokens[i]].userId, t: people[tokens[i]].teamId, c: people[tokens[i]].clientId }, `request ${i}`));
+  });
+  it('a request that fails authentication while others are in flight neither borrows nor leaks a principal', async () => {
+    const b = barrierWhoami(2); const d = deps(b.createServer);
+    const [ok1, ok2, bad] = await Promise.all([callWhoami(tok('a'), d), callWhoami(tok('b'), d), callWhoami(tok('z'), d)]);
+    b.done();
+    assert.equal(bad.status, 401);
+    assert.equal(toolBody(await ok1.text()).u, 'user-A'); assert.equal(toolBody(await ok2.text()).u, 'user-B');
   });
 });

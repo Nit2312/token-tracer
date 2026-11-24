@@ -17,7 +17,7 @@ no authentication or OAuth yet. 2025-era clients (what Claude speaks today) are 
 | `MCP_ALLOWED_HOSTS` | Optional, comma-separated hostnames accepted in the `Host` header. Default: the host of `NEXT_PUBLIC_SERVER_URL` (plus `localhost` outside production). If enabled with no allowed host in production, `/mcp` returns 503 (fail closed). |
 | `MCP_ALLOWED_ORIGINS` | Optional extra hostnames accepted in a browser `Origin` header. `claude.ai`, `claude.com` and the allowed hosts are always accepted. A request with no `Origin` (server-to-server) is allowed. |
 
-Request guards: Host validation (403), Origin validation (403), JSON content type (415), `Accept` must offer both `application/json` and
+Request guards: Host validation (see the Host policy below; since Step 7 a non-canonical Host is an empty 404), Origin validation (403), JSON content type (415), `Accept` must offer both `application/json` and
 `text/event-stream` (406), body limit 64 KiB (413), `MCP-Protocol-Version` validation (400). Responses are `Cache-Control: no-store`.
 Logs contain only a fixed rejection category, never request data.
 
@@ -104,9 +104,15 @@ Accepted residual risks (Step 6):
 - **R9 — unauthenticated database cost:** `/oauth/authorize`, `/oauth/token`, `/oauth/register` each cost a database round trip per request; the registration/token limits are per hashed IP and `mcp_auth` has a 3-connection pool. Add platform rate limiting (Vercel Firewall) for `/oauth/*` before enabling in production.
 - **R10 — unverified client names:** DCR clients can claim any name; the page says so and shows the real destination.
 
+### Host policy (one rule for every MCP-related route — decided during Step 7 review)
+- A request whose `Host` or `X-Forwarded-Host` is **not the canonical host** (`MCP_PUBLIC_BASE_URL`), or that carries no host at all, gets an **empty `404`** — on `/mcp`, `/.well-known/oauth-*`, `/oauth/register|token|revoke|decision|reauthenticate` and `/oauth/authorize` alike. The resource does not exist under that name; nothing is revealed about other aliases (e.g. the second Vercel domain). This replaces the Step 7 draft that answered `/mcp` with 403 and the Phase 1 behavior (403 from the SDK's host check); one test asserts every route gives the same answer.
+- `403` is reserved for a **disallowed `Origin`** (browser-driven calls) and for cross-site `/oauth` POSTs — a different class of refusal.
+- The SDK allow-list (`MCP_ALLOWED_HOSTS`, else the site URL's host) is kept as a backstop behind the canonical check: it only matters if the allow-list was configured without the canonical host (misconfiguration), and then answers 403 instead of serving.
+- The flag-off answer (404) and the not-configured answer (503) come before the Host check, so they do not depend on it.
+
 ## Phase 2, Step 7 — bearer authentication on `/mcp` (implemented; MCP stays disabled)
 
-Every `/mcp` request is authenticated from scratch (`lib/mcp/bearer.ts` → `authenticateAccessToken`). Order of checks: `MCP_ENABLED` (404) → valid OAuth config (503) → Host allow-list (403) → **canonical Host** (403; tokens are bound to `<MCP_PUBLIC_BASE_URL>/mcp`, so an allowed-but-non-canonical host is refused) → Origin (403) → bearer token (401/403/503) → SDK. Refused requests never reach the database.
+Every `/mcp` request is authenticated from scratch (`lib/mcp/bearer.ts` → `authenticateAccessToken`). Order of checks: `MCP_ENABLED` (404) → valid OAuth config (503) → **canonical Host** (404) → Host allow-list backstop (403) → Origin (403) → bearer token (401/403/503) → SDK. Refused requests never reach the database.
 
 One query per request re-reads the token, the user, their team and the client: token is `kind='access'`, not revoked, not expired (idle and absolute), audience equals the canonical resource; user is **active, role `admin`, and in a team that still exists**; client is not disabled. The same predicate (`ELIGIBLE_USER_SQL` in `tokens.ts`) also gates code exchange and refresh, so a demoted/deactivated/team-less admin can neither use nor obtain tokens. Nothing is cached: a change in the database takes effect on the very next request with the same token (and reverts the same way); the principal's team always comes from the database, never from the token or the request.
 

@@ -64,6 +64,34 @@ async function issue(uid = adminId, cid = clientId): Promise<TokenPair> {
   const code = await createAuthorizationCode(pool, { clientId: cid, userId: uid, redirectUri: CB, codeChallenge: s256Challenge(VERIFIER), resource: oauth.resource, scope: 'mcp:read' });
   return exchangeAuthorizationCode(pool, { code, clientId: cid, redirectUri: CB, codeVerifier: VERIFIER, resource: oauth.resource });
 }
+
+/** Test-only: a server whose `whoami` tool closes over THIS request's context and waits on a shared barrier, so overlapping requests are forced
+ *  to be in flight at the same time inside the one shared SDK handler. (Phase 4 tools will use the same closure pattern.) */
+function barrierWhoami(parties: number, timeoutMs = 5000) {
+  let arrived = 0; let release!: () => void; let fail!: (e: Error) => void;
+  const gate = new Promise<void>((res, rej) => { release = res; fail = rej; });
+  const timer = setTimeout(() => fail(new Error(`barrier timeout: only ${arrived}/${parties} requests were in flight together`)), timeoutMs);
+  const createServer = (ctx: McpToolContext) => {
+    const server = new McpServer({ name: 'iso-test', version: '0' });
+    server.registerTool('whoami', { description: 'test only' }, async () => {
+      await new Promise((r) => setTimeout(r, Math.random() * 20)); // jitter: arrival order varies
+      if (++arrived >= parties) release();
+      await gate; // nobody proceeds until ALL requests are inside their tool handler
+      await new Promise((r) => setTimeout(r, Math.random() * 20));
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ u: ctx.principal.userId, t: ctx.principal.teamId, c: ctx.principal.clientId }) }] };
+    });
+    return server;
+  };
+  return { createServer, done: () => clearTimeout(timer) };
+}
+const toolBody = (text: string): { u: string; t: string; c: string } => {
+  const data = text.split('\n').find((l) => l.startsWith('data:'));
+  const msg = JSON.parse(data ? data.slice(5).trim() : text);
+  assert.equal(msg.error, undefined, text.slice(0, 200));
+  return JSON.parse(msg.result.content[0].text);
+};
+const CALL = JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'whoami', arguments: {} } });
+
 const unauthorized = (r: { status: number; www: string | null }) => { assert.equal(r.status, 401); assert.equal(r.www, INVALID); };
 
 describe('/mcp bearer authentication (live test branch)', { skip: SKIP_DB ? SKIP_REASON : false }, () => {
@@ -187,10 +215,24 @@ describe('/mcp bearer authentication (live test branch)', { skip: SKIP_DB ? SKIP
     });
   });
 
-  it('flag, configuration, Host and Origin gates still come first (no database work for refused requests)', async () => {
+  it('ISOLATION: two overlapping /mcp requests for different REAL users in different teams never see each other\'s principal', async () => {
+    const uA = await mkAdmin(teamA); const uB = await mkAdmin(teamB);
+    const tA = await issue(uA); const tB = await issue(uB);
+    const want = { [tA.accessToken]: { u: uA, t: teamA }, [tB.accessToken]: { u: uB, t: teamB } };
+    for (let round = 0; round < 6; round++) {
+      const b = barrierWhoami(2); const d: McpDeps = { oauth, pool: () => pool, createServer: b.createServer };
+      const order = round % 2 ? [tA.accessToken, tB.accessToken] : [tB.accessToken, tA.accessToken];
+      const res = await Promise.all(order.map((t) => handleMcpRequest(new Request(`https://${oauth.host}/mcp`, { method: 'POST', headers: { host: oauth.host, 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${t}` }, body: CALL }), CFG, d)));
+      b.done();
+      for (let i = 0; i < 2; i++) { const got = toolBody(await res[i].text()); assert.deepEqual([got.u, got.t, got.c], [want[order[i]].u, want[order[i]].t, clientId], `round ${round}, request ${i}`); }
+    }
+    assert.notEqual(teamA, teamB);
+  });
+
+  it('flag, configuration, canonical Host (404) and Origin (403) gates still come first (no database work for refused requests)', async () => {
     const t = await issue(); queries.length = 0;
     assert.equal((await handleMcpRequest(new Request(`https://${oauth.host}/mcp`, { method: 'POST', headers: { host: oauth.host, authorization: `Bearer ${t.accessToken}` }, body: '{}' }), { ...CFG, enabled: false }, deps)).status, 404);
-    assert.equal((await mcp(t.accessToken, { host: 'evil.example' })).status, 403);
+    assert.equal((await mcp(t.accessToken, { host: 'evil.example' })).status, 404);
     assert.equal((await mcp(t.accessToken, { origin: 'https://evil.example' })).status, 403);
     assert.equal((await handleMcpRequest(new Request(`https://${oauth.host}/mcp`, { method: 'POST', headers: { host: oauth.host, authorization: `Bearer ${t.accessToken}` }, body: '{}' }), CFG, { ...deps, oauth: null })).status, 503);
     assert.equal(queries.length, 0);

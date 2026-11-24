@@ -227,12 +227,17 @@ describe('feature flag and request guards', () => {
     assert.ok(loadMcpConfig({ NODE_ENV: 'development', NEXT_PUBLIC_SERVER_URL: 'https://app.example.com' }).allowedHosts.includes('localhost'));
     assert.ok(!loadMcpConfig({ NODE_ENV: 'production', NEXT_PUBLIC_SERVER_URL: 'https://app.example.com' }).allowedHosts.includes('localhost'));
   });
-  it('a request for another Host (DNS-rebinding style) → 403', async () => {
+  it('a request for another Host (DNS-rebinding style) → 404, the same answer as every OAuth route', async () => {
     const res = await handleMcpRequest(new Request('https://evil.test/mcp', { method: 'POST', headers: { ...JSON_HEADERS, host: 'evil.test' }, body: '{}' }), ON, DEPS);
-    assert.equal(res.status, 403);
+    assert.equal(res.status, 404); assert.equal(await res.text(), '');
   });
-  it('a missing Host header → 403', async () => {
+  it('a missing Host header → 404', async () => {
     const res = await handleMcpRequest(new Request('https://mcp.test/mcp', { method: 'POST', headers: { 'content-type': 'application/json', accept: JSON_HEADERS.accept }, body: '{}' }), ON, DEPS);
+    assert.equal(res.status, 404);
+  });
+  it('backstop: if the allow-list was configured WITHOUT the canonical host (misconfiguration), the canonical host is refused with 403 rather than served', async () => {
+    const misconfigured: McpConfig = { ...ON, allowedHosts: ['somewhere.else'] };
+    const res = await handleMcpRequest(new Request(`https://${HOST}/mcp`, { method: 'POST', headers: JSON_HEADERS, body: '{}' }), misconfigured, DEPS);
     assert.equal(res.status, 403);
   });
   it('Origin: absent is allowed (server-to-server); allowed hostnames pass; look-alikes and "null" are refused', async () => {

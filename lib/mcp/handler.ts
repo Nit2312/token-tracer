@@ -13,7 +13,7 @@ import { createTokenTracerMcpServer } from './server';
  * mcp_auth role), used to authenticate every request. Nothing about a user is cached between requests: the SDK handler is shared (it holds
  * no per-user state; building one logs a warning, so it is created once), and the authenticated context reaches it only through an
  * AsyncLocalStorage scope that exists for the duration of ONE request.
- * Order of checks: flag (404) → configuration (503) → Host (403) → canonical Host (403) → Origin (403) → bearer token (401/403/503) → SDK
+ * Order of checks: flag (404) → configuration (503) → canonical Host (404) → Host allow-list backstop (403) → Origin (403) → bearer token (401/403/503) → SDK
  * (method/content-type/body/protocol checks).
  */
 
@@ -72,11 +72,15 @@ export async function handleMcpRequest(request: Request, config: McpConfig = loa
   const oauth = deps.oauth === undefined ? loadOAuthConfig() : deps.oauth;
   if (!oauth) return jsonError(503, 'MCP endpoint is not configured.');
 
+  // Host policy, identical on every OAuth and MCP route: a request whose Host (or X-Forwarded-Host) is not the canonical host, or that carries
+  // none, is answered with an empty 404 — the resource does not exist under that name (tokens are bound to the canonical resource URL, and
+  // nothing is revealed about other aliases). The SDK allow-list below only matters if MCP_ALLOWED_HOSTS was configured WITHOUT the canonical
+  // host (a misconfiguration): it then refuses with 403 instead of serving. A disallowed Origin is a different class of refusal (403).
+  if (!isCanonicalHost(request.headers, oauth)) return withSecurityHeaders(new Response(null, { status: 404 }));
   const rejected =
     hostHeaderValidationResponse(request, config.allowedHosts) ??
     originValidationResponse(request, config.allowedOriginHostnames);
   if (rejected) return withSecurityHeaders(rejected);
-  if (!isCanonicalHost(request.headers, oauth)) return jsonError(403, 'Forbidden.'); // tokens are bound to the canonical resource URL
 
   const auth = await authenticateRequest(request, oauth, deps);
   if (!auth.ok) return withSecurityHeaders(auth.response);
