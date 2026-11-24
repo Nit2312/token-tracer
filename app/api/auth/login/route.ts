@@ -21,6 +21,7 @@ import { beginEnrollment, getMfaState, lockedForSeconds, loginRules, recordFailu
 import { buildPendingCookie } from '@/lib/security/mfa-flow';
 import { otpauthUri } from '@/lib/security/totp';
 import { clientIp } from '@/lib/security/request';
+import { safeReturnTo } from '@/lib/security/return-url';
 import { recordAuditEvent } from '@/lib/team/audit';
 
 export const dynamic = 'force-dynamic';
@@ -213,7 +214,8 @@ export async function POST(req: NextRequest) {
       if (tmRows[0]?.team_id) userTeamId = tmRows[0].team_id;
     }
 
-    const redirectUrl = user.role === 'admin' ? '/team' : user.role === 'superadmin' ? '/admin' : '/';
+    // returnTo is honoured ONLY for database users and ONLY if it is exactly /oauth/authorize?... (lib/security/return-url.ts); anything else is ignored.
+    const redirectUrl = safeReturnTo(body.returnTo) ?? (user.role === 'admin' ? '/team' : user.role === 'superadmin' ? '/admin' : '/');
     return completePasswordStage(
       {
         userId: user.id,

@@ -17,6 +17,7 @@ export function authorizationServerMetadata(cfg: OAuthConfig) {
     revocation_endpoint_auth_methods_supported: ['none'],
     scopes_supported: [...ADVERTISED_SCOPES],
     client_id_metadata_document_supported: false,
+    authorization_response_iss_parameter_supported: true, // RFC 9207: authorization responses carry iss
   };
 }
 

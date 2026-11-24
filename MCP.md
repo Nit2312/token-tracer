@@ -81,3 +81,25 @@ New environment variables (NOT set anywhere yet): `MCP_PUBLIC_BASE_URL` (https o
 Verified on a real `next build` + `next start` (production DB variables forced to an unreachable placeholder, `mcp_auth` of the test branch only): `.well-known` route folders work and coexist with `proxy.ts`; canonical host → 200; the other alias, an unknown host, `localhost` and a spoofed `X-Forwarded-Host` → 404; cross-site → 403; GET on POST-only routes → 405; `/mcp` unchanged.
 
 Known limits: no CORS on the POST endpoints (browser-based clients are not supported; Claude's connectors call server-side); the registration limit is per hashed client address and the global cap can be exhausted by an attacker (registration only — token flows are unaffected).
+
+## Phase 2, Step 6 — consent and login integration (implemented; MCP stays disabled)
+
+Flow: client → `GET /oauth/authorize` → (no session) `/?returnTo=/oauth/authorize?…` → password → TOTP (admins) → back to `/oauth/authorize` → consent page → `POST /oauth/decision` (fetch) → browser navigates to the **server-built** redirect with `code`, `state`, `iss`.
+
+Who may authorize: a **database** account with role `admin` and a team, in a full (MFA-complete), non-impersonated session. Re-read from the database at page view AND at decision time (role/team/active are never trusted from the cookie). Built-in `team`/`superadmin` logins (non-UUID ids), plain users, team-less admins, inactive accounts, impersonation and stale sessions all get a fixed refusal message and no consent token.
+
+Rules worth remembering:
+- `client_id` + `redirect_uri` are verified against the registration FIRST. If either is unusable, or any parameter is repeated, the user sees an error page and there is **no redirect**. Every later defect (scope, PKCE, state, resource) is returned to the verified redirect URI as an OAuth error.
+- The consent token (`lib/mcp/oauth/consent.ts`) binds one approval to user, login session, client, redirect URI, PKCE challenge, scope, state and resource; 5-minute life; signed with a key derived from the session secret under a separate label, so it can never be accepted as a session cookie (verified by test). Not single-use (see below).
+- The decision route requires `Origin == canonical base URL`, `Sec-Fetch-Site` same-origin, JSON, a valid session, and a token minted for that exact user and session. The consent page uses `fetch` because the site CSP has `form-action 'self'`.
+- The client name (attacker-controlled via DCR) is rendered only as escaped React text; the page is `frame-ancestors 'none'` / `X-Frame-Options: DENY`.
+- Login change (the only edit to existing auth code): the login route honours `returnTo` for **database users only**, only if `safeReturnTo()` accepts it (exactly `/oauth/authorize?…`); the MFA step already carries the signed redirect. The inline login script forwards `?returnTo=`. Everything else (`proxy.ts`, MFA verify, cookies, built-in accounts) is unchanged.
+- Authorization responses carry `iss` (RFC 9207, advertised in the metadata).
+
+Verified end to end on a real `next start` (test-branch database only): login → TOTP enrolment → redirect back → consent → decision → token exchange → code-replay revocation; hostile `returnTo` ignored; foreign/missing Origin 403; no session 401; unregistered `redirect_uri` → error page without redirect; non-canonical Host 404; non-admin refused.
+
+Accepted residual risks (Step 6):
+- **R7 — consent token replay:** within its 5 minutes, the same logged-in admin can submit one token twice and get two codes for the same client/redirect/PKCE challenge. Useless without the verifier.
+- **R8 — no re-authentication at consent:** an admin with a valid session approves with one click. The session is already MFA-gated and short-lived (12 h absolute, 60 min idle), but a stolen live session can authorize a connection. Consider a recent-login requirement before production.
+- **R9 — unauthenticated database cost:** `/oauth/authorize`, `/oauth/token`, `/oauth/register` each cost a database round trip per request; the registration/token limits are per hashed IP and `mcp_auth` has a 3-connection pool. Add platform rate limiting (Vercel Firewall) for `/oauth/*` before enabling in production.
+- **R10 — unverified client names:** DCR clients can claim any name; the page says so and shows the real destination.

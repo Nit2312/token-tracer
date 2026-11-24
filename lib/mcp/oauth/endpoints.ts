@@ -27,7 +27,7 @@ const FORM_TYPE = 'application/x-www-form-urlencoded';
 
 type Pre = { cfg: OAuthConfig; pool: () => McpPool } | Response;
 
-function preflight(req: Request, deps: EndpointDeps): Pre {
+export function preflight(req: Request, deps: EndpointDeps): Pre {
   const enabled = deps.enabled ?? loadMcpConfig().enabled;
   if (!enabled) return notFound();
   const cfg = deps.config === undefined ? loadOAuthConfig() : deps.config;
@@ -36,13 +36,13 @@ function preflight(req: Request, deps: EndpointDeps): Pre {
   return { cfg, pool: deps.pool ?? getMcpPool };
 }
 
-async function limited(pool: McpPool, key: string, limit: number, windowSeconds: number): Promise<void> {
+export async function limited(pool: McpPool, key: string, limit: number, windowSeconds: number): Promise<void> {
   const r = await consumeRateLimit(pool, key, limit, windowSeconds);
   if (!r.allowed) throw new RateLimited(r.retryAfterSeconds);
 }
 class RateLimited extends Error { constructor(readonly retryAfter: number) { super('rate limited'); } }
 
-function fail(e: unknown): Response {
+export function fail(e: unknown): Response {
   if (e instanceof RateLimited) return oauthErrorResponse(new OAuthError('temporarily_unavailable', 'Too many requests.', 429), { 'Retry-After': String(e.retryAfter) });
   return oauthErrorResponse(toOAuthError(e));
 }

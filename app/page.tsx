@@ -309,7 +309,7 @@ export default async function LoginPage() {
                   var res = await fetch('/api/auth/login', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: username, password: password }),
+                    body: JSON.stringify({ username: username, password: password, returnTo: new URLSearchParams(window.location.search).get('returnTo') || undefined }),
                     credentials: 'same-origin',
                   });
                   var data = await res.json().catch(function() { return {}; });

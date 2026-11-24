@@ -98,7 +98,8 @@ describe('OAuth HTTP endpoints (live test branch)', { skip: SKIP_DB ? SKIP_REASO
       const ip = ipOf(); const codes: number[] = [];
       for (let i = 0; i < 11; i++) { const r = await register({ client_name: `rl ${i}`, redirect_uris: [CB] }, ip); codes.push(r.status); if (r.status === 201) clientIds.push(r.body.client_id); else assert.ok(Number(r.headers.get('retry-after')) >= 1); }
       assert.deepEqual(codes, [...Array(10).fill(201), 429]);
-      assert.equal((await register({ client_name: 'other ip', redirect_uris: [CB] }, ipOf())).status, 201 satisfies number);
+      const other = await register({ client_name: 'other ip', redirect_uris: [CB] }, ipOf());
+      assert.equal(other.status, 201); clientIds.push(other.body.client_id);
     });
   });
 
