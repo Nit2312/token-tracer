@@ -263,8 +263,9 @@ export async function ensureSchema(): Promise<void> {
            ON CONFLICT (model) DO NOTHING;
 
            CREATE TABLE IF NOT EXISTS session_outcomes (
-             session_id TEXT PRIMARY KEY,
+             session_id TEXT NOT NULL,
              org_id TEXT NOT NULL,
+             user_id TEXT NOT NULL,
              tool TEXT NOT NULL,
              model TEXT NOT NULL,
              intent_category TEXT,
@@ -278,7 +279,8 @@ export async function ensureSchema(): Promise<void> {
              had_revert BOOLEAN,
              had_tool_error BOOLEAN,
              success BOOLEAN,
-             complexity_score NUMERIC
+             complexity_score NUMERIC,
+             PRIMARY KEY (org_id, user_id, tool, session_id)
            );
 
            CREATE TABLE IF NOT EXISTS prompt_embeddings (
@@ -289,6 +291,9 @@ export async function ensureSchema(): Promise<void> {
            CREATE TABLE IF NOT EXISTS redundant_reprompt_events (
              id BIGSERIAL PRIMARY KEY,
              session_id TEXT NOT NULL,
+             org_id TEXT,
+             user_id TEXT,
+             tool TEXT,
              turn_index INT NOT NULL,
              similarity_score NUMERIC,
              tokens_cost_of_following_turn INT,
@@ -405,6 +410,71 @@ export async function ensureSchema(): Promise<void> {
   await schemaPromise;
 }
 
+/** Anything that can run a parameterized query: the pool, or a client that is inside a transaction. */
+export interface Queryable {
+  query<T extends pg.QueryResultRow = pg.QueryResultRow>(text: string, params?: unknown[]): Promise<pg.QueryResult<T>>;
+}
+
+let savepointSeq = 0;
+
+export interface TransactionOptions {
+  /** A dedicated client (or test wrapper) to run on instead of checking one out of the pool. */
+  executor?: Queryable;
+  /** `executor` is already inside a transaction: use a SAVEPOINT instead of BEGIN/COMMIT. */
+  nested?: boolean;
+}
+
+/**
+ * Run `fn` atomically: every statement it issues through the given `db` commits together or not at all.
+ * - Default: checks out one pooled client and uses BEGIN / COMMIT / ROLLBACK (works through Neon's transaction pooler).
+ * - `executor`: use that dedicated client — BEGIN/COMMIT on it, or a SAVEPOINT when `nested` (the caller already owns a
+ *   transaction; this is how the regression tests run against a rolled-back, throw-away transaction).
+ * Errors always propagate after the rollback — nothing is swallowed.
+ */
+export async function withTransaction<T>(
+  fn: (db: Queryable) => Promise<T>,
+  opts?: TransactionOptions,
+): Promise<T> {
+  const ex = opts?.executor;
+  if (ex && opts?.nested) {
+    const sp = `sp_${++savepointSeq}`;
+    await ex.query(`SAVEPOINT ${sp}`);
+    try {
+      const out = await fn(ex);
+      await ex.query(`RELEASE SAVEPOINT ${sp}`);
+      return out;
+    } catch (err) {
+      await ex.query(`ROLLBACK TO SAVEPOINT ${sp}`).catch(() => {});
+      throw err;
+    }
+  }
+  if (ex) {
+    await ex.query('BEGIN');
+    try {
+      const out = await fn(ex);
+      await ex.query('COMMIT');
+      return out;
+    } catch (err) {
+      await ex.query('ROLLBACK').catch(() => {});
+      throw err;
+    }
+  }
+  if (process.env.AUTO_ENSURE_SCHEMA === 'true' && !schemaChecked) await ensureSchema();
+  const client = await getPool().connect();
+  let broken = false;
+  try {
+    await client.query('BEGIN');
+    const out = await fn(client);
+    await client.query('COMMIT');
+    return out;
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { broken = true; }
+    throw err;
+  } finally {
+    client.release(broken);
+  }
+}
+
 /** Run a parameterized query. */
 export async function query<T extends pg.QueryResultRow = pg.QueryResultRow>(
   text: string,
@@ -438,7 +508,7 @@ export async function insertMany<T extends pg.QueryResultRow = pg.QueryResultRow
   columns: string[],
   types: string[],
   rows: unknown[][],
-  opts?: { returning?: string },
+  opts?: { returning?: string; db?: Queryable },
 ): Promise<pg.QueryResult<T>> {
   if (!rows.length) {
     return { rows: [], rowCount: 0, command: '', oid: 0, fields: [] } as unknown as pg.QueryResult<T>;
@@ -450,5 +520,5 @@ export async function insertMany<T extends pg.QueryResultRow = pg.QueryResultRow
     SELECT * FROM unnest(${placeholders}) AS t(${columns.join(', ')})
     ${opts?.returning ? `RETURNING ${opts.returning}` : ''}
   `;
-  return query<T>(sql, columnParams);
+  return opts?.db ? opts.db.query<T>(sql, columnParams) : query<T>(sql, columnParams);
 }

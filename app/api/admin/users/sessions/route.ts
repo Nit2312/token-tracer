@@ -14,7 +14,8 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
-import { getPool, query } from '@/lib/team/db';
+import { query, withTransaction } from '@/lib/team/db';
+import { deleteSessionsWithDerived, reassignSessionsWithDerived, type SessionRow } from '@/lib/team/session-admin';
 import { recordAuditEvent } from '@/lib/team/audit';
 import { statsCache } from '@/lib/team/cache';
 import { publicError } from '@/lib/security/errors';
@@ -105,83 +106,35 @@ export async function POST(req: NextRequest) {
       target = { username: t[0].username, memberId: t[0].member_id, teamId };
     }
 
-    const client = await getPool().connect();
-    const result: Record<string, number> = {};
-    try {
-      await client.query('BEGIN');
-
-      // Session ids (text) of the matching sessions, used to find derived research rows.
-      const { rows: sess } = await client.query(
-        `SELECT id, session_id, team_id FROM sync_sessions WHERE ${filter}`,
+    // Each action is one transaction (withTransaction rolls everything back on any failure).
+    const result: Record<string, number> = await withTransaction(async (db) => {
+      const out: Record<string, number> = {};
+      // The exact sessions being changed, with their full identity (team, member, source, session_id).
+      const { rows: sess } = await db.query<SessionRow>(
+        `SELECT id, session_id, team_id::text AS team_id, member_id::text AS member_id, source FROM sync_sessions WHERE ${filter}`,
         params,
       );
-      const rowIds = sess.map((s) => s.id);
-      const sessionIds = [...new Set(sess.map((s) => String(s.session_id)))];
 
       if (action === 'delete') {
-        // Derived research rows first (prompt_embeddings has no ON DELETE CASCADE).
-        await client.query(
-          `DELETE FROM prompt_embeddings WHERE turn_id IN
-             (SELECT id FROM session_turns WHERE session_id = ANY($1::text[]) AND user_id = $2)`,
-          [sessionIds, memberId],
-        );
-        await client.query(`DELETE FROM redundant_reprompt_events WHERE session_id = ANY($1::text[])`, [sessionIds]);
-        await client.query(`DELETE FROM session_outcomes WHERE session_id = ANY($1::text[]) AND org_id IN (SELECT team_id::text FROM sync_sessions WHERE id = ANY($2::uuid[]))`, [sessionIds, rowIds]);
-        const turns = await client.query(`DELETE FROM session_turns WHERE session_id = ANY($1::text[]) AND user_id = $2`, [sessionIds, memberId]);
-        result.turnsDeleted = turns.rowCount ?? 0;
-
-        // sync_session_tools / sync_session_files cascade from sync_sessions.
-        const del = await client.query(`DELETE FROM sync_sessions WHERE id = ANY($1::uuid[])`, [rowIds]);
-        result.sessionsDeleted = del.rowCount ?? 0;
+        Object.assign(out, await deleteSessionsWithDerived(db, sess));
 
         // Daily rollups can't be split per session, so they're only cleared when EVERYTHING
         // is being deleted (no date filter).
         if (!from && !to) {
           let rollupRows = 0;
           for (const table of MEMBER_ROLLUP_TABLES) {
-            const { rows: exists } = await client.query(`SELECT to_regclass($1) IS NOT NULL AS ok`, [table]);
+            const { rows: exists } = await db.query(`SELECT to_regclass($1) IS NOT NULL AS ok`, [table]);
             if (!exists[0]?.ok) continue;
-            const r = await client.query(`DELETE FROM ${table} WHERE member_id = $1`, [memberId]);
+            const r = await db.query(`DELETE FROM ${table} WHERE member_id = $1`, [memberId]);
             rollupRows += r.rowCount ?? 0;
           }
-          result.rollupRowsDeleted = rollupRows;
+          out.rollupRowsDeleted = rollupRows;
         }
       } else if (target) {
-        // Sessions the target already has (same source + session id) would violate the unique
-        // key — the target's copy wins, so drop the duplicate from the source.
-        const dup = await client.query(
-          `DELETE FROM sync_sessions s
-           USING sync_sessions t
-           WHERE s.id = ANY($1::uuid[])
-             AND t.team_id = $2 AND t.member_id = $3
-             AND t.source = s.source AND t.session_id = s.session_id`,
-          [rowIds, target.teamId, target.memberId],
-        );
-        result.duplicatesRemoved = dup.rowCount ?? 0;
-
-        const moved = await client.query(
-          `UPDATE sync_sessions SET member_id = $2, team_id = $3 WHERE id = ANY($1::uuid[])`,
-          [rowIds, target.memberId, target.teamId],
-        );
-        result.sessionsMoved = moved.rowCount ?? 0;
-
-        await client.query(
-          `UPDATE session_turns SET user_id = $2, org_id = $3 WHERE session_id = ANY($1::text[]) AND user_id = $4`,
-          [sessionIds, target.memberId, target.teamId, memberId],
-        );
-        await client.query(
-          `UPDATE session_outcomes SET org_id = $2 WHERE session_id = ANY($1::text[])`,
-          [sessionIds, target.teamId],
-        );
+        Object.assign(out, await reassignSessionsWithDerived(db, sess, target));
       }
-
-      await client.query('COMMIT');
-    } catch (err) {
-      await client.query('ROLLBACK').catch(() => {});
-      throw err;
-    } finally {
-      client.release();
-    }
+      return out;
+    });
 
     statsCache.clear();
     await recordAuditEvent({

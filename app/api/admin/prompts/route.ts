@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { getSessionFromCookie } from '@/lib/auth';
 import { query } from '@/lib/team/db';
+import { deletePrompts, PromptDeleteError, type DeleteResult } from '@/lib/team/prompt-delete';
+import { ASSISTANT_TURN_JOIN, SESSION_TURN_OWNER_JOIN } from '@/lib/team/prompt-sql';
 import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
@@ -73,10 +75,8 @@ export async function GET(req: NextRequest) {
         COALESCE(SUM(ast.cache_read_tokens), 0)::bigint AS "totalCacheRead",
         COALESCE(SUM(ast.cache_write_tokens), 0)::bigint AS "totalCacheWrite"
       FROM session_turns st
-      JOIN sync_sessions ss ON ss.session_id = st.session_id
-      LEFT JOIN session_turns ast ON ast.session_id = st.session_id 
-                                 AND ast.turn_index = st.turn_index 
-                                 AND ast.turn_role = 'assistant'
+      JOIN sync_sessions ss ON ${SESSION_TURN_OWNER_JOIN}
+      LEFT JOIN session_turns ast ON ${ASSISTANT_TURN_JOIN}
       WHERE st.turn_role = 'user' AND ${whereClause}
     `;
     const statsResult = await query(statsQuery, params);
@@ -101,10 +101,8 @@ export async function GET(req: NextRequest) {
         COALESCE(t.name, 'Unknown Team') AS "projectName",
         ss.started_at AS "createdAt"
       FROM session_turns st
-      JOIN sync_sessions ss ON ss.session_id = st.session_id
-      LEFT JOIN session_turns ast ON ast.session_id = st.session_id 
-                                 AND ast.turn_index = st.turn_index 
-                                 AND ast.turn_role = 'assistant'
+      JOIN sync_sessions ss ON ${SESSION_TURN_OWNER_JOIN}
+      LEFT JOIN session_turns ast ON ${ASSISTANT_TURN_JOIN}
       LEFT JOIN members m ON m.id = ss.member_id
       LEFT JOIN teams t ON t.id = ss.team_id
       WHERE st.turn_role = 'user' AND ${whereClause}
@@ -191,76 +189,20 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ error: 'Missing id, ids, or sessionId parameter' }, { status: 400 });
     }
 
-    let deletedCount = 0;
-
-    if (ids.length > 0) {
-      const numericIds = ids.filter((id) => /^\d+$/.test(id)).map((id) => BigInt(id));
-      const nonNumericIds = ids.filter((id) => !/^\d+$/.test(id));
-
-      if (numericIds.length > 0) {
-        await query(`DELETE FROM prompt_embeddings WHERE turn_id = ANY($1::bigint[])`, [numericIds]);
-        await query(`DELETE FROM session_tool_errors WHERE turn_id = ANY($1::bigint[])`, [numericIds]);
-
-        const { rows: turnsRows } = await query(
-          `SELECT DISTINCT session_id, turn_index FROM session_turns WHERE id = ANY($1::bigint[])`,
-          [numericIds]
-        );
-
-        for (const row of turnsRows) {
-          await query(
-            `DELETE FROM redundant_reprompt_events WHERE session_id = $1 AND turn_index = $2`,
-            [row.session_id, row.turn_index]
-          );
-          await query(
-            `DELETE FROM session_turns WHERE session_id = $1 AND turn_index = $2`,
-            [row.session_id, row.turn_index]
-          );
-        }
-
-        const res = await query(`DELETE FROM session_turns WHERE id = ANY($1::bigint[])`, [numericIds]);
-        deletedCount += (res.rowCount || 0);
-      }
-
-      if (nonNumericIds.length > 0) {
-        const res = await query(
-          `DELETE FROM sync_sessions WHERE session_id = ANY($1::text[])`,
-          [nonNumericIds]
-        );
-        deletedCount += (res.rowCount || 0);
-      }
-    }
-
-    if (sessionId) {
-      if (turnIndex !== null) {
-        const { rows: tRows } = await query(
-          `SELECT id FROM session_turns WHERE session_id = $1 AND turn_index = $2`,
-          [sessionId, turnIndex]
-        );
-        const turnIds = tRows.map((r) => r.id);
-        if (turnIds.length > 0) {
-          await query(`DELETE FROM prompt_embeddings WHERE turn_id = ANY($1::bigint[])`, [turnIds]);
-          await query(`DELETE FROM session_tool_errors WHERE turn_id = ANY($1::bigint[])`, [turnIds]);
-        }
-        await query(`DELETE FROM redundant_reprompt_events WHERE session_id = $1 AND turn_index = $2`, [sessionId, turnIndex]);
-        const res = await query(`DELETE FROM session_turns WHERE session_id = $1 AND turn_index = $2`, [sessionId, turnIndex]);
-        deletedCount += (res.rowCount || 0);
-      } else {
-        const { rows: tRows } = await query(`SELECT id FROM session_turns WHERE session_id = $1`, [sessionId]);
-        const turnIds = tRows.map((r) => r.id);
-        if (turnIds.length > 0) {
-          await query(`DELETE FROM prompt_embeddings WHERE turn_id = ANY($1::bigint[])`, [turnIds]);
-          await query(`DELETE FROM session_tool_errors WHERE turn_id = ANY($1::bigint[])`, [turnIds]);
-        }
-        await query(`DELETE FROM redundant_reprompt_events WHERE session_id = $1`, [sessionId]);
-        const res = await query(`DELETE FROM session_turns WHERE session_id = $1`, [sessionId]);
-        deletedCount += (res.rowCount || 0);
-      }
+    let result: DeleteResult = { deleted: 0, turns: 0, sessions: 0 };
+    try {
+      result = (await deletePrompts({ kind: 'platform' as const }, { ids, sessionId, turnIndex }));
+    } catch (err) {
+      if (err instanceof PromptDeleteError) return NextResponse.json({ error: err.message }, { status: err.status });
+      throw err;
     }
 
     return NextResponse.json({
       success: true,
-      deletedCount: Math.max(deletedCount, ids.length || 1),
-      message: 'Prompt(s) permanently deleted.'
+      deletedCount: result.deleted, // actual rows removed (turn rows + sessions)
+      deletedTurns: result.turns,
+      deletedSessions: result.sessions,
+      message: result.deleted > 0 ? 'Prompt(s) permanently deleted.' : 'Nothing matched; no rows were deleted.'
     });
   } catch (err: any) {
     console.error('[admin-prompts DELETE error]', err);

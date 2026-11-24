@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthorizedTeamId, getSessionFromCookie } from '@/lib/auth';
 import { query } from '@/lib/team/db';
+import { deletePrompts, PromptDeleteError, resolveDeleteScope, type DeleteResult } from '@/lib/team/prompt-delete';
+import { ASSISTANT_TURN_JOIN, SESSION_TURN_OWNER_JOIN } from '@/lib/team/prompt-sql';
 import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
@@ -95,7 +97,7 @@ export async function GET(req: NextRequest) {
     const countQuery = `
       SELECT COUNT(*)::int AS total
       FROM session_turns st
-      JOIN sync_sessions ss ON ss.session_id = st.session_id AND st.org_id = ss.team_id::text AND st.user_id = ss.member_id::text AND st.tool = ss.source
+      JOIN sync_sessions ss ON ${SESSION_TURN_OWNER_JOIN}
       WHERE ${whereClause}
     `;
     const countResult = await query(countQuery, params);
@@ -120,10 +122,8 @@ export async function GET(req: NextRequest) {
         COALESCE(ss.agent, 'default') AS "project",
         ss.started_at AS "createdAt"
       FROM session_turns st
-      JOIN sync_sessions ss ON ss.session_id = st.session_id AND st.org_id = ss.team_id::text AND st.user_id = ss.member_id::text AND st.tool = ss.source
-      LEFT JOIN session_turns ast ON ast.session_id = st.session_id 
-                                 AND ast.turn_index = st.turn_index 
-                                 AND ast.turn_role = 'assistant'
+      JOIN sync_sessions ss ON ${SESSION_TURN_OWNER_JOIN}
+      LEFT JOIN session_turns ast ON ${ASSISTANT_TURN_JOIN}
       LEFT JOIN members m ON m.id = ss.member_id
       WHERE ${whereClause}
       ORDER BY ss.started_at DESC, st.turn_index DESC
@@ -249,23 +249,8 @@ export async function DELETE(req: NextRequest) {
   try {
     const session = getSessionFromCookie(req.headers.get('cookie'));
 
-    let isSuperAdmin = false;
-    let authorizedTeamId: string | null = null;
-
-    if (session) {
-      if (session.role === 'superadmin') {
-        isSuperAdmin = true;
-      } else if (session.role === 'admin') {
-        authorizedTeamId = session.teamId || null;
-      } else {
-        return NextResponse.json(
-          { error: 'Forbidden: Admin permissions required to delete prompts' },
-          { status: 403 }
-        );
-      }
-    } else {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const resolved = resolveDeleteScope(session);
+    if ('error' in resolved) return NextResponse.json({ error: resolved.error }, { status: resolved.status });
 
     let ids: string[] = [];
     let sessionId: string | null = null;
@@ -302,110 +287,20 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ error: 'Missing id, ids, or sessionId parameter' }, { status: 400 });
     }
 
-    let deletedCount = 0;
-
-    if (ids.length > 0) {
-      let numericIds = ids.filter((id) => /^\d+$/.test(id)).map((id) => BigInt(id));
-      const nonNumericIds = ids.filter((id) => !/^\d+$/.test(id));
-
-      if (numericIds.length > 0) {
-        if (!isSuperAdmin && authorizedTeamId) {
-          const { rows: verifyRows } = await query(
-            `SELECT st.id
-             FROM session_turns st
-             LEFT JOIN sync_sessions ss ON ss.session_id = st.session_id
-             WHERE st.id = ANY($1::bigint[])
-               AND (ss.team_id = $2 OR ss.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $2))`,
-            [numericIds, authorizedTeamId]
-          );
-          if (verifyRows.length === 0) {
-            return NextResponse.json({ error: 'Forbidden: No authorized prompts found to delete' }, { status: 403 });
-          }
-          // Only delete the turns that were verified as belonging to this team — never the rest of the list.
-          numericIds = verifyRows.map((r) => BigInt(r.id as string));
-        }
-
-        await query(`DELETE FROM prompt_embeddings WHERE turn_id = ANY($1::bigint[])`, [numericIds]);
-        await query(`DELETE FROM session_tool_errors WHERE turn_id = ANY($1::bigint[])`, [numericIds]);
-
-        const { rows: turnsRows } = await query(
-          `SELECT DISTINCT session_id, turn_index FROM session_turns WHERE id = ANY($1::bigint[])`,
-          [numericIds]
-        );
-
-        for (const row of turnsRows) {
-          await query(
-            `DELETE FROM redundant_reprompt_events WHERE session_id = $1 AND turn_index = $2`,
-            [row.session_id, row.turn_index]
-          );
-          await query(
-            `DELETE FROM session_turns WHERE session_id = $1 AND turn_index = $2`,
-            [row.session_id, row.turn_index]
-          );
-        }
-
-        const res = await query(`DELETE FROM session_turns WHERE id = ANY($1::bigint[])`, [numericIds]);
-        deletedCount += (res.rowCount || 0);
-      }
-
-      if (nonNumericIds.length > 0) {
-        if (!isSuperAdmin && authorizedTeamId) {
-          const res = await query(
-            `DELETE FROM sync_sessions WHERE session_id = ANY($1::text[]) AND (team_id = $2 OR member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $2))`,
-            [nonNumericIds, authorizedTeamId]
-          );
-          deletedCount += (res.rowCount || 0);
-        } else {
-          const res = await query(
-            `DELETE FROM sync_sessions WHERE session_id = ANY($1::text[])`,
-            [nonNumericIds]
-          );
-          deletedCount += (res.rowCount || 0);
-        }
-      }
-    }
-
-    if (sessionId) {
-      if (!isSuperAdmin && authorizedTeamId) {
-        const { rows: verifyRows } = await query(
-          `SELECT session_id FROM sync_sessions WHERE session_id = $1 AND (team_id = $2 OR member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $2))`,
-          [sessionId, authorizedTeamId]
-        );
-        if (verifyRows.length === 0) {
-          return NextResponse.json({ error: 'Forbidden: Session not found in your team' }, { status: 403 });
-        }
-      }
-
-      if (turnIndex !== null) {
-        const { rows: tRows } = await query(
-          `SELECT id FROM session_turns WHERE session_id = $1 AND turn_index = $2`,
-          [sessionId, turnIndex]
-        );
-        const turnIds = tRows.map((r) => r.id);
-        if (turnIds.length > 0) {
-          await query(`DELETE FROM prompt_embeddings WHERE turn_id = ANY($1::bigint[])`, [turnIds]);
-          await query(`DELETE FROM session_tool_errors WHERE turn_id = ANY($1::bigint[])`, [turnIds]);
-        }
-        await query(`DELETE FROM redundant_reprompt_events WHERE session_id = $1 AND turn_index = $2`, [sessionId, turnIndex]);
-        const res = await query(`DELETE FROM session_turns WHERE session_id = $1 AND turn_index = $2`, [sessionId, turnIndex]);
-        deletedCount += (res.rowCount || 0);
-      } else {
-        const { rows: tRows } = await query(`SELECT id FROM session_turns WHERE session_id = $1`, [sessionId]);
-        const turnIds = tRows.map((r) => r.id);
-        if (turnIds.length > 0) {
-          await query(`DELETE FROM prompt_embeddings WHERE turn_id = ANY($1::bigint[])`, [turnIds]);
-          await query(`DELETE FROM session_tool_errors WHERE turn_id = ANY($1::bigint[])`, [turnIds]);
-        }
-        await query(`DELETE FROM redundant_reprompt_events WHERE session_id = $1`, [sessionId]);
-        const res = await query(`DELETE FROM session_turns WHERE session_id = $1`, [sessionId]);
-        deletedCount += (res.rowCount || 0);
-      }
+    let result: DeleteResult = { deleted: 0, turns: 0, sessions: 0 };
+    try {
+      result = (await deletePrompts(resolved.scope, { ids, sessionId, turnIndex }));
+    } catch (err) {
+      if (err instanceof PromptDeleteError) return NextResponse.json({ error: err.message }, { status: err.status });
+      throw err;
     }
 
     return NextResponse.json({
       success: true,
-      deletedCount: Math.max(deletedCount, ids.length || 1),
-      message: 'Prompt(s) permanently deleted.'
+      deletedCount: result.deleted, // actual rows removed (turn rows + sessions)
+      deletedTurns: result.turns,
+      deletedSessions: result.sessions,
+      message: result.deleted > 0 ? 'Prompt(s) permanently deleted.' : 'Nothing matched; no rows were deleted.'
     });
   } catch (err: any) {
     console.error('[team-prompts DELETE error]', err);
