@@ -22,13 +22,13 @@ const NEW_FUNCTIONS = ['mcp_guard_oauth_tokens', 'mcp_guard_oauth_codes', 'mcp_g
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- parser AST nodes are inspected structurally
 type Node = any;
 let stmts: Node[] = [];
-before(async () => { await loadModule(); stmts = parseSync(SQL).stmts.map((s: Node) => s.stmt); });
+before(async () => { await loadModule(); stmts = (parseSync(SQL).stmts ?? []).map((s: Node) => s.stmt); });
 
 describe('migration SQL', () => {
   it('parses, and parses its plpgsql bodies', () => {
     assert.ok(stmts.length > 20);
-    for (const f of stmts.filter((s) => s.CreateFunctionStmt)) assert.ok(parsePlPgSQLSync(reconstruct(f)).plpgsql_funcs.length === 1);
-    assert.ok(parseSync(ROLLBACK).stmts.length === 10);
+    for (const f of stmts.filter((s) => s.CreateFunctionStmt)) assert.ok((parsePlPgSQLSync(reconstruct(f)) as Node).plpgsql_funcs.length === 1);
+    assert.ok((parseSync(ROLLBACK).stmts ?? []).length === 10);
   });
   it('creates exactly the five new tables, all IF NOT EXISTS, and only creates/alters nothing existing', () => {
     const created = stmts.filter((s) => s.CreateStmt);
