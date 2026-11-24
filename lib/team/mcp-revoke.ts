@@ -6,8 +6,8 @@
  * Semantics:
  *  - The revoke runs BEFORE the change and again AFTER it (withMcpRevocation): a stolen refresh token cannot slip a refresh in between.
  *    If the revoke fails the change is not made; if the second one fails the caller sees an error and a retry re-revokes. Idempotent.
- *  - Before the MCP migration is applied (or on a database without the tables) there is nothing to revoke: relation-missing is not an
- *    error, so password resets etc. keep working everywhere. Any OTHER database error propagates.
+ *  - Before the MCP migration is applied (or on a database without the tables) there is nothing to revoke: a catalog check detects that
+ *    quietly (no error, no ensureSchema retry), so password resets etc. keep working everywhere. Any OTHER database error propagates.
  *  - Ids that are not UUIDs revoke nothing (the caller's own write decides what an invalid id means).
  *  - Audit rows go through mcp_audit_event (fixed allowlist); their absence (function not installed) or failure never blocks the revoke.
  *  - Never logs ids, tokens or error text.
@@ -40,6 +40,10 @@ export async function revokeMcpAccess(target: McpRevokeTarget, reason: McpRevoke
 
   let perUser: Array<{ user_id: string; n: number }>;
   try {
+    // Catalog lookup FIRST: it never raises, so a database without the MCP tables (migration not applied yet) takes the quiet path. Relying on
+    // the missing-relation error instead would make lib/team/db's query() run ensureSchema() (a full DDL pass) and log an error on every call.
+    const present = await db.query<{ ok: boolean }>(`SELECT to_regclass('public.oauth_tokens') IS NOT NULL AS ok`);
+    if (!present.rows[0]?.ok) return 0;
     const r = await db.query<{ user_id: string; n: number }>(
       `WITH r AS (UPDATE oauth_tokens SET revoked_at = now(), revoked_reason = $1 WHERE ${USERS_WHERE[kind]} AND revoked_at IS NULL RETURNING user_id)
        SELECT user_id, count(*)::int AS n FROM r GROUP BY user_id`,

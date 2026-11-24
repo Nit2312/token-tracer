@@ -13,7 +13,8 @@
     "db:analyst-role": "node scripts/setup-analyst-role.mjs",
     "test": "NODE_OPTIONS=--conditions=react-server tsx --test tests/*.test.ts",
     "test:unit": "SKIP_DB_TESTS=1 NODE_OPTIONS=--conditions=react-server tsx --test tests/*.test.ts",
-    "test:db": "NODE_OPTIONS=--conditions=react-server tsx --test --test-concurrency=1 tests/analyst-db.test.ts tests/analyst-login-db.test.ts tests/session-turns-isolation.test.ts tests/tenant-isolation-phase2.test.ts tests/rollup-concurrency.test.ts tests/mcp-oauth-db.test.ts tests/mcp-oauth-data.test.ts tests/mcp-oauth-endpoints.test.ts tests/mcp-oauth-authorize.test.ts tests/mcp-bearer-db.test.ts tests/mcp-revocation-db.test.ts",
+    "test:e2e:mcp": "node scripts/e2e-mcp.mjs",
+    "test:db": "NODE_OPTIONS=--conditions=react-server tsx --test --test-concurrency=1 --test-timeout=180000 tests/analyst-db.test.ts tests/analyst-login-db.test.ts tests/session-turns-isolation.test.ts tests/tenant-isolation-phase2.test.ts tests/rollup-concurrency.test.ts tests/mcp-oauth-db.test.ts tests/mcp-oauth-data.test.ts tests/mcp-oauth-endpoints.test.ts tests/mcp-oauth-authorize.test.ts tests/mcp-bearer-db.test.ts tests/mcp-revocation-db.test.ts tests/mcp-negative-db.test.ts",
     "db:analyst-login": "node scripts/setup-analyst-login.mjs"
   },
   "dependencies": {

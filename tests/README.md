@@ -34,3 +34,10 @@ Safety properties (enforced by `tests/test-db-safety.test.ts`):
   application code that loads `.env.local` (`lib/team/env.ts`) cannot reach production or reuse its secrets.
 - Most suites run inside a transaction on TEMP tables that is rolled back. `rollup-concurrency.test.ts` needs committed tables, so it
   creates and drops a uniquely named scratch schema on the test branch (never `public`).
+
+## MCP end-to-end harness (real server, test branch)
+
+`npm run test:e2e:mcp` (`scripts/e2e-mcp.mjs`) builds and starts the real app and drives the MCP OAuth + `/mcp` stack over HTTP. It reads only
+`TEST_DATABASE_URL`, `TEST_DATABASE_EXPECTED_ENDPOINT`, `TEST_MCP_AUTH_DATABASE_URL` (and optionally `TEST_ANALYST_DATABASE_URL`), refuses a
+production endpoint, never reads an env file, and removes everything it creates. Add `-- --skip-build` to reuse an existing build, `--port N` to change the port.
+Database suites are run sequentially (`--test-concurrency=1`): the `mcp_auth` role has a connection limit of 5.

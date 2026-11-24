@@ -124,7 +124,12 @@ describe('MCP revocation helper (live test branch)', { skip: SKIP_DB ? SKIP_REAS
     assert.equal(ran, false); assert.equal(await live(u), 2); // nothing changed, nothing revoked: the operation failed as a whole
     const noTables: Queryable = { query: (async () => { throw Object.assign(new Error('relation "oauth_tokens" does not exist'), { code: '42P01' }); }) as Queryable['query'] };
     await withMcpRevocation({ userId: u }, 'password_reset', async () => { ran = true; }, noTables);
-    assert.equal(ran, true); // before the MCP migration exists, password resets etc. still work
+    assert.equal(ran, true); // a missing-relation error (belt and braces) still lets the operation proceed
+    // The normal "migration not applied" path: the catalog check says the table is absent, so NOTHING else is queried (no UPDATE, no error).
+    const asked: string[] = [];
+    const absent: Queryable = { query: (async (text: string) => { asked.push(text); return { rows: [{ ok: false }], rowCount: 1 }; }) as unknown as Queryable['query'] };
+    ran = false; await withMcpRevocation({ userId: u }, 'password_reset', async () => { ran = true; }, absent);
+    assert.equal(ran, true); assert.equal(asked.length, 2); assert.ok(asked.every((t) => /to_regclass\('public\.oauth_tokens'\)/.test(t)), 'only the catalog check ran, twice (before and after)');
     const auditBroken: Queryable = { query: (async (text: string, params?: unknown[]) => { if (/mcp_audit_event/.test(text)) throw new Error('audit down'); return owner.query(text, params); }) as Queryable['query'] };
     assert.equal(await revokeMcpAccess({ userId: u }, 'password_reset', auditBroken), 2);
     assert.equal(await live(u), 0);

@@ -401,8 +401,12 @@ async function runRollup(): Promise<NextResponse> {
   //    where the MCP migration has not been applied (function/table missing) is skipped silently. Counts only; nothing else is reported.
   let mcpPurge: Record<string, number> | { error: true } | { skipped: true } = { skipped: true };
   try {
-    const purged = await query<{ r: Record<string, number> }>('SELECT mcp_oauth_purge() AS r');
-    mcpPurge = purged.rows[0]?.r ?? { skipped: true };
+    // Existence check first: calling a missing function would raise (and be logged by the shared query layer) every night until the migration exists.
+    const present = await query<{ ok: boolean }>(`SELECT to_regprocedure('public.mcp_oauth_purge()') IS NOT NULL AS ok`);
+    if (present.rows[0]?.ok) {
+      const purged = await query<{ r: Record<string, number> }>('SELECT mcp_oauth_purge() AS r');
+      mcpPurge = purged.rows[0]?.r ?? { skipped: true };
+    }
   } catch (err) {
     const code = (err as { code?: string }).code;
     if (code !== '42883' && code !== '42P01') { mcpPurge = { error: true }; console.warn('[mcp] purge failed'); }

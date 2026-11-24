@@ -69,6 +69,7 @@ describe('the revoke helper (lib/team/mcp-revoke.ts)', () => {
   });
   it('validates ids as UUIDs before building any query, tolerates only a missing relation, and never logs data', () => {
     assert.match(src, /UUID_RE\.test\(id\)/); assert.match(src, /42P01/);
+    assert.match(src, /to_regclass\('public\.oauth_tokens'\) IS NOT NULL/); // quiet catalog check first: no error, so no ensureSchema() retry in the shared query layer
     for (const m of src.matchAll(/console\.\w+\(([^)]*)\)/g)) assert.doesNotMatch(m[1].replace(/(['"`])(?:\\.|(?!\1).)*\1/g, ''), /\w/, `console call has non-literal arguments: ${m[0]}`);
   });
   it('runs revoke → change → revoke (the second one closes the refresh-token window)', () => {
@@ -93,6 +94,7 @@ describe('the revoke helper (lib/team/mcp-revoke.ts)', () => {
 describe('the nightly purge in the existing cron route', () => {
   const src = read('app/api/internal/rollup/route.ts');
   it('is isolated (never fails the rollup), skips silently when the migration is absent, and reports counts only', () => {
+    assert.match(src, /to_regprocedure\('public\.mcp_oauth_purge\(\)'\) IS NOT NULL/); // checked before calling, so a missing function raises and logs nothing
     assert.match(src, /SELECT mcp_oauth_purge\(\) AS r/);
     assert.match(src, /code !== '42883' && code !== '42P01'/);
     assert.doesNotMatch(src.slice(src.indexOf('E. MCP OAuth retention'), src.indexOf('const elapsed')), /errors\.push/);
