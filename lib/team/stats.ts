@@ -5,6 +5,7 @@
  */
 import crypto from 'node:crypto';
 import { query } from './db';
+import { withMcpRevocation } from './mcp-revoke';
 import { generateApiKey, hashApiKey } from './auth';
 import { hashPassword } from '@/lib/auth';
 import { statsCache } from './cache';
@@ -815,10 +816,11 @@ export async function updateMember(memberId: string, teamId: string, displayName
 
 /** Unlink a member from a specific team. */
 export async function deleteMember(memberId: string, teamId: string) {
-  const { rowCount } = await query(
+  // Removing a member from a team ends the MCP grants of the accounts linked to that member (before and after the change).
+  const { rowCount } = await withMcpRevocation({ memberId }, 'member_removed', () => query(
     'DELETE FROM team_members WHERE member_id = $1 AND team_id = $2',
     [memberId, teamId],
-  );
+  ));
   return { ok: true, deleted: (rowCount || 0) > 0 };
 }
 

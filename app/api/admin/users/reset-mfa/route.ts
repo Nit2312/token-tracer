@@ -7,6 +7,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
 import { resetMfa } from '@/lib/security/auth-store';
 import { recordAuditEvent } from '@/lib/team/audit';
+import { withMcpRevocation } from '@/lib/team/mcp-revoke';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,7 +21,7 @@ export async function POST(req: NextRequest) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
     return NextResponse.json({ error: 'valid user id required' }, { status: 400 });
   }
-  await resetMfa(`user:${id}`);
+  await withMcpRevocation({ userId: id }, 'mfa_reset', () => resetMfa(`user:${id}`));
   await recordAuditEvent({
     actorUserId: session.userId,
     actorUsername: session.username,

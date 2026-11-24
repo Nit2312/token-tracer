@@ -7,6 +7,7 @@ import {
   SessionPayload,
 } from '@/lib/auth';
 import { query } from '@/lib/team/db';
+import { withMcpRevocation } from '@/lib/team/mcp-revoke';
 
 export const dynamic = 'force-dynamic';
 
@@ -121,7 +122,7 @@ export async function PUT(req: NextRequest) {
     }
 
     const newHash = await hashPassword(newPassword);
-    await query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, session.userId]);
+    await withMcpRevocation({ userId: session.userId }, 'password_changed', () => query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, session.userId]));
   }
 
   // Update display_name in users table

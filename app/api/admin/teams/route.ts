@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/auth';
 import { query } from '@/lib/team/db';
+import { withMcpRevocation } from '@/lib/team/mcp-revoke';
 import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
@@ -68,7 +69,8 @@ export async function DELETE(req: NextRequest) {
   if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
 
   try {
-    const { rowCount } = await query('DELETE FROM teams WHERE id = $1', [id]);
+    // Deleting a team detaches its admins (users.team_id becomes NULL): end their MCP grants first so a later re-assignment cannot revive them.
+    const { rowCount } = await withMcpRevocation({ teamId: id }, 'team_deleted', () => query('DELETE FROM teams WHERE id = $1', [id]));
     return NextResponse.json({ ok: true, deleted: (rowCount || 0) > 0 });
   } catch (err: any) {
     console.error('[admin/teams DELETE error]', err);

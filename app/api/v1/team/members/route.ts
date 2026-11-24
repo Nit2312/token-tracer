@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthorizedTeamId, getSessionFromCookie, isAdminRole, isSystemAdmin } from '@/lib/auth';
 import { createMemberWithKey, createTeamUserWithMember, updateMember, deleteMember } from '@/lib/team/stats';
 import { query } from '@/lib/team/db';
+import { revokeMcpAccess, securityStateChanged } from '@/lib/team/mcp-revoke';
 import { publicError } from '@/lib/security/errors';
 
 export const dynamic = 'force-dynamic';
@@ -169,6 +170,13 @@ export async function PUT(req: NextRequest) {
       }
     }
 
+    // A role or active change ends the account's MCP grants (before and after the write).
+    const mcpNextRole = body.role === 'admin' ? 'admin' : (body.role ? 'user' : null);
+    const mcpNextActive = body.active !== undefined ? Boolean(body.active) : null;
+    const { rows: mcpCur } = await query('SELECT role, active, team_id FROM users WHERE member_id = $1', [String(body.id)]);
+    const mcpReason = mcpCur.map((u) => securityStateChanged(u, { role: mcpNextRole, active: mcpNextActive })).find(Boolean) ?? null;
+    if (mcpReason) await revokeMcpAccess({ memberId: String(body.id) }, mcpReason);
+
     await query(
       `UPDATE users SET
          display_name = COALESCE($1, display_name),
@@ -185,6 +193,8 @@ export async function PUT(req: NextRequest) {
         String(body.id),
       ]
     );
+
+    if (mcpReason) await revokeMcpAccess({ memberId: String(body.id) }, mcpReason);
 
     return NextResponse.json({ ok: true, member });
   } catch (err) {

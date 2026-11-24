@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthorizedTeamId, getSessionFromCookie, hashPassword, isSystemAdmin } from '@/lib/auth';
 import { query } from '@/lib/team/db';
+import { revokeMcpAccess } from '@/lib/team/mcp-revoke';
 import { recordAuditEvent } from '@/lib/team/audit';
 import crypto from 'node:crypto';
 import { publicError } from '@/lib/security/errors';
@@ -79,6 +80,10 @@ export async function POST(req: NextRequest) {
     let updatedUserId: string | null = null;
     let targetUsername: string | null = null;
 
+    // Revoke every MCP grant of the account(s) BEFORE the password changes (and again after, below).
+    const mcpTarget = userId ? { userId: String(userId) } : memberId ? { memberId: String(memberId) } : null;
+    if (mcpTarget) await revokeMcpAccess(mcpTarget, 'password_reset');
+
     if (userId) {
       const { rows } = await query(
         `UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2${roleClause} RETURNING id, username`,
@@ -121,6 +126,8 @@ export async function POST(req: NextRequest) {
         targetUsername = newUser[0].username;
       }
     }
+
+    if (updatedUserId) await revokeMcpAccess({ userId: updatedUserId }, 'password_reset'); // closes the window for a refresh token
 
     if (!updatedUserId) {
       return NextResponse.json({ error: 'user account not found' }, { status: 404 });

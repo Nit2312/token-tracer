@@ -136,6 +136,33 @@ Decisions and residual notes:
 - **No `/mcp` rate limit yet** — Phase 5. An unauthenticated flood costs one database round trip per request with a well-formed token (a missing/malformed header costs none); platform rate limiting (R9) applies.
 - The SDK prints one warning at start-up about `responseMode: 'json'`; it contains no request data.
 
+## Phase 2, Step 8 — revocation hooks and retention (implemented; MCP stays disabled)
+
+**Why hooks are needed even though `/mcp` re-reads the user on every request:** a re-read only blocks a token *while* the account is ineligible. A demoted admin who is later re-promoted — or moved to another team — would get an old token back, with access the user never consented to for that team. A password or MFA reset has no re-read at all. So every change to an account's security state revokes that account's MCP tokens (live test: without the hook the token revives after re-promotion; with it, it stays dead).
+
+`lib/team/mcp-revoke.ts` (application side, owner connection; it only ever runs the one-way `UPDATE oauth_tokens SET revoked_at, revoked_reason … WHERE revoked_at IS NULL` that the guard trigger allows; ids must be UUIDs; the MCP tables not existing yet is tolerated so these routes keep working before the migration is applied). `withMcpRevocation` = **revoke → change → revoke**: the first revoke runs before the change (a real database error aborts the whole operation), the second closes the window in which a stolen refresh token could still be exchanged. Audit rows go through `mcp_audit_event` (`tokens_revoked_for_user`, count + reason); an audit failure never undoes a revoke.
+
+| Site | Trigger | Reason recorded |
+|---|---|---|
+| `POST /api/admin/users/reset-password` | password reset (superadmin) | `password_reset` |
+| `POST /api/v1/team/members/reset-password` | password reset (admin / platform admin), by user or member | `password_reset` |
+| `PUT /api/auth/profile` | own password change | `password_changed` |
+| `POST /api/admin/users/reset-mfa` | authenticator reset | `mfa_reset` |
+| `PUT /api/admin/users` | role, active or team **actually changes** (display-name-only or same-value edits do not revoke) | `role_changed` / `deactivated` / `reactivated` / `team_changed` |
+| `PUT /api/v1/team/members` | role or active actually changes for the member's accounts | as above |
+| `deleteMember()` (soft removal from a team) | member removed | `member_removed` |
+| `DELETE /api/admin/teams` | team deleted (`users.team_id` becomes NULL) | `team_deleted` |
+| `DELETE` of a user / hard member delete | nothing to do: `oauth_tokens` and `oauth_authorization_codes` cascade from `users` | — |
+
+A guard test (`tests/mcp-revocation-hooks.test.ts`) fails if any file that updates `users.password_hash|role|active|team_id`, deletes a team, calls `resetMfa` or defines `deleteMember` does not import the helper (mutation-checked: removing the import from one route fails it), so a future write path cannot silently skip revocation.
+
+**Nightly retention:** the existing daily cron (`/api/internal/rollup`) now also runs `SELECT mcp_oauth_purge()` as the table owner (expired codes, dead tokens, stale rate-limit windows, access-log rows past 180 days, unused DCR clients). It is isolated — a purge problem never fails the rollup — and silently skipped where the MCP migration is absent. The response reports counts only. No new cron entry, no `vercel.json` change.
+
+Known semantics and open points:
+- **Team = `users.team_id`.** An admin's MCP team is the account's `team_id` (as for dashboard login). Removing an admin from a `team_members` row alone does not change `users.team_id`; the soft-removal hook still revokes their tokens, but the account keeps its `team_id` — unchanged existing behaviour.
+- **Optional hardening (decision for the owner, not done):** a database trigger on `users` (and `auth_totp`) that revokes tokens when those columns change would cover every future write path, including manual SQL and FK actions, atomically. It changes an existing hot table in production, so it is deliberately not part of this step.
+- Revocation is per token, not a ban: after a change the user can authorize again through consent (which re-checks eligibility).
+
 ### Connection sizing for `mcp_auth` (found in Step 7 testing; open for production readiness)
 `mcp_auth` has `CONNECTION LIMIT 5` and each server instance's pool allows up to 3 connections (`lib/mcp/db.ts`, `max: 3`). Running the live DB test files in parallel exceeded the limit (`53300 too many connections for role "mcp_auth"`); `npm run test:db` is now sequential (`--test-concurrency=1`). The same arithmetic applies in production: several concurrent serverless instances, each opening up to 3 connections, can exhaust 5 and make `/mcp` and `/oauth/*` answer 503 (fail closed, never open). Before enabling in production: point `MCP_AUTH_DATABASE_URL` at the Neon **pooled** (PgBouncer) endpoint, lower the per-instance pool to 1, and set the role's connection limit from measured concurrency (or confirm how Neon counts pooled connections against it). Not changed in this step.
 
