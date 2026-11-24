@@ -166,8 +166,9 @@ async function runMigration() {
       );
 
       CREATE TABLE IF NOT EXISTS session_outcomes (
-        session_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
         org_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
         tool TEXT NOT NULL,
         model TEXT NOT NULL,
         intent_category TEXT,
@@ -181,7 +182,8 @@ async function runMigration() {
         had_revert BOOLEAN,
         had_tool_error BOOLEAN,
         success BOOLEAN,
-        complexity_score NUMERIC
+        complexity_score NUMERIC,
+        PRIMARY KEY (org_id, user_id, tool, session_id)
       );
 
       CREATE TABLE IF NOT EXISTS prompt_embeddings (
@@ -192,6 +194,9 @@ async function runMigration() {
       CREATE TABLE IF NOT EXISTS redundant_reprompt_events (
         id BIGSERIAL PRIMARY KEY,
         session_id TEXT NOT NULL,
+        org_id TEXT,
+        user_id TEXT,
+        tool TEXT,
         turn_index INT NOT NULL,
         similarity_score NUMERIC,
         tokens_cost_of_following_turn INT,
