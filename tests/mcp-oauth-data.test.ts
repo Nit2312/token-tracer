@@ -31,13 +31,14 @@ const CB = 'https://claude.ai/api/mcp/auth_callback';
 const VERIFIER = 'v'.repeat(43);
 const CHALLENGE = s256Challenge(VERIFIER);
 const clientIds: string[] = [];
-let owner: pg.Client; let pool: McpPool; let userId: string; let clientId: string;
+let owner: pg.Client; let pool: McpPool; let userId: string; let clientId: string; let teamId: string;
 
 const fails = async (p: Promise<unknown>, code = 'invalid_grant') => {
   await assert.rejects(p, (e: unknown) => e instanceof OAuthError && e.code === code);
 };
-async function mkUser(role = 'user', active = true): Promise<string> {
-  return (await owner.query(`INSERT INTO users (username, password_hash, display_name, role, active) VALUES ($1, 'x-not-a-hash', 'Data Test', $2, $3) RETURNING id`, [`mcp-data-${crypto.randomBytes(4).toString('hex')}-${RUN}`, role, active])).rows[0].id;
+// MCP access requires an ACTIVE database user with role 'admin' in a team that exists (tokens.ts ELIGIBLE_USER_SQL).
+async function mkUser(role = 'admin', active = true): Promise<string> {
+  return (await owner.query(`INSERT INTO users (username, password_hash, display_name, role, active, team_id) VALUES ($1, 'x-not-a-hash', 'Data Test', $2, $3, $4) RETURNING id`, [`mcp-data-${crypto.randomBytes(4).toString('hex')}-${RUN}`, role, active, teamId])).rows[0].id;
 }
 async function login(uid = userId, cid = clientId) {
   const code = await createAuthorizationCode(pool, { clientId: cid, userId: uid, redirectUri: CB, codeChallenge: CHALLENGE, resource: RESOURCE, scope: 'mcp:read' });
@@ -53,6 +54,7 @@ describe('OAuth data-access layer (live test branch, via the mcp_auth pool)', { 
     owner = new pg.Client({ connectionString: connectionString(cfg!), ssl: { rejectUnauthorized: true } });
     await owner.connect();
     pool = createMcpPool(mcpAuthUrl());
+    teamId = (await owner.query(`INSERT INTO teams (name) VALUES ($1) RETURNING id`, [`Data Team ${RUN}`])).rows[0].id;
     userId = await mkUser(); users.push(userId);
     const c = await registerClient(pool, { name: 'Data test client', redirectUris: [CB] });
     clientId = c.clientId; clientIds.push(clientId);
@@ -63,6 +65,7 @@ describe('OAuth data-access layer (live test branch, via the mcp_auth pool)', { 
       await owner.query('DELETE FROM mcp_rate_limits WHERE key LIKE $1', [`test:${RUN}%`]);
       await owner.query('DELETE FROM oauth_clients WHERE client_id = ANY($1)', [clientIds]);
       await owner.query('DELETE FROM users WHERE id = ANY($1)', [users]);
+      await owner.query('DELETE FROM teams WHERE id = $1', [teamId]);
     } finally { await pool?.end().catch(() => {}); await owner?.end().catch(() => {}); }
   });
 
@@ -125,7 +128,7 @@ describe('OAuth data-access layer (live test branch, via the mcp_auth pool)', { 
       const text = JSON.stringify((await owner.query('SELECT * FROM oauth_tokens WHERE user_id = $1', [userId])).rows);
       assert.ok(!text.includes(pair.accessToken) && !text.includes(pair.refreshToken)); // no plaintext anywhere
       const p = await authenticateAccessToken(pool, pair.accessToken, RESOURCE);
-      assert.deepEqual([p?.userId, p?.clientId, p?.scope, p?.role, p ? isTeamAdmin(p) : null], [userId, clientId, 'mcp:read', 'user', false]);
+      assert.deepEqual([p?.userId, p?.clientId, p?.scope, p?.role, p ? isTeamAdmin(p) : null], [userId, clientId, 'mcp:read', 'admin', true]);
       assert.equal(await authenticateAccessToken(pool, pair.accessToken, 'https://other.invalid/mcp'), null); // audience-bound
       assert.equal(await authenticateAccessToken(pool, pair.refreshToken, RESOURCE), null); // a refresh token is not a bearer token
       for (const junk of [undefined, '', 'tt_at_', 'Bearer x', `${ACCESS_TOKEN_PREFIX}${'A'.repeat(43)}`]) assert.equal(await authenticateAccessToken(pool, junk, RESOURCE), null);
@@ -146,7 +149,7 @@ describe('OAuth data-access layer (live test branch, via the mcp_auth pool)', { 
       await fails(exchangeAuthorizationCode(pool, { code, clientId, redirectUri: CB, codeVerifier: VERIFIER, resource: RESOURCE }));
       await fails(exchangeAuthorizationCode(pool, { code: generateSecret(AUTH_CODE_PREFIX), clientId, redirectUri: CB, codeVerifier: VERIFIER, resource: RESOURCE }));
       await fails(exchangeAuthorizationCode(pool, { code: 'junk', clientId, redirectUri: CB, codeVerifier: VERIFIER, resource: RESOURCE }));
-      const off = await mkUser('user', false); users.push(off);
+      const off = await mkUser('admin', false); users.push(off);
       const c2 = await createAuthorizationCode(pool, { clientId, userId: off, redirectUri: CB, codeChallenge: CHALLENGE, resource: RESOURCE, scope: 'mcp:read' });
       await fails(exchangeAuthorizationCode(pool, { code: c2, clientId, redirectUri: CB, codeVerifier: VERIFIER, resource: RESOURCE }));
     });

@@ -15,6 +15,13 @@ export const REFRESH_IDLE_TTL_SECONDS = 14 * 24 * 3600;
 export const REFRESH_ABSOLUTE_TTL_SECONDS = 60 * 24 * 3600;
 export const AUTH_CODE_TTL_SECONDS = 60;
 
+/**
+ * The ONE definition of "this user may hold MCP access", used by code exchange, refresh and bearer authentication alike: an active DATABASE
+ * user whose role is 'admin' and who belongs to a team that still exists. Evaluated against the database on every use, never cached.
+ * (SQL fragment over alias `u`; constant text, no interpolated values.)
+ */
+const ELIGIBLE_USER_SQL = `(u.active AND u.role = 'admin' AND EXISTS (SELECT 1 FROM teams tm WHERE tm.id = u.team_id))`;
+
 const INVALID_GRANT = () => new OAuthError('invalid_grant', 'The grant is invalid, expired or already used.');
 
 export interface TokenPair { accessToken: string; refreshToken: string; expiresIn: number; scope: string; tokenType: 'Bearer' }
@@ -91,7 +98,7 @@ export async function exchangeAuthorizationCode(pool: McpPool, i: ExchangeCodeIn
     }
     if (row.client_id !== i.clientId || row.redirect_uri !== i.redirectUri || row.resource !== i.resource || !verifyPkce(i.codeVerifier, row.code_challenge)) return { fail: 'invalid' };
     const ok = await tx.query(
-      `SELECT 1 FROM users u, oauth_clients c WHERE u.id = $1 AND u.active AND c.client_id = $2 AND c.disabled_at IS NULL`, [row.user_id, row.client_id]);
+      `SELECT 1 FROM users u, oauth_clients c WHERE u.id = $1 AND ${ELIGIBLE_USER_SQL} AND c.client_id = $2 AND c.disabled_at IS NULL`, [row.user_id, row.client_id]);
     if (ok.rowCount !== 1) return { fail: 'invalid' };
     const pair = await issuePair(tx, { clientId: row.client_id, userId: row.user_id, resource: row.resource, scope: row.scope, familyId: row.family_id, ...FRESH_ABS });
     await audit(tx, 'token_issued', row.user_id, 'oauth_token', pair.refreshId, { grant: 'authorization_code' });
@@ -125,7 +132,7 @@ export async function refreshTokens(pool: McpPool, i: RefreshInput): Promise<Tok
     out = await withMcpTx(pool, async (tx): Promise<RefreshOutcome> => {
       const s = await tx.query(
         `SELECT t.id, t.user_id, t.client_id, t.family_id, t.resource, t.scope, t.rotated_at, t.revoked_at,
-                (t.expires_at > now() AND t.absolute_expires_at > now()) AS live, (u.active AND c.disabled_at IS NULL) AS allowed
+                (t.expires_at > now() AND t.absolute_expires_at > now()) AS live, (${ELIGIBLE_USER_SQL} AND c.disabled_at IS NULL) AS allowed
            FROM oauth_tokens t JOIN users u ON u.id = t.user_id JOIN oauth_clients c ON c.client_id = t.client_id
           WHERE t.token_hash = $1 AND t.kind = 'refresh'`, [hash]);
       const t = s.rows[0];
@@ -166,8 +173,8 @@ export async function refreshTokens(pool: McpPool, i: RefreshInput): Promise<Tok
 // ── Bearer authentication (every MCP request) ───────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Resolve an access token to a principal, re-reading the user's CURRENT state: a deactivated user, a disabled client, a revoked/expired
- * token or a token minted for another resource all yield null. Never throws for a bad token (callers answer 401); database failure throws.
+ * Resolve an access token to a principal, re-reading the user's CURRENT state: a deactivated or demoted user, a user without a (still existing)
+ * team, a disabled client, a revoked/expired token, a refresh token, or a token minted for another resource all yield null. Never throws for a bad token (callers answer 401); database failure throws.
  */
 export async function authenticateAccessToken(pool: McpPool, token: unknown, expectedResource: string): Promise<McpPrincipal | null> {
   if (!looksLikeSecret(token, ACCESS_TOKEN_PREFIX)) return null;
@@ -177,7 +184,7 @@ export async function authenticateAccessToken(pool: McpPool, token: unknown, exp
       `SELECT t.id, t.user_id, t.client_id, t.scope, t.resource, u.role, u.team_id, u.display_name
          FROM oauth_tokens t JOIN users u ON u.id = t.user_id JOIN oauth_clients c ON c.client_id = t.client_id
         WHERE t.token_hash = $1 AND t.kind = 'access' AND t.revoked_at IS NULL AND t.expires_at > now() AND t.absolute_expires_at > now()
-          AND u.active AND c.disabled_at IS NULL`, [hash]);
+          AND ${ELIGIBLE_USER_SQL} AND c.disabled_at IS NULL`, [hash]);
     const row = r.rows[0];
     if (!row || row.resource !== expectedResource) return null;
     await tx.query(`UPDATE oauth_tokens SET last_used_at = now() WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < now() - interval '5 minutes')`, [row.id]);

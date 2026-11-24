@@ -104,7 +104,36 @@ Accepted residual risks (Step 6):
 - **R9 — unauthenticated database cost:** `/oauth/authorize`, `/oauth/token`, `/oauth/register` each cost a database round trip per request; the registration/token limits are per hashed IP and `mcp_auth` has a 3-connection pool. Add platform rate limiting (Vercel Firewall) for `/oauth/*` before enabling in production.
 - **R10 — unverified client names:** DCR clients can claim any name; the page says so and shows the real destination.
 
+## Phase 2, Step 7 — bearer authentication on `/mcp` (implemented; MCP stays disabled)
+
+Every `/mcp` request is authenticated from scratch (`lib/mcp/bearer.ts` → `authenticateAccessToken`). Order of checks: `MCP_ENABLED` (404) → valid OAuth config (503) → Host allow-list (403) → **canonical Host** (403; tokens are bound to `<MCP_PUBLIC_BASE_URL>/mcp`, so an allowed-but-non-canonical host is refused) → Origin (403) → bearer token (401/403/503) → SDK. Refused requests never reach the database.
+
+One query per request re-reads the token, the user, their team and the client: token is `kind='access'`, not revoked, not expired (idle and absolute), audience equals the canonical resource; user is **active, role `admin`, and in a team that still exists**; client is not disabled. The same predicate (`ELIGIBLE_USER_SQL` in `tokens.ts`) also gates code exchange and refresh, so a demoted/deactivated/team-less admin can neither use nor obtain tokens. Nothing is cached: a change in the database takes effect on the very next request with the same token (and reverts the same way); the principal's team always comes from the database, never from the token or the request.
+
+Responses (exact strings are pinned by tests):
+| Situation | Status | `WWW-Authenticate` |
+|---|---|---|
+| No `Authorization`, or a non-Bearer scheme | 401 | `Bearer resource_metadata="<base>/.well-known/oauth-protected-resource/mcp", scope="mcp:read"` |
+| Bearer token that does not authenticate — unknown, malformed, expired, revoked, rotated/refresh token, wrong audience, user deactivated/demoted/team-less, team deleted, client disabled | 401 | `Bearer error="invalid_token", error_description="The access token is invalid or has expired.", resource_metadata="…", scope="mcp:read"` — **identical for every cause** (no oracle) |
+| Valid token without `mcp:read` | 403 | `… error="insufficient_scope" …` |
+| Authentication database unavailable | 503 + `Retry-After: 5` | none (a client must not discard a good token) |
+
+Principal → tools: `lib/mcp/context.ts` (`McpToolContext`, frozen, holds the admin principal, **never the token**). The SDK handler is created once and shared (it holds no per-user state; creating one logs a warning); the context reaches `createTokenTracerMcpServer(ctx)` through an `AsyncLocalStorage` scope that lives for one request, and the factory throws if no scope exists (fail closed). Concurrent requests with different tokens are tested not to see each other's principal. Cookies, `X-Team-Id`-style headers and `?access_token=` are never read. No tools are registered, so capability discovery is still empty.
+
+Logging: the only new log line is the fixed text `[mcp] authentication unavailable`; no token, header, error object or database detail is ever logged (guarded by a test that inspects every `console.*` call in `lib/mcp`).
+
+Guards (`tests/mcp-foundation.test.ts`, replacing the Phase 1 "no database" rule): only six modules may import `pg` or run queries (`db.ts`, `oauth/{audit,clients,grant-user,rate-limit,tokens}.ts`); the request-serving modules reach the database only through `bearer.ts`; SQL may name only `users, teams, oauth_*, mcp_rate_limits, mcp_access_log` and never prompt/session/audit tables; environment reads are limited to `MCP_*`, `NODE_ENV`, `NEXT_PUBLIC_SERVER_URL` and (consent only) `SESSION_SECRET`. `mcp_auth` was **not** granted anything new for this step (`--verify` unchanged).
+
+Decisions and residual notes:
+- **Ineligible = invalid token (401), not 403.** A demoted admin's token is simply no longer valid; a 403 would imply the token is good. Re-authorization is then refused at consent for the same reason.
+- **`last_used_at`** is updated at most every 5 minutes per token (a write on a read path; bounded).
+- **No `/mcp` rate limit yet** — Phase 5. An unauthenticated flood costs one database round trip per request with a well-formed token (a missing/malformed header costs none); platform rate limiting (R9) applies.
+- The SDK prints one warning at start-up about `responseMode: 'json'`; it contains no request data.
+
+### Connection sizing for `mcp_auth` (found in Step 7 testing; open for production readiness)
+`mcp_auth` has `CONNECTION LIMIT 5` and each server instance's pool allows up to 3 connections (`lib/mcp/db.ts`, `max: 3`). Running the live DB test files in parallel exceeded the limit (`53300 too many connections for role "mcp_auth"`); `npm run test:db` is now sequential (`--test-concurrency=1`). The same arithmetic applies in production: several concurrent serverless instances, each opening up to 3 connections, can exhaust 5 and make `/mcp` and `/oauth/*` answer 503 (fail closed, never open). Before enabling in production: point `MCP_AUTH_DATABASE_URL` at the Neon **pooled** (PgBouncer) endpoint, lower the per-instance pool to 1, and set the role's connection limit from measured concurrency (or confirm how Neon counts pooled connections against it). Not changed in this step.
+
 ### Production-readiness approval items (must be signed off before `MCP_ENABLED=true` in production)
 1. **Consent wording — legal/HR (OPEN).** Technically approved on 2026-11-24 (it matches the access model: a team admin's connected app can read team developers' activity, session metadata and prompt text with sensitive values masked). **Not confirmed as meeting legal or HR requirements** (employee notice, monitoring disclosure, data-protection basis). Owner: product/legal. The text is in `app/oauth/authorize/consent-form.tsx`.
-2. R2 (audit actor attribution by a compromised `mcp_auth`), R7, R9 (platform rate limiting for `/oauth/*`), R10.
+2. R2 (audit actor attribution by a compromised `mcp_auth`), R7, R9 (platform rate limiting for `/oauth/*`), R10, and the `mcp_auth` connection sizing above.
 3. Vercel production `NEXT_PUBLIC_SERVER_URL` / `MCP_PUBLIC_BASE_URL` verification, production migration and role provisioning, new environment variables.

@@ -27,7 +27,7 @@ const CB = 'https://claude.ai/api/mcp/auth_callback';
 const VERIFIER = 'v'.repeat(43);
 const FORM = { 'content-type': 'application/x-www-form-urlencoded' };
 const RUN = crypto.randomBytes(5).toString('hex');
-let owner: pg.Client; let pool: McpPool; let userId: string;
+let owner: pg.Client; let pool: McpPool; let userId: string; let teamId: string;
 const clientIds: string[] = [];
 const ipOf = () => `198.51.100.${Math.floor(Math.random() * 250) + 1}-${crypto.randomBytes(3).toString('hex')}`;
 let deps: { enabled: true; config: typeof cfg; pool: () => McpPool };
@@ -56,7 +56,8 @@ describe('OAuth HTTP endpoints (live test branch)', { skip: SKIP_DB ? SKIP_REASO
     await owner.connect();
     pool = createMcpPool(mcpAuthUrl());
     deps = { enabled: true, config: cfg, pool: () => pool };
-    userId = (await owner.query(`INSERT INTO users (username, password_hash, display_name, role) VALUES ($1, 'x-not-a-hash', 'Endpoint Test', 'user') RETURNING id`, [`mcp-ep-${RUN}`])).rows[0].id;
+    teamId = (await owner.query(`INSERT INTO teams (name) VALUES ($1) RETURNING id`, [`Endpoint Team ${RUN}`])).rows[0].id;
+    userId = (await owner.query(`INSERT INTO users (username, password_hash, display_name, role, team_id) VALUES ($1, 'x-not-a-hash', 'Endpoint Test', 'admin', $2) RETURNING id`, [`mcp-ep-${RUN}`, teamId])).rows[0].id;
   });
   after(async () => {
     try {
@@ -64,6 +65,7 @@ describe('OAuth HTTP endpoints (live test branch)', { skip: SKIP_DB ? SKIP_REASO
       await owner.query(`DELETE FROM mcp_rate_limits WHERE key LIKE 'register:%' OR key LIKE 'token:%' OR key LIKE 'revoke:%'`);
       await owner.query('DELETE FROM oauth_clients WHERE client_id = ANY($1)', [clientIds]);
       await owner.query('DELETE FROM users WHERE id = $1', [userId]);
+      await owner.query('DELETE FROM teams WHERE id = $1', [teamId]);
     } finally { await pool?.end().catch(() => {}); await owner?.end().catch(() => {}); }
   });
 

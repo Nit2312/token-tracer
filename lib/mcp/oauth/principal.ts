@@ -9,3 +9,7 @@ export interface McpPrincipal {
  * never hold a token), and only role 'admin' with a team qualifies. superadmin is deliberately excluded from team data access.
  */
 export const isTeamAdmin = (p: McpPrincipal): boolean => p.role === 'admin' && p.teamId !== null;
+
+/** What every tool call receives: an admin with a team, both facts re-read from the database for THIS request. */
+export type TeamAdminPrincipal = McpPrincipal & { role: 'admin'; teamId: string };
+export const asTeamAdmin = (p: McpPrincipal): TeamAdminPrincipal | null => (isTeamAdmin(p) ? (p as TeamAdminPrincipal) : null);
