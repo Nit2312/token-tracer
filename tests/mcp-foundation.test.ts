@@ -266,7 +266,9 @@ describe('Next route wiring (app/mcp/route.ts)', () => {
 
 describe('no application data or credentials are reachable from the MCP code', () => {
   const dir = path.join(process.cwd(), 'lib', 'mcp');
-  const files = [...fs.readdirSync(dir).filter((f) => f.endsWith('.ts')).map((f) => path.join(dir, f)), path.join(process.cwd(), 'app', 'mcp', 'route.ts')];
+  // lib/mcp/db.ts is the ONE sanctioned database module (dedicated mcp_auth pool); it has its own, equally strict test below. Every file that
+  // serves requests (handler, server, config, the route) must still be database-free until the bearer-auth step wires the repositories in.
+  const files = [...fs.readdirSync(dir).filter((f) => f.endsWith('.ts') && f !== 'db.ts').map((f) => path.join(dir, f)), path.join(process.cwd(), 'app', 'mcp', 'route.ts')];
   const code = (f: string) => fs.readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
   it('imports only the MCP SDK and its own modules', () => {
     for (const f of files) {
@@ -277,6 +279,12 @@ describe('no application data or credentials are reachable from the MCP code', (
   it('references no database, auth, session or secret-bearing configuration', () => {
     const forbidden = /\bpg\b|lib\/team|lib\/auth|lib\/security|session-token|getPool|query\(|DATABASE_URL|NEON_CONNECTION|ANALYST_|SESSION_SECRET|CRON_SECRET|GROQ|PASSWORD|cookie/i;
     for (const f of files) assert.doesNotMatch(code(f), forbidden, path.basename(f));
+  });
+  it('db.ts: imports only pg, reads only MCP_AUTH_DATABASE_URL, and names no other credential', () => {
+    const src = code(path.join(dir, 'db.ts'));
+    assert.deepEqual([...src.matchAll(/from\s+['"]([^'"]+)['"]/g)].map((m) => m[1]), ['pg']);
+    assert.deepEqual([...new Set([...src.matchAll(/process\.env\.(\w+)/g)].map((m) => m[1]))], ['MCP_AUTH_DATABASE_URL']);
+    assert.doesNotMatch(src.replace(/MCP_AUTH_DATABASE_URL/g, ''), /DATABASE_URL|NEON_CONNECTION|ANALYST_|SESSION_SECRET|CRON_SECRET|GROQ|neondb_owner|lib\/team|lib\/security/);
   });
   it('registers no tools, resources or prompts', () => {
     for (const f of files) assert.doesNotMatch(code(f), /registerTool|registerResource|registerPrompt|\.tool\(|\.resource\(|\.prompt\(/, path.basename(f));
