@@ -1,24 +1,15 @@
 /**
  * Database-level permission tests. They prove the PostgreSQL boundary rejects unauthorized access
  * independently of the application validator (we bypass validateSql and send SQL straight to the DB as analyst_ro).
- * Skipped unless DATABASE_URL is set and the analyst_ro role exists (npm run db:analyst-role). Read-only; always rolled back.
+ * Runs only against the explicit test branch (tests/README.md) and requires the analyst_ro role there. Read-only; always rolled back.
  */
+import { SKIP_DB, SKIP_REASON, connectionString, loadTestDb } from './helpers/test-db'; // FIRST: installs the production-credential tripwire
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import pg from 'pg';
 
-function env(): string | undefined {
-  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
-  try {
-    const m = fs.readFileSync('.env.local', 'utf8').match(/^DATABASE_URL=["']?([^"'\n]+)/m);
-    return m?.[1];
-  } catch { return undefined; }
-}
-
-const raw = env();
+const cfg = SKIP_DB ? undefined : loadTestDb('owner'); // owner-level test-branch login; the tests then SET ROLE analyst_ro inside read-only transactions
 let pool: pg.Pool | undefined;
-let ready = false;
 
 async function asAnalyst<T>(sql: string): Promise<T[]> {
   const c = await pool!.connect();
@@ -32,15 +23,13 @@ async function asAnalyst<T>(sql: string): Promise<T[]> {
 }
 const denied = (sql: string) => assert.rejects(() => asAnalyst(sql), (e: { code?: string }) => e.code === '42501');
 
-describe('analyst_ro database permissions (independent of the app validator)', { skip: !raw && 'DATABASE_URL not set' }, () => {
+describe('analyst_ro database permissions (independent of the app validator)', { skip: SKIP_DB && SKIP_REASON }, () => {
   before(async () => {
-    const url = new URL(raw!);
-    url.searchParams.delete('sslmode');
-    pool = new pg.Pool({ connectionString: url.toString(), ssl: { rejectUnauthorized: false }, max: 1 });
-    try { await asAnalyst('SELECT 1'); ready = true; } catch { ready = false; }
+    pool = new pg.Pool({ connectionString: connectionString(cfg!), ssl: { rejectUnauthorized: false }, max: 1 });
+    await asAnalyst('SELECT 1'); // throws (suite fails) if the test branch is unreachable or analyst_ro is missing
   });
   after(async () => { await pool?.end(); });
-  const t = (name: string, fn: () => Promise<void>) => it(name, async (ctx) => { if (!ready) return ctx.skip('analyst_ro not set up'); await fn(); });
+  const t = (name: string, fn: () => Promise<void>) => it(name, fn);
 
   t('role is not superuser / bypassrls / createrole / createdb / login', async () => {
     const [r] = await asAnalyst<Record<string, boolean>>("SELECT rolsuper, rolbypassrls, rolcreaterole, rolcreatedb, rolcanlogin FROM pg_roles WHERE rolname = 'analyst_ro'");

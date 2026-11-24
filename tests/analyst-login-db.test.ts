@@ -1,19 +1,14 @@
 /**
- * Live checks of the provisioned analyst_login role over ANALYST_DATABASE_URL (the real pooled Neon endpoint).
- * Skipped unless ANALYST_DATABASE_URL is set and works. Read-only; every transaction is rolled back.
+ * Live checks of the provisioned analyst_login role on the TEST branch, over TEST_ANALYST_DATABASE_URL (tests/README.md).
+ * Fails if that is not configured; never uses the production ANALYST_DATABASE_URL. Read-only; every transaction is rolled back.
  */
+import { SKIP_DB, SKIP_REASON, connectionString, loadTestDb } from './helpers/test-db'; // FIRST: installs the production-credential tripwire
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import pg from 'pg';
 
-function url(): string | undefined {
-  if (process.env.ANALYST_DATABASE_URL) return process.env.ANALYST_DATABASE_URL;
-  try { return fs.readFileSync('.env.local', 'utf8').match(/^ANALYST_DATABASE_URL=["']?([^"'\n]+)/m)?.[1]; } catch { return undefined; }
-}
-const raw = url();
+const cfg = SKIP_DB ? undefined : loadTestDb('analyst'); // analyst_login URL of the TEST branch (never the production ANALYST_DATABASE_URL)
 let pool: pg.Pool | undefined;
-let ready = false;
 
 async function tx<T>(sql: string): Promise<T[]> {
   const c = await pool!.connect();
@@ -24,14 +19,13 @@ async function tx<T>(sql: string): Promise<T[]> {
 }
 const denied = (sql: string, codes = ['42501']) => assert.rejects(() => tx(sql), (e: { code?: string }) => codes.includes(e.code ?? ''));
 
-describe('analyst_login (live)', { skip: !raw && 'ANALYST_DATABASE_URL not set' }, () => {
+describe('analyst_login (live)', { skip: SKIP_DB && SKIP_REASON }, () => {
   before(async () => {
-    const u = new URL(raw!); u.searchParams.delete('sslmode');
-    pool = new pg.Pool({ connectionString: u.toString(), ssl: { rejectUnauthorized: false }, max: 1 });
-    try { await tx('SELECT 1'); ready = true; } catch { ready = false; }
+    pool = new pg.Pool({ connectionString: connectionString(cfg!), ssl: { rejectUnauthorized: false }, max: 1 });
+    await tx('SELECT 1'); // throws (suite fails) if the test branch's analyst_login is unreachable
   });
   after(async () => { await pool?.end(); });
-  const t = (name: string, fn: () => Promise<void>) => it(name, async (ctx) => { if (!ready) return ctx.skip('analyst_login not reachable'); await fn(); });
+  const t = (name: string, fn: () => Promise<void>) => it(name, fn);
 
   t('connects as analyst_login, not superuser', async () => {
     const [r] = await tx<Record<string, string>>("SELECT current_user u, session_user s, current_setting('is_superuser') su");
