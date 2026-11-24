@@ -13,7 +13,7 @@
     "db:analyst-role": "node scripts/setup-analyst-role.mjs",
     "test": "NODE_OPTIONS=--conditions=react-server tsx --test tests/*.test.ts",
     "test:unit": "SKIP_DB_TESTS=1 NODE_OPTIONS=--conditions=react-server tsx --test tests/*.test.ts",
-    "test:db": "NODE_OPTIONS=--conditions=react-server tsx --test tests/analyst-db.test.ts tests/analyst-login-db.test.ts tests/session-turns-isolation.test.ts tests/tenant-isolation-phase2.test.ts tests/rollup-concurrency.test.ts",
+    "test:db": "NODE_OPTIONS=--conditions=react-server tsx --test tests/analyst-db.test.ts tests/analyst-login-db.test.ts tests/session-turns-isolation.test.ts tests/tenant-isolation-phase2.test.ts tests/rollup-concurrency.test.ts tests/mcp-oauth-db.test.ts",
     "db:analyst-login": "node scripts/setup-analyst-login.mjs"
   },
   "dependencies": {

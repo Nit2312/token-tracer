@@ -88,7 +88,7 @@ async function apply() {
     if (bad.length) throw new Error(`${ROLE} has forbidden attributes (${bad.join(', ')}); refusing.`);
     const memberships = (await c.query('SELECT count(*)::int n FROM pg_auth_members WHERE member = (SELECT oid FROM pg_roles WHERE rolname=$1)', [ROLE])).rows[0].n;
     if (memberships) throw new Error(`${ROLE} is a member of ${memberships} role(s); it must have none. Refusing.`);
-    for (const [k, v] of Object.entries(DEFAULTS)) await c.query(`ALTER ROLE ${q(ROLE)} SET ${k} = ${typeof v === 'number' ? v : c.escapeLiteral(v)}`);
+    for (const [k, v] of Object.entries(DEFAULTS)) await c.query(`ALTER ROLE ${q(ROLE)} SET ${k} = ${v}`); // DEFAULTS is a trusted constant; search_path must be a bare list, a quoted string becomes ONE schema name
     const stmts = grantStatements(schemas);
     for (const s of stmts) await c.query(s);
     await c.query('COMMIT');
@@ -125,7 +125,8 @@ async function verify() {
   };
   try {
     const id = (await c.query("SELECT current_user u, session_user s, current_setting('is_superuser') su")).rows[0];
-    check(id.u === ROLE && id.s === ROLE, `connected as ${ROLE}`); check(id.su === 'off', 'not superuser');
+    check(id.u === ROLE && id.s === ROLE, `connected as ${ROLE}`);
+    { const sp = (await c.query('SHOW search_path')).rows[0].search_path; check(sp === 'pg_catalog, public', 'effective search_path is pg_catalog, public', sp); } check(id.su === 'off', 'not superuser');
     const r = (await c.query('SELECT rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolconnlimit FROM pg_roles WHERE rolname=$1', [ROLE])).rows[0];
     check(r && !r.rolsuper && !r.rolcreatedb && !r.rolcreaterole && !r.rolreplication && !r.rolbypassrls && r.rolconnlimit === CONN_LIMIT, 'role attributes', JSON.stringify(r));
     check((await c.query('SELECT count(*)::int n FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=$1)', [ROLE])).rows[0].n === 0, 'no role memberships');

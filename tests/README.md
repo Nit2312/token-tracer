@@ -15,6 +15,7 @@ goes through `tests/helpers/test-db.ts`, which requires:
 |---|---|
 | `TEST_DATABASE_URL` | Owner-level **direct** (non-pooled) connection string of a **dedicated test branch**. Used by the isolation, rollup, migration and `analyst_ro` permission suites. |
 | `TEST_ANALYST_DATABASE_URL` | `analyst_login` connection string of the **same** test branch (pooled is fine). Used by `analyst-login-db.test.ts`. |
+| `TEST_MCP_AUTH_DATABASE_URL` | `mcp_auth` login of the **same** test branch (direct host, same endpoint id; the migration `scripts/migrations/mcp-oauth.sql` and `scripts/setup-mcp-roles.mjs --apply` must have been run on it). Used by `mcp-oauth-db.test.ts`. |
 | `TEST_DATABASE_EXPECTED_ENDPOINT` | The test branch's endpoint id (`ep-…`). Must equal the endpoint in both URLs, or the tests refuse to connect. |
 | `SKIP_DB_TESTS=1` | Deliberately skip every database suite (the only way to skip). |
 
