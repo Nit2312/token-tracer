@@ -61,3 +61,23 @@ review → only then production, with explicit approval and a backup branch.
 
 OAuth 2.1 (Phase 2), tenant-scoped authorization (3), read-only tools (4), audit and rate limits (5), end-to-end tests (6), rollout (7).
 Prompt-level data will use a dedicated read-only database role, never the application owner role.
+
+## Phase 2, Step 5 — OAuth HTTP endpoints (implemented; MCP stays disabled)
+
+Routes (all `runtime = 'nodejs'`, `dynamic = 'force-dynamic'`, thin wrappers over `lib/mcp/oauth/endpoints.ts`):
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/.well-known/oauth-authorization-server` | GET | RFC 8414 metadata (issuer = canonical base URL, S256 only, public clients, CIMD false) |
+| `/.well-known/oauth-protected-resource/mcp` and `/.well-known/oauth-protected-resource` | GET | RFC 9728 metadata (`resource` = `<base>/mcp`) |
+| `/oauth/register` | POST | RFC 7591 DCR, public clients only; 10/h per hashed IP + 300/h global |
+| `/oauth/token` | POST | `authorization_code` + `refresh_token`; form-encoded only; 120/min per IP, 60/min per client |
+| `/oauth/revoke` | POST | RFC 7009; always 200 |
+
+Rules every handler enforces, in order: `MCP_ENABLED` off → 404; `MCP_PUBLIC_BASE_URL` missing/invalid → 503 (fail closed); any `Host`/`X-Forwarded-Host` that is not the canonical host → 404 (so the second Vercel alias never serves OAuth). Back-channel endpoints then refuse browser cross-site requests (`Sec-Fetch-Site`), any `Authorization` header or `client_secret`, wrong content types, repeated parameters and oversized bodies — all before any database call. Error bodies are fixed strings; nothing from the request is echoed or logged. `proxy.ts`'s CSRF check only covers `/api/`, so these routes carry their own checks.
+
+New environment variables (NOT set anywhere yet): `MCP_PUBLIC_BASE_URL` (https origin, no path), `MCP_AUTH_DATABASE_URL` (the `mcp_auth` login), optional `MCP_ALLOW_LOOPBACK_REDIRECTS=false` (kill-switch for Claude Code loopback redirects).
+
+Verified on a real `next build` + `next start` (production DB variables forced to an unreachable placeholder, `mcp_auth` of the test branch only): `.well-known` route folders work and coexist with `proxy.ts`; canonical host → 200; the other alias, an unknown host, `localhost` and a spoofed `X-Forwarded-Host` → 404; cross-site → 403; GET on POST-only routes → 405; `/mcp` unchanged.
+
+Known limits: no CORS on the POST endpoints (browser-based clients are not supported; Claude's connectors call server-side); the registration limit is per hashed client address and the global cap can be exhausted by an attacker (registration only — token flows are unaffected).
