@@ -19,7 +19,7 @@ const sources = [
   ...fs.readdirSync(path.join(testDir, 'helpers')).map((f) => path.join(testDir, 'helpers', f)),
 ];
 const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
-const DB_SUITES = ['analyst-db', 'analyst-login-db', 'session-turns-isolation', 'tenant-isolation-phase2', 'rollup-concurrency', 'mcp-oauth-db', 'mcp-oauth-data', 'mcp-oauth-endpoints', 'mcp-oauth-authorize', 'mcp-bearer-db', 'mcp-revocation-db', 'mcp-negative-db'].map((n) => `tests/${n}.test.ts`);
+const DB_SUITES = ['analyst-db', 'analyst-login-db', 'session-turns-isolation', 'tenant-isolation-phase2', 'rollup-concurrency', 'mcp-oauth-db', 'mcp-oauth-data', 'mcp-oauth-endpoints', 'mcp-oauth-authorize', 'mcp-bearer-db', 'mcp-revocation-db', 'mcp-negative-db', 'audit-actor-db'].map((n) => `tests/${n}.test.ts`);
 
 describe('no test can fall back to an env file or to production variables', () => {
   it('no test or helper source contains a string literal that names an env file', () => {

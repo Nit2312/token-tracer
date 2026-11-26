@@ -103,6 +103,9 @@ async function main() {
     const hash = await bcrypt.hash(PW, 4);
     const admin = (await q("insert into users(username,password_hash,display_name,role,team_id,member_id) values($1,$2,'E2EMCP Admin','admin',$3,$4) returning id", ['e2emcp-' + RUN, hash, team, member])).rows[0].id; ids.users.push(admin);
     const plain = (await q("insert into users(username,password_hash,display_name,role,team_id) values($1,$2,'E2EMCP Plain','user',$3) returning id", ['e2emcp-plain-' + RUN, hash, team])).rows[0].id; ids.users.push(plain);
+    const member2 = (await q("insert into members(team_id, display_name, role) values($1,$2,'member') returning id", [team, 'E2EMCP Member2 ' + RUN])).rows[0].id; ids.members.push(member2);
+    await q("insert into team_members(team_id, member_id, role) values($1,$2,'member') on conflict do nothing", [team, member2]);
+    const plain2 = (await q("insert into users(username,password_hash,display_name,role,team_id,member_id) values($1,$2,'E2EMCP Plain2','user',$3,$4) returning id", ['e2emcp-plain2-' + RUN, hash, team, member2])).rows[0].id; ids.users.push(plain2);
 
     // ═══ S1 — full OAuth lifecycle through the real login, MFA and consent ═══
     console.log('\n## S1 OAuth lifecycle (DCR → login → MFA → consent → token → /mcp → refresh → revoke)');
@@ -273,8 +276,7 @@ async function main() {
     await new Promise((r) => setTimeout(r, 1000));
     ok(pre.status === 200, 'MCP tables absent: a hooked route (password reset) still succeeds', String(pre.status));
     const absentLog = serverLog.slice(logAt).trim();
-    // Scoped to what this proves: the revoke helper must not raise or log anything about the MCP tables (no 42P01, no schema pass). Unrelated lines are
-    // tolerated and shown: e.g. the existing route's own audit insert fails for a built-in superadmin actor ("superadmin" is not a UUID) — pre-existing.
+    // Scoped to what this proves: the revoke helper must not raise or log anything about the MCP tables (no 42P01, no schema pass). Unrelated lines are tolerated and shown.
     ok(!/oauth_tokens|oauth_authorization|mcp_|42P01|does not exist|ensureSchema/i.test(absentLog), 'MCP tables absent: the revoke helper raises and logs nothing about the MCP tables (catalog check first)', absentLog ? 'other log lines present: ' + absentLog.replace(/\s+/g, ' ').slice(0, 160) : '');
     await q('ALTER TABLE oauth_tokens_e2e_bak RENAME TO oauth_tokens'); tokensRenamed = false; await q('update users set password_hash=$2 where id=$1', [admin, hash]);
 
@@ -286,6 +288,31 @@ async function main() {
     const lim = await req('POST', '/oauth/token', { headers: { ...FORMH, 'x-real-ip': rlIp }, body: 'grant_type=refresh_token&client_id=tt_e2e_rl&refresh_token=tt_rt_x' });
     ok(lim.status === 429 && JSON.parse(lim.text).error === 'temporarily_unavailable' && Number(lim.headers['retry-after']) >= 1 && /no-store/.test(lim.headers['cache-control'] || ''), 'token endpoint over its limit → 429 + Retry-After', String(lim.status));
     ok((await req('POST', '/oauth/token', { headers: { ...FORMH, 'x-real-ip': '203.0.113.' + (201 + Math.floor(Math.random() * 40)) }, body: 'grant_type=refresh_token&client_id=tt_e2e_rl2&refresh_token=tt_rt_x' })).status !== 429, 'another address is unaffected');
+
+    { // S8 gets its own block scope: its names must not collide with earlier scenarios
+    // ═══ S8 — the audit trail for built-in and database actors (audit_log.actor_user_id is a UUID FK) ═══
+    console.log('\n## S8 audit trail: built-in accounts and database users');
+    const auditSince = (await q('select now() as t')).rows[0].t;
+    const auditRows = async (action, target) => (await q('select actor_user_id, actor_username, metadata from audit_log where action=$1 and target_id=$2 and created_at >= $3', [action, target, auditSince])).rows;
+    const teamCookie = sign({ userId: 'admin', username: 'team', displayName: 'Team Admin', role: 'admin', memberId: null, teamId: null, issuedAt: Date.now(), lastActive: Date.now(), mfa: true });
+    const r1 = await req('POST', '/api/admin/users/reset-password', { headers: { ...SAME, cookie: S }, body: j({ id: plain2, newPassword: 'AuditPass-111' }) });
+    ok(r1.status === 200, 'built-in superadmin: password reset succeeds', String(r1.status));
+    const a1 = await auditRows('user.reset-password', plain2);
+    ok(a1.length === 1 && a1[0].actor_user_id === null && a1[0].actor_username === 'superadmin' && a1[0].metadata?.builtinActor === 'superadmin', 'built-in superadmin: the reset IS audited (actor_user_id NULL, username "superadmin", builtinActor kept)', JSON.stringify(a1).slice(0, 160));
+    const imp = await req('POST', '/api/admin/impersonate', { headers: { ...SAME, cookie: S }, body: j({ userId: plain2 }) });
+    ok(imp.status === 200, 'built-in superadmin: impersonation succeeds', String(imp.status));
+    const a2 = await auditRows('impersonate.start', plain2);
+    ok(a2.length === 1 && a2[0].actor_user_id === null && a2[0].actor_username === 'superadmin', 'built-in superadmin: impersonation IS audited (the headline audited action)', JSON.stringify(a2).slice(0, 160));
+    const r3 = await req('POST', '/api/v1/team/members/reset-password', { headers: { ...SAME, cookie: teamCookie }, body: j({ userId: plain2, teamId: team, newPassword: 'AuditPass-222' }) });
+    ok(r3.status === 200, 'built-in team admin: member password reset succeeds', String(r3.status) + ' ' + r3.text.slice(0, 80));
+    const a3 = (await auditRows('team.user.reset-password', plain2)).filter((r) => r.actor_username === 'team');
+    ok(a3.length === 1 && a3[0].actor_user_id === null && a3[0].metadata?.builtinActor === 'admin', 'built-in team admin: the reset IS audited (actor_user_id NULL, username "team", builtinActor "admin")', JSON.stringify(a3).slice(0, 160));
+    const r4 = await req('POST', '/api/v1/team/members/reset-password', { headers: { ...SAME, cookie: adminCookie() }, body: j({ userId: plain2, newPassword: 'AuditPass-333' }) });
+    ok(r4.status === 200, 'database team admin: member password reset succeeds', String(r4.status) + ' ' + r4.text.slice(0, 80));
+    const a4 = (await auditRows('team.user.reset-password', plain2)).filter((r) => r.actor_username === 'e2emcp-' + RUN);
+    ok(a4.length === 1 && a4[0].actor_user_id === admin && !a4[0].metadata?.builtinActor && !a4[0].metadata?.actorUserMissing, 'database user: audited exactly as before (actor_user_id = their id, no marker)', JSON.stringify(a4).slice(0, 160));
+    ok(!serverLog.includes('[audit-log-error]'), 'NO audit failure was logged anywhere during the whole run so far (nothing is silently lost)');
+    }
 
     // ═══ S7 — existing built-in logins are unchanged (regression) ═══
     console.log('\n## S7 built-in accounts (existing behaviour)');
@@ -299,6 +326,7 @@ async function main() {
       ok(ba.status === 200 && ba.text.includes('Not allowed') && !/consentToken/.test(ba.text), `${user}: built-in account cannot authorize MCP access`);
     }
     ok((await req('POST', '/api/auth/login', { headers: SAME, body: j({ username: 'team', password: 'wrong-password' }) })).status === 401, 'wrong built-in password → 401');
+    ok(!serverLog.includes('[audit-log-error]'), 'still no [audit-log-error] after the built-in login scenarios');
     ok(!/tt_at_|tt_rt_|tt_ac_|postgres(ql)?:\/\//.test(serverLog), 'the server log contains no token or connection string');
   } finally {
     if (tokensRenamed) await q('ALTER TABLE oauth_tokens_e2e_bak RENAME TO oauth_tokens').catch((e) => console.log('!! could not restore oauth_tokens:', e.message));
