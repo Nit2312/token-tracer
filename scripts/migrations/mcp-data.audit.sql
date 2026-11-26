@@ -47,17 +47,17 @@ SELECT '3 schema' AS section, ns.nspname, pg_catalog.pg_get_userbyid(ns.nspowner
 
 -- 4 ── any table, view, materialized view, foreign table, partitioned table or sequence privilege (EXPECTED: no rows)
 SELECT '4 relation' AS section, ns.nspname || '.' || c.relname AS relation, c.relkind,
-       pg_catalog.has_table_privilege('mcp_reader', c.oid, 'SELECT') AS sel, pg_catalog.has_table_privilege('mcp_reader', c.oid, 'INSERT') AS ins,
-       pg_catalog.has_table_privilege('mcp_reader', c.oid, 'UPDATE') AS upd, pg_catalog.has_table_privilege('mcp_reader', c.oid, 'DELETE') AS del,
-       pg_catalog.has_any_column_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,REFERENCES') AS any_column
+       CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_table_privilege('mcp_reader', c.oid, 'SELECT') ELSE false END AS sel, CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_table_privilege('mcp_reader', c.oid, 'INSERT') ELSE false END AS ins,
+       CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_table_privilege('mcp_reader', c.oid, 'UPDATE') ELSE false END AS upd, CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_table_privilege('mcp_reader', c.oid, 'DELETE') ELSE false END AS del,
+       CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_any_column_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,REFERENCES') ELSE false END AS any_column
   FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
  WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND ns.nspname NOT IN ('pg_catalog', 'information_schema') AND ns.nspname NOT LIKE 'pg\_%'
-   AND (pg_catalog.has_table_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR pg_catalog.has_any_column_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,REFERENCES'))
+   AND (CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_table_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') ELSE false END OR CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_any_column_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,REFERENCES') ELSE false END)
 UNION ALL
 SELECT '4 sequence', ns.nspname || '.' || c.relname, c.relkind, NULL, NULL, NULL, NULL, NULL
   FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
  WHERE c.relkind = 'S' AND ns.nspname NOT IN ('pg_catalog', 'information_schema') AND ns.nspname NOT LIKE 'pg\_%'
-   AND pg_catalog.has_sequence_privilege('mcp_reader', c.oid, 'USAGE,SELECT,UPDATE')
+   AND CASE WHEN c.relkind = 'S' THEN pg_catalog.has_sequence_privilege('mcp_reader', c.oid, 'USAGE,SELECT,UPDATE') ELSE false END
  ORDER BY 1, 2;
 
 -- 5 ── every non-system function the reader can execute, and WHY (owner, SECURITY DEFINER, granted to PUBLIC?). Extension members are excluded.
@@ -75,7 +75,15 @@ SELECT '5 function' AS section, ns.nspname || '.' || p.proname || '(' || pg_cata
 SELECT '6 builtin' AS section, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid) AS args
   FROM pg_catalog.pg_proc p
  WHERE p.pronamespace = 'pg_catalog'::regnamespace AND pg_catalog.has_function_privilege('mcp_reader', p.oid, 'EXECUTE')
-   AND p.proname IN ('pg_read_file', 'pg_read_binary_file', 'pg_ls_dir', 'pg_stat_file', 'lo_import', 'lo_export', 'pg_terminate_backend', 'pg_cancel_backend', 'pg_reload_conf', 'pg_rotate_logfile', 'pg_switch_wal', 'pg_create_restore_point', 'pg_logical_emit_message')
+   AND p.proname IN ('pg_read_file', 'pg_read_binary_file', 'pg_ls_dir', 'pg_stat_file', 'lo_import', 'lo_export', 'pg_reload_conf', 'pg_rotate_logfile', 'pg_switch_wal', 'pg_create_restore_point')
+ ORDER BY 2, 3;
+
+-- 6b ── RESIDUAL built-ins that PostgreSQL grants to PUBLIC by default and that cannot be removed per role (reported, not fatal): pg_cancel_backend and
+--       pg_terminate_backend act only on the caller's own sessions unless the caller holds pg_signal_backend; pg_logical_emit_message can write a WAL message.
+SELECT '6b residual builtin' AS section, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid) AS args
+  FROM pg_catalog.pg_proc p
+ WHERE p.pronamespace = 'pg_catalog'::regnamespace AND pg_catalog.has_function_privilege('mcp_reader', p.oid, 'EXECUTE')
+   AND p.proname IN ('pg_cancel_backend', 'pg_terminate_backend', 'pg_logical_emit_message')
  ORDER BY 2, 3;
 
 -- 7 ── default privileges that would hand FUTURE objects to PUBLIC or to the reader
@@ -94,23 +102,23 @@ SELECT '8 setting' AS section, r.rolname, cfg.setting
 SELECT '9 owner column' AS section, ns.nspname || '.' || c.relname AS relation, a.attname AS col
   FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
  WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND ns.nspname NOT IN ('pg_catalog', 'information_schema') AND ns.nspname NOT LIKE 'pg\_%'
-   AND pg_catalog.has_column_privilege('mcp_data_owner', c.oid, a.attnum, 'SELECT')
+   AND CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_column_privilege('mcp_data_owner', c.oid, a.attnum, 'SELECT') ELSE false END
  ORDER BY 2, 3;
 
 -- 10 ── mcp_data_owner EFFECTIVE privileges beyond column SELECT (section 9). EXPECTED: 10a, 10b zero rows; 10c CREATE only on mcp_data; 10e only mcp_data functions
 --       and ordinary PUBLIC-executable ones; 10f only the mcp_data schema and its functions.
 -- 10a relations: any table-level privilege, or any column-level INSERT / UPDATE / REFERENCES
 SELECT '10a owner relation' AS section, ns.nspname || '.' || c.relname AS relation, c.relkind,
-       pg_catalog.has_table_privilege('mcp_data_owner', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS table_level,
-       pg_catalog.has_any_column_privilege('mcp_data_owner', c.oid, 'INSERT,UPDATE,REFERENCES') AS column_write
+       CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_table_privilege('mcp_data_owner', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') ELSE false END AS table_level,
+       CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_any_column_privilege('mcp_data_owner', c.oid, 'INSERT,UPDATE,REFERENCES') ELSE false END AS column_write
   FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
  WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND ns.nspname NOT IN ('pg_catalog', 'information_schema') AND ns.nspname NOT LIKE 'pg\_%'
-   AND (pg_catalog.has_table_privilege('mcp_data_owner', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR pg_catalog.has_any_column_privilege('mcp_data_owner', c.oid, 'INSERT,UPDATE,REFERENCES'))
+   AND (CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_table_privilege('mcp_data_owner', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') ELSE false END OR CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_any_column_privilege('mcp_data_owner', c.oid, 'INSERT,UPDATE,REFERENCES') ELSE false END)
 UNION ALL
 SELECT '10b owner sequence', ns.nspname || '.' || c.relname, c.relkind, NULL, NULL
   FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
  WHERE c.relkind = 'S' AND ns.nspname NOT IN ('pg_catalog', 'information_schema') AND ns.nspname NOT LIKE 'pg\_%'
-   AND pg_catalog.has_sequence_privilege('mcp_data_owner', c.oid, 'USAGE,SELECT,UPDATE')
+   AND CASE WHEN c.relkind = 'S' THEN pg_catalog.has_sequence_privilege('mcp_data_owner', c.oid, 'USAGE,SELECT,UPDATE') ELSE false END
  ORDER BY 1, 2;
 
 -- 10c schemas and the database

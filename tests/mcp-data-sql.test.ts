@@ -154,7 +154,7 @@ describe('role validation and tracking (fail closed)', () => {
     assert.match(ROLL, /ELSIF pg_catalog\.shobj_description[\s\S]*?DROP ROLE mcp_data_owner;[\s\S]*?ELSE\s+RAISE NOTICE 'role mcp_data_owner was not created by this migration/);
   });
   it('mcp_reader (created by the role script, not here) is validated exactly before any grant: LOGIN NOINHERIT, no attributes, no memberships either way, owns nothing', () => {
-    for (const frag of ['NOT rd.rolcanlogin OR rd.rolsuper OR rd.rolcreatedb OR rd.rolcreaterole OR rd.rolreplication OR rd.rolbypassrls OR rd.rolinherit OR rd.rolvaliduntil IS NOT NULL', 'm.member = rd.oid OR m.roleid = rd.oid', "'mcp_reader owns objects'"]) assert.ok(GRANT.includes(frag), frag);
+    for (const frag of ['NOT rd.rolcanlogin OR rd.rolsuper OR rd.rolcreatedb OR rd.rolcreaterole OR rd.rolreplication OR rd.rolbypassrls OR rd.rolinherit OR rd.rolvaliduntil IS NOT NULL', "m.member = rd.oid) THEN RAISE EXCEPTION 'mcp_reader is a member of another role'", "m.roleid = rd.oid AND (m.member <> v_me OR m.set_option OR m.inherit_option)", "'mcp_reader owns objects'"]) assert.ok(GRANT.includes(frag), frag);
     assert.ok(GRANT.indexOf('mcp_reader has unexpected attributes') < GRANT.indexOf('GRANT USAGE ON SCHEMA public'), 'validation precedes the first grant');
     assert.doesNotMatch(MIG + ROLL, /CREATE ROLE mcp_reader|DROP ROLE mcp_reader|ALTER ROLE mcp_reader (NO)?LOGIN/i);
   });
@@ -449,17 +449,17 @@ describe('grants file', () => {
     assert.deepEqual(READER.functions.map((s) => s.replace(/\s+/g, ' ')).sort(), FNS.filter((f) => f.callable).map((f) => f.sig).sort());
   });
   it('no write privilege, no ALL PRIVILEGES, no grant option, no PUBLIC grant, no new role or password in the grants file', () => {
-    for (const re of [/GRANT\s+(INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|ALL)\b/i, /WITH GRANT OPTION/i, /TO PUBLIC/i, /\bCREATE\s+(ROLE|USER|SCHEMA|TABLE|FUNCTION|EXTENSION|INDEX)\b/i, /\bSUPERUSER\b|\bBYPASSRLS\b/i, /\bPASSWORD\b/i, /ALTER ROLE \w+ (WITH )?(NO)?LOGIN/i]) assert.doesNotMatch(GRANT.replace(/NOLOGIN/g, ''), re, String(re));
+    for (const re of [/GRANT\s+(INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|ALL)\b/i, /WITH GRANT OPTION/i, /TO PUBLIC/i, /\bCREATE\s+(ROLE|USER|SCHEMA|TABLE|FUNCTION|EXTENSION|INDEX)\b/i, /\bSUPERUSER\b|\bBYPASSRLS\b/i, /\bPASSWORD\b/i, /ALTER ROLE \w+ (WITH )?(NO)?LOGIN/i]) assert.doesNotMatch(noStr(GRANT).replace(/NOLOGIN/g, ''), re, String(re));
   });
   it('the reader role is read-only by default, has hard timeouts, a pinned search_path and a connection limit; the read-only default is documented as NOT a boundary', () => {
     assert.deepEqual(READER.roleSettings, { statement_timeout: '5000', lock_timeout: '2000', idle_in_transaction_session_timeout: '10000', search_path: ['pg_catalog', 'pg_temp'], default_transaction_read_only: 'on' });
     assert.ok(READER.login === true && READER.connectionLimit >= 1 && READER.connectionLimit <= 5);
     assert.match(JSON.stringify(ALL_GRANTS.mcp_reader), /a DEFAULT a session may override/);
   });
-  it('the existing mcp_auth entry is untouched and the role script does not read the new entries yet', () => {
+  it('the existing mcp_auth entry is untouched and the role script provisions both roles safely (P3-4)', () => {
     const auth = ALL_GRANTS.mcp_auth; assert.deepEqual(Object.keys(auth).sort(), ['functions', 'insert', 'select', 'sequences', 'update']);
     assert.ok(!('mcp_data_owner' in auth) && !JSON.stringify(auth).includes('mcp_data'));
-    const script = read('scripts/setup-mcp-roles.mjs'); assert.ok(!script.includes('mcp_reader') || script.includes('NOT created here')); assert.doesNotMatch(script, /mcp_data_owner|mcp-data/);
+    const script = read('scripts/setup-mcp-roles.mjs'); assert.ok(script.includes('mcp_reader') && script.includes('mcp_auth')); assert.doesNotMatch(script, /mcp_data_owner/);
   });
   it('does not mention any password, URL or credential (in any of the four files)', () => { for (const s of [MIG_RAW, GRANT_RAW, ROLL_RAW, AUDIT_RAW]) assert.doesNotMatch(s, /postgres(ql)?:\/\/|PASSWORD\s+'/i); for (const s of [MIG, GRANT, ROLL, AUDIT]) assert.doesNotMatch(s, /secret|token_value|plaintext/i); });
 });
@@ -475,7 +475,7 @@ describe('effective PUBLIC privileges: nothing is revoked globally; the grants F
   it('after the grants, an in-transaction assertion rejects: any table/column/sequence privilege, CREATE on a schema or the database, extra functions or other SECURITY DEFINER functions, dangerous built-ins', () => {
     const end = GRANT.slice(GRANT.lastIndexOf('EFFECTIVE privileges') >= 0 ? 0 : 0);
     for (const frag of ["has_table_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')", "has_any_column_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,REFERENCES')", "has_sequence_privilege('mcp_reader', c.oid, 'USAGE,SELECT,UPDATE')",
-      "has_schema_privilege('mcp_reader', ns.oid, 'CREATE')", "has_database_privilege('mcp_reader', pg_catalog.current_database(), 'CREATE')", "has_schema_privilege('mcp_reader', v_schema, 'USAGE')", 'p.prosecdef', "has_function_privilege('mcp_reader', p.oid, 'EXECUTE')", 'pg_read_file', 'pg_terminate_backend', 'lo_import']) assert.ok(end.includes(frag), frag);
+      "has_schema_privilege('mcp_reader', ns.oid, 'CREATE')", "has_database_privilege('mcp_reader', pg_catalog.current_database(), 'CREATE')", "has_schema_privilege('mcp_reader', v_schema, 'USAGE')", 'p.prosecdef', "has_function_privilege('mcp_reader', p.oid, 'EXECUTE')", 'pg_read_file', 'lo_import']) assert.ok(end.includes(frag), frag);
     assert.ok(GRANT.lastIndexOf("has_table_privilege('mcp_reader'") > GRANT.indexOf('GRANT EXECUTE ON FUNCTION') && GRANT.lastIndexOf("has_table_privilege('mcp_reader'") > GRANT.indexOf('REVOKE SET OPTION FOR'), 'the post-condition is checked last, after the temporary membership is gone');
     assert.match(GRANT, /<> 6 THEN RAISE EXCEPTION 'mcp_reader must be able to execute exactly the six reader functions'/);
   });
@@ -485,10 +485,10 @@ describe('effective PUBLIC privileges: nothing is revoked globally; the grants F
   });
   it('the audit file is READ-ONLY: SELECT statements only, no side-effecting function, covering the reader (1-8), the owner columns (9) and the owner EFFECTIVE privileges (10a-f)', () => {
     const st = (parseSync(AUDIT_RAW).stmts ?? []).map((x: Node) => x.stmt);
-    assert.equal(st.length, 14); assert.ok(st.every((x: Node) => x.SelectStmt), 'every statement is a SELECT');
+    assert.equal(st.length, 15); assert.ok(st.every((x: Node) => x.SelectStmt), 'every statement is a SELECT');
     assert.doesNotMatch(noStr(AUDIT), /\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|GRANT|REVOKE|SET|COPY|TRUNCATE|VACUUM|LOCK|DO)\b\s/i);
     assert.doesNotMatch(noStr(AUDIT), /set_config|pg_sleep|nextval|setval|lo_\w+\(|pg_terminate|pg_cancel|dblink|pg_read_file\(/i);
-    for (const n of ['1 role', '1b membership', '2 database', '3 schema', '4 relation', '5 function', '6 builtin', '7 default_acl', '8 setting', '9 owner column', '10a owner relation', '10b owner sequence', '10c owner schema', '10d owner database', '10e owner function', '10f owned object']) assert.ok(AUDIT.includes(`'${n}'`), n);
+    for (const n of ['1 role', '1b membership', '2 database', '3 schema', '4 relation', '5 function', '6 builtin', '6b residual builtin', '7 default_acl', '8 setting', '9 owner column', '10a owner relation', '10b owner sequence', '10c owner schema', '10d owner database', '10e owner function', '10f owned object']) assert.ok(AUDIT.includes(`'${n}'`), n);
     // every FROM-list alias is unique inside its own query (PostgreSQL rejects a repeated alias): checked on the parsed AST
     for (const x of st) { const names: string[] = []; const walk = (n: Node): void => { if (Array.isArray(n)) n.forEach(walk); else if (n && typeof n === 'object') { if (n.RangeVar?.alias) names.push(n.RangeVar.alias.aliasname); if (n.RangeFunction?.alias) names.push(n.RangeFunction.alias.aliasname); if (n.RangeSubselect?.alias) names.push(n.RangeSubselect.alias.aliasname); if (n.SelectStmt?.fromClause) { const own = new Set<string>(); const dup = (f: Node): void => { for (const it of f) { const a = it.RangeVar?.alias?.aliasname ?? it.RangeFunction?.alias?.aliasname ?? it.RangeSubselect?.alias?.aliasname; if (a) { assert.ok(!own.has(a), `duplicate FROM alias ${a}`); own.add(a); } if (it.JoinExpr) { const j = (e: Node): void => { for (const side of [e.larg, e.rarg]) { const a2 = side?.RangeVar?.alias?.aliasname ?? side?.RangeFunction?.alias?.aliasname ?? side?.RangeSubselect?.alias?.aliasname; if (a2) { assert.ok(!own.has(a2), `duplicate FROM alias ${a2}`); own.add(a2); } if (side?.JoinExpr) j(side.JoinExpr); } }; j(it.JoinExpr); } } }; dup(n.SelectStmt.fromClause); } Object.values(n).forEach(walk); } }; walk(x); void names; }
     // the privilege-check functions are called with comma-separated privilege lists, which the documented has_*_privilege functions accept (true if ANY is held)
@@ -565,6 +565,35 @@ describe('privilege baseline: nothing is revoked; unexpected pre-existing grants
   it('documented fixtures for the live test (P3-4): each pre-existing condition must make grants.sql abort with nothing changed', () => {
     const doc = read('MCP.md');
     for (const f of ['pre-existing SELECT on session_turns.prompt_text_sanitized', 'table-level SELECT on a table', 'PUBLIC SELECT on a table', 'partial overlap', 'a pre-existing reader role setting', 'a SECURITY DEFINER function outside mcp_data']) assert.ok(doc.includes(f), f);
+  });
+});
+
+describe('changes made while applying to PostgreSQL (P3-4): guards for the paths the first live run exercised', () => {
+  it('every has_*_privilege call that takes a relation is guarded by a relkind CASE (the planner may otherwise evaluate it on an index or composite type)', () => {
+    for (const [n, code] of [['grants', GRANT], ['audit', AUDIT]] as const) {
+      const calls = [...code.matchAll(/pg_catalog\.has_(sequence|table|any_column|column)_privilege\('\w+', c\.oid/g)].length;
+      const guarded = [...code.matchAll(/CASE WHEN c\.relkind (= 'S'|IN \('r','p','v','m','f'\)) THEN pg_catalog\.has_(sequence|table|any_column|column)_privilege\('\w+', c\.oid[^)]*\) ELSE false END/g)].length;
+      assert.ok(calls > 6, `${n}: found ${calls} calls`); assert.equal(guarded, calls, `${n}: every call is guarded`);
+    }
+  });
+  it('the fatal dangerous-builtin list is file / large-object / server-control functions; the PUBLIC-by-default signal and WAL functions are a REPORTED residual (audit 6b), not fatal', () => {
+    const fatal = /p\.proname IN \(([^)]*)\)\) THEN\s+RAISE EXCEPTION 'mcp_reader can execute a dangerous built-in/.exec(GRANT)![1];
+    for (const f of ['pg_read_file', 'pg_read_binary_file', 'pg_ls_dir', 'pg_stat_file', 'lo_import', 'lo_export', 'pg_reload_conf', 'pg_rotate_logfile', 'pg_switch_wal', 'pg_create_restore_point']) assert.ok(fatal.includes(`'${f}'`), f);
+    for (const f of ['pg_cancel_backend', 'pg_terminate_backend', 'pg_logical_emit_message']) { assert.ok(!fatal.includes(f), `${f} is not fatal`); assert.ok(AUDIT.includes(`'${f}'`) && /6b residual builtin/.test(AUDIT), `${f} is reported by the audit`); }
+    assert.match(read('MCP.md'), /pg_logical_emit_message/);
+  });
+  it('the baseline accepts the reader executing none or exactly six mcp_data functions (a re-run), and the post-condition requires exactly six', () => {
+    assert.ok(GRANT.includes("has_function_privilege('mcp_reader', p.oid, 'EXECUTE')) NOT IN (0, 6) THEN RAISE EXCEPTION"));
+    assert.ok(GRANT.includes("has_function_privilege('mcp_reader', p.oid, 'EXECUTE')) <> 6 THEN RAISE EXCEPTION 'mcp_reader must be able to execute exactly the six reader functions'"));
+  });
+  it('the reader may have only the migration role\'s ADMIN-only link as a member (the implicit CREATE ROLE link), and is never a member of anything', () => {
+    assert.ok(GRANT.includes("m.member = rd.oid) THEN RAISE EXCEPTION 'mcp_reader is a member of another role'"));
+    assert.ok(GRANT.includes("m.roleid = rd.oid AND (m.member <> v_me OR m.set_option OR m.inherit_option)"));
+  });
+  it('the local-only live test refuses host-overriding URL parameters and non-disposable database names', () => {
+    const t = read('tests/mcp-data-db.test.ts');
+    for (const k of ["'host'", "'hostaddr'", "'service'", "'options'"]) assert.ok(t.includes(k), k);
+    assert.ok(t.includes('/^\\/mcp_[a-z0-9_]+$/'));
   });
 });
 

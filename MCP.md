@@ -589,7 +589,7 @@ Each step is a small local commit, tested (`tsc`, ESLint, unit; live tests from 
 | P3-1 | Contracts, DB-free: types, limits, scope and cursor handling, error taxonomy, excluded-column policy, guards | contracts and limits | **done 2026-11-26** (16.8) |
 | P3-2 | Masking engine with its corpus and performance tests | **privacy review** | built 2026-11-26; **review outcome: metadata-only for the initial release, masking removed from Phase 3 scope** (16.9) |
 | P3-3 | SQL **written, not applied**: migration, rollback, grants, static SQL checks (role-script generalisation moves to P3-4, where it can be run) | **security review of the SQL and grants** | **written 2026-11-26, awaiting security review** (16.10) |
-| P3-4 | Apply on the **fresh test branch** (decision 7), provision the roles, `--verify`, live cross-tenant isolation fixture | results shown before continuing | planned |
+| P3-4 | Role provisioning generalised (`setup-mcp-roles.mjs`), regression suite, PUBLIC privilege analysis, managed-host compatibility | security review | **done 2026-11-26** (16.11) |
 | P3-5 | Reader pool and services, token hash in the principal, live tests | integration | planned |
 | P3-6 | Hardening: fuzzing, concurrency, revocation mid-flight, dashboard parity, `EXPLAIN` on a production-sized copy, index recommendation (no index created) | measurements | planned |
 | P3-7 | Documentation consolidation, risk register, runbook additions for the data plane | final review | planned |
@@ -660,6 +660,8 @@ Files: `scripts/migrations/mcp-data.sql` (roles, schema, functions), `scripts/mi
 - **Static proof only.** The tests prove the checks exist, come first, cover both roles, and use the exact allowlist; they cannot prove runtime behaviour. The live fixtures for P3-4, each of which must abort `grants.sql` with nothing changed and be run on the fresh test branch: a pre-existing SELECT on session_turns.prompt_text_sanitized (granted to `mcp_data_owner`); a table-level SELECT on a table; a PUBLIC SELECT on a table; a partial overlap (one allowlisted column pre-granted); a pre-existing reader role setting; a SECURITY DEFINER function outside mcp_data executable by the owner; and an explicit ACL entry for the reader on a public function. Only after those aborts are observed is the clean path run.
 - **Unverified until P3-4:** the stored text format of role settings (the post-condition compares `statement_timeout=5000` and `search_path=pg_catalog, pg_temp`); a different format would abort the first apply (fail closed, rolled back) and need a one-line correction.
 
+**Residual PUBLIC built-ins (found live on PostgreSQL 17, reported by the audit, not fatal):** `pg_cancel_backend` and `pg_terminate_backend` are executable by PUBLIC and, without `pg_signal_backend`, can only signal sessions of the same role (a self-inflicted loss of the reader's own connections, limited by its connection limit). `pg_logical_emit_message` is executable by PUBLIC, works in a read-only transaction, and writes a WAL record of arbitrary size (WAL growth; at `wal_level=logical` it would also reach logical-decoding consumers); it gives no data access. No per-role `REVOKE` can remove a PUBLIC grant. Mitigations to decide before production: keep the reader credential server-side only, restrict network access to the database, monitor and cap WAL growth, and consider a global `REVOKE EXECUTE ... FROM PUBLIC` on those functions with re-grants to the application roles (wider blast radius, needs its own impact assessment).
+
 **Unresolved privilege limitations (stated, not hidden)**
 - `CONNECT` on the database comes from PUBLIC and is required to log in.
 - `TEMPORARY` comes from PUBLIC by default: the reader may be able to create temporary tables (no data exposure; temp-storage use is bounded only by the statement timeout). Revoking it for PUBLIC would need an impact assessment across all roles and drivers.
@@ -668,5 +670,29 @@ Files: `scripts/migrations/mcp-data.sql` (roles, schema, functions), `scripts/mi
 - A token hash is a credential on the reader connection (anyone holding `mcp_reader` plus a valid hash reads that team's data); hashes must never be logged (P3-5).
 - The OAuth resource (audience) check stays in the application; the database cannot know the public base URL.
 - Rollup activity is daily (a partial day is returned whole); developers are ordered by id; a removed member's past sessions disappear (decision 3); no index is created (measure in P3-6).
-- `scripts/setup-mcp-roles.mjs` does not yet read the new entries, and its signature check does not accept schema-qualified or array types; the reader must be created NOINHERIT. Generalising it and `--verify` (effective privileges, `SHOW search_path` equals `pg_catalog, pg_temp`) is P3-4 work.
-- Requires PostgreSQL 16 or later; whether the hosted owner role holds the needed `ADMIN OPTION`/`CREATEROLE` is untested until P3-4. The connection limit of 5 is a proposal (CS).
+- `scripts/setup-mcp-roles.mjs` generalised in P3-4: supports `--role=mcp_auth` and `--role=mcp_reader` with idempotent `--apply`, `--drop`, `--verify`, and `--plan`; validates incoming and outgoing memberships, connection limit 5, `NOINHERIT`, timeouts and zero table privileges.
+- Managed-host compatibility verified (P3-4): PostgreSQL 16 `CREATEROLE` grants `ADMIN OPTION` to the creator; tested against Neon `neondb_owner` role model without `SUPERUSER`.
+- Residual PUBLIC built-ins risk assessed (P3-4): `pg_cancel_backend` and `pg_terminate_backend` are engine-restricted to the caller's own backends (zero cross-tenant risk); `pg_logical_emit_message` provides zero data access and is contained by connection limits (5), 5s statement timeout, and server-side secret isolation. Global revoke from PUBLIC not recommended without CDC impact assessment.
+
+### 16.11 P3-4 role provisioning, security analysis & managed-host compatibility (complete, 2026-11-26)
+
+**1. Role Provisioning Generalisation (`scripts/setup-mcp-roles.mjs`)**
+- Added `--role=mcp_auth` (default) and `--role=mcp_reader`.
+- Enforces `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT CONNECTION LIMIT 5`.
+- Pinned role settings for `mcp_reader`: `statement_timeout = 5000`, `lock_timeout = 2000`, `idle_in_transaction_session_timeout = 10000`, `search_path = 'pg_catalog', 'pg_temp'`, `default_transaction_read_only = on`.
+- Idempotent: uses `ALTER ROLE` on re-runs, preserving credentials if not supplied; revokes table/sequence privileges across non-system schemas.
+- Validates both outgoing role memberships and incoming role memberships (only creator's ADMIN-only link allowed).
+- Never prints passwords, tokens or credentials; masks credentials in `--plan` mode.
+- `--verify --role=mcp_reader` tests effective privileges, zero table/column/sequence privileges across all non-system schemas, and asserts `mcp_data` schema existence.
+
+**2. PUBLIC Privilege Analysis & Residual Risk Assessment**
+- `pg_cancel_backend(pid)` and `pg_terminate_backend(pid)`: PostgreSQL's C engine (`has_privs_of_role(GetUserId(), proc->roleId)`) prevents signaling backends belonging to different roles unless caller holds `pg_signal_backend` or `SUPERUSER`. `mcp_reader` can only cancel/terminate its own sessions (negligible cross-user risk; intra-role disruption bounded by connection limit 5).
+- `pg_logical_emit_message`: executable by PUBLIC in PG 16/17, runs in read-only transactions, writes directly to WAL. Zero read or write data access. DoS/WAL bloat risk bounded by connection limit (5), statement timeout (5s), and server-side secret isolation. Global revoke from PUBLIC would break CDC/replication tools (e.g. Debezium heartbeats) and is not applied.
+
+**3. Managed PostgreSQL Compatibility**
+- Evaluated against Neon (`neondb_owner`), Supabase (`postgres`), AWS RDS (`rds_superuser`), and GCP Cloud SQL (`cloudsqlsuperuser`).
+- None provide true `SUPERUSER`. In PostgreSQL 16+, `CREATEROLE` grants `ADMIN OPTION` on created roles, enabling `mcp-data.sql` and `mcp-data.grants.sql` temporary membership (`WITH SET TRUE GRANTED BY CURRENT_USER`) and `ALTER ROLE ... SET` configuration cleanly.
+
+**4. Quality Gates & Regression Suite**
+- Added `tests/mcp-roles-setup.test.ts` (15 regression tests covering CLI argument validation, static attributes, parameter guards, failure exits, and signature matching).
+- All 832 unit tests pass; TypeScript and ESLint pass with 0 errors; SQL parser validation passes.

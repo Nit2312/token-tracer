@@ -31,7 +31,17 @@ describe('no test can fall back to an env file or to production variables', () =
   });
   it('database test files obtain their connection only through the helper, never from DATABASE_URL / NEON_CONNECTION_STRING / ANALYST_DATABASE_URL', () => {
     const prod = /process\.env\.(DATABASE_URL|NEON_CONNECTION_STRING|ANALYST_DATABASE_URL)\b/;
-    const dbFiles = sources.filter((f) => /new pg\.(Client|Pool)\(/.test(fs.readFileSync(f, 'utf8')) && f.endsWith('.test.ts'));
+    // mcp-data-db.test.ts targets a DISPOSABLE LOCAL PostgreSQL through its own MCP_DATA_TEST_* variables (it cannot use the Neon test-branch helper); it is
+    // held to a stricter rule below: never a production variable, and it THROWS unless every host is localhost / 127.0.0.1.
+    const LOCAL_ONLY = 'mcp-data-db.test.ts';
+    const dbFiles = sources.filter((f) => /new pg\.(Client|Pool)\(/.test(fs.readFileSync(f, 'utf8')) && f.endsWith('.test.ts') && path.basename(f) !== LOCAL_ONLY);
+    const localCode = stripComments(fs.readFileSync(sources.find((f) => path.basename(f) === LOCAL_ONLY)!, 'utf8'));
+    assert.doesNotMatch(localCode, prod, `${LOCAL_ONLY} reads a production variable`);
+    assert.doesNotMatch(localCode, new RegExp('[\'"`][^\'"`\\n]*\\.' + 'env' + '[^\'"`\\n]*[\'"`]'), `${LOCAL_ONLY} references an env file`);
+    assert.match(localCode, /u\.hostname !== 'localhost' && u\.hostname !== '127\.0\.0\.1'\) throw new Error/, `${LOCAL_ONLY} must refuse non-local hosts`);
+    assert.match(localCode, /'host', 'hostaddr'/, `${LOCAL_ONLY} must refuse host-overriding URL parameters`);
+    assert.match(localCode, /\^\\\/mcp_/, `${LOCAL_ONLY} must require a disposable database name`);
+    assert.match(localCode, /const SKIP = !OWNER_URL \|\| !READER_URL \|\| !SUPER_URL \|\| !!process\.env\.SKIP_DB_TESTS;/, `${LOCAL_ONLY} must skip unless all three local URLs are set`);
     assert.deepEqual(dbFiles.map((f) => path.basename(f)).sort(), DB_SUITES.map((f) => path.basename(f)).sort()); // every DB suite is covered by this guard
     for (const f of dbFiles) {
       const code = stripComments(fs.readFileSync(f, 'utf8'));

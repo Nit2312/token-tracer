@@ -4,6 +4,8 @@
 -- scripts/migrations/mcp-data.sql and AFTER mcp_reader exists (created by the role script with a password taken from the environment, NOINHERIT, connection
 -- limit 5; no credential is ever in this file).
 --
+-- Requires PostgreSQL 16 or later (pg_auth_members.set_option / inherit_option, SET / INHERIT grant options).
+--
 -- PRIVILEGE BASELINE (revision 3): THIS FILE REVOKES NOTHING. It proves a clean baseline, adds exactly the allowlisted grants, and proves the result.
 --  * BEFORE any change (section 2): for BOTH roles, every object on which they appear in any ACL (pg_shdepend 'a' entries: tables, columns, schemas,
 --    functions, databases, types, languages, parameters...) must be EMPTY or exactly the expected set (a re-run); a partial overlap or any unexpected
@@ -22,7 +24,8 @@
 --                   events / agent / payload_hash, daily_member_usage.project, any path column, credentials, audit_log, prompt_embeddings, daily_org_*.
 -- mcp_reader      = USAGE on schema mcp_data + EXECUTE on six functions. No privilege on any table.
 -- PUBLIC is NOT revoked globally (see MCP.md 16.10): its grants apply to the roles and are checked, not removed; CONNECT, TEMPORARY, USAGE on public and
--- EXECUTE on ordinary functions remain residual and are reported by mcp-data.audit.sql.
+-- EXECUTE on ordinary functions remain residual, as do the PUBLIC-by-default built-ins pg_cancel_backend, pg_terminate_backend (self-scoped: they only
+-- act on the caller's own sessions) and pg_logical_emit_message (can write a WAL message of arbitrary size, even in a read-only transaction; no data access): reported by the audit (6b), not fatal and are reported by mcp-data.audit.sql.
 
 -- ── 0. Transaction proof ──
 SELECT pg_catalog.set_config('mcp_data.tx_guard', 'on', true);
@@ -64,7 +67,8 @@ BEGIN
   -- reader: a plain LOGIN role provisioned by the role script (NOINHERIT, the expected connection limit), no memberships either way, nothing owned
   IF NOT rd.rolcanlogin OR rd.rolsuper OR rd.rolcreatedb OR rd.rolcreaterole OR rd.rolreplication OR rd.rolbypassrls OR rd.rolinherit OR rd.rolvaliduntil IS NOT NULL THEN RAISE EXCEPTION 'mcp_reader has unexpected attributes (expected LOGIN NOINHERIT, nothing else)'; END IF;
   IF rd.rolconnlimit <> 5 THEN RAISE EXCEPTION 'mcp_reader must be provisioned with CONNECTION LIMIT 5 by the role script (this file does not change it)'; END IF;
-  IF EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member = rd.oid OR m.roleid = rd.oid) THEN RAISE EXCEPTION 'mcp_reader is a member of, or has members in, another role'; END IF;
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member = rd.oid) THEN RAISE EXCEPTION 'mcp_reader is a member of another role'; END IF;
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.roleid = rd.oid AND (m.member <> v_me OR m.set_option OR m.inherit_option)) THEN RAISE EXCEPTION 'mcp_reader has members besides the migration role''s ADMIN-only link (the implicit link CREATE ROLE gives its creator)'; END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_shdepend d WHERE d.refclassid = 'pg_catalog.pg_authid'::regclass AND d.refobjid = rd.oid AND d.deptype = 'o'
        AND d.dbid IN (0, (SELECT db.oid FROM pg_catalog.pg_database db WHERE db.datname = pg_catalog.current_database()))) THEN RAISE EXCEPTION 'mcp_reader owns objects'; END IF;
   -- functions: thirteen, owned by the owner, search_path pinned, nothing executable by PUBLIC
@@ -284,16 +288,16 @@ BEGIN
       ('daily_member_usage','session_count')),
   eff AS (SELECT ns.nspname AS s, c.relname AS t, a.attname AS col FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
             JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
-           WHERE c.relkind IN ('r','p','v','m','f') AND ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%' AND pg_catalog.has_column_privilege('mcp_data_owner', c.oid, a.attnum, 'SELECT'))
+           WHERE c.relkind IN ('r','p','v','m','f') AND ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%' AND CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_column_privilege('mcp_data_owner', c.oid, a.attnum, 'SELECT') ELSE false END)
   SELECT count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM allow WHERE allow.t = eff.t AND allow.c = eff.col AND eff.s = 'public')), count(*), (SELECT count(*) FROM allow) INTO n_extra, n_eff, n_allow FROM eff;
   IF n_extra > 0 THEN RAISE EXCEPTION 'mcp_data_owner can read columns beyond the allowlist (a grant, or PUBLIC, e.g. prompt_text_sanitized); refusing'; END IF;
   -- (before the grants the effective set may be smaller)
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
               WHERE c.relkind IN ('r','p','v','m','f') AND ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%'
-                AND (pg_catalog.has_table_privilege('mcp_data_owner', c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR pg_catalog.has_any_column_privilege('mcp_data_owner', c.oid, 'INSERT,UPDATE,REFERENCES'))) THEN
+                AND (CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_table_privilege('mcp_data_owner', c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') ELSE false END OR CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_any_column_privilege('mcp_data_owner', c.oid, 'INSERT,UPDATE,REFERENCES') ELSE false END)) THEN
     RAISE EXCEPTION 'mcp_data_owner has a write or table-level privilege (possibly through PUBLIC); refusing';
   END IF;
-  IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace WHERE c.relkind = 'S' AND ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%' AND pg_catalog.has_sequence_privilege('mcp_data_owner', c.oid, 'USAGE,SELECT,UPDATE')) THEN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace WHERE c.relkind = 'S' AND ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%' AND CASE WHEN c.relkind = 'S' THEN pg_catalog.has_sequence_privilege('mcp_data_owner', c.oid, 'USAGE,SELECT,UPDATE') ELSE false END) THEN
     RAISE EXCEPTION 'mcp_data_owner has a sequence privilege; refusing';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_namespace ns WHERE ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%' AND ns.nspname <> 'mcp_data' AND pg_catalog.has_schema_privilege('mcp_data_owner', ns.oid, 'CREATE'))
@@ -308,20 +312,20 @@ BEGIN
   -- (d) mcp_reader EFFECTIVE privileges, PUBLIC included (fail closed; no names in the message, run mcp-data.audit.sql for the list)
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
               WHERE c.relkind IN ('r','p','v','m','f') AND ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%'
-                AND (pg_catalog.has_table_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
-                     OR pg_catalog.has_any_column_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,REFERENCES'))) THEN
+                AND (CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_table_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') ELSE false END
+                     OR CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_any_column_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,REFERENCES') ELSE false END)) THEN
     RAISE EXCEPTION 'mcp_reader has an effective table or column privilege (possibly through PUBLIC); see mcp-data.audit.sql';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
               WHERE c.relkind = 'S' AND ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%'
-                AND pg_catalog.has_sequence_privilege('mcp_reader', c.oid, 'USAGE,SELECT,UPDATE')) THEN
+                AND CASE WHEN c.relkind = 'S' THEN pg_catalog.has_sequence_privilege('mcp_reader', c.oid, 'USAGE,SELECT,UPDATE') ELSE false END) THEN
     RAISE EXCEPTION 'mcp_reader has an effective sequence privilege; see mcp-data.audit.sql';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_namespace ns WHERE ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%' AND pg_catalog.has_schema_privilege('mcp_reader', ns.oid, 'CREATE'))
      OR pg_catalog.has_database_privilege('mcp_reader', pg_catalog.current_database(), 'CREATE') THEN
     RAISE EXCEPTION 'mcp_reader can CREATE in a schema or the database; see mcp-data.audit.sql';
   END IF;
-  IF (SELECT count(*) FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND pg_catalog.has_function_privilege('mcp_reader', p.oid, 'EXECUTE')) <> 0 THEN RAISE EXCEPTION 'mcp_reader can already execute a function in mcp_data (possibly through PUBLIC); refusing'; END IF;
+  IF (SELECT count(*) FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND pg_catalog.has_function_privilege('mcp_reader', p.oid, 'EXECUTE')) NOT IN (0, 6) THEN RAISE EXCEPTION 'mcp_reader can already execute some, but not exactly the six, functions in mcp_data (possibly through PUBLIC); refusing'; END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace ns ON ns.oid = p.pronamespace
               WHERE ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%'
                 AND pg_catalog.has_function_privilege('mcp_reader', p.oid, 'EXECUTE')
@@ -330,7 +334,7 @@ BEGIN
     RAISE EXCEPTION 'mcp_reader can execute a function beyond the six approved ones, or a SECURITY DEFINER function elsewhere (possibly through PUBLIC); see mcp-data.audit.sql';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace = 'pg_catalog'::regnamespace AND pg_catalog.has_function_privilege('mcp_reader', p.oid, 'EXECUTE')
-              AND p.proname IN ('pg_read_file','pg_read_binary_file','pg_ls_dir','pg_stat_file','lo_import','lo_export','pg_terminate_backend','pg_cancel_backend','pg_reload_conf','pg_rotate_logfile','pg_switch_wal','pg_create_restore_point','pg_logical_emit_message')) THEN
+              AND p.proname IN ('pg_read_file','pg_read_binary_file','pg_ls_dir','pg_stat_file','lo_import','lo_export','pg_reload_conf','pg_rotate_logfile','pg_switch_wal','pg_create_restore_point')) THEN
     RAISE EXCEPTION 'mcp_reader can execute a dangerous built-in function; see mcp-data.audit.sql';
   END IF;
 END $$;
@@ -620,16 +624,16 @@ BEGIN
       ('daily_member_usage','session_count')),
   eff AS (SELECT ns.nspname AS s, c.relname AS t, a.attname AS col FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
             JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
-           WHERE c.relkind IN ('r','p','v','m','f') AND ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%' AND pg_catalog.has_column_privilege('mcp_data_owner', c.oid, a.attnum, 'SELECT'))
+           WHERE c.relkind IN ('r','p','v','m','f') AND ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%' AND CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_column_privilege('mcp_data_owner', c.oid, a.attnum, 'SELECT') ELSE false END)
   SELECT count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM allow WHERE allow.t = eff.t AND allow.c = eff.col AND eff.s = 'public')), count(*), (SELECT count(*) FROM allow) INTO n_extra, n_eff, n_allow FROM eff;
   IF n_extra > 0 THEN RAISE EXCEPTION 'mcp_data_owner can read columns beyond the allowlist (a grant, or PUBLIC, e.g. prompt_text_sanitized); refusing'; END IF;
   IF n_eff <> n_allow THEN RAISE EXCEPTION 'mcp_data_owner effective column SELECT is not exactly the allowlist'; END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
               WHERE c.relkind IN ('r','p','v','m','f') AND ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%'
-                AND (pg_catalog.has_table_privilege('mcp_data_owner', c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR pg_catalog.has_any_column_privilege('mcp_data_owner', c.oid, 'INSERT,UPDATE,REFERENCES'))) THEN
+                AND (CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_table_privilege('mcp_data_owner', c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') ELSE false END OR CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_any_column_privilege('mcp_data_owner', c.oid, 'INSERT,UPDATE,REFERENCES') ELSE false END)) THEN
     RAISE EXCEPTION 'mcp_data_owner has a write or table-level privilege (possibly through PUBLIC); refusing';
   END IF;
-  IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace WHERE c.relkind = 'S' AND ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%' AND pg_catalog.has_sequence_privilege('mcp_data_owner', c.oid, 'USAGE,SELECT,UPDATE')) THEN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace WHERE c.relkind = 'S' AND ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%' AND CASE WHEN c.relkind = 'S' THEN pg_catalog.has_sequence_privilege('mcp_data_owner', c.oid, 'USAGE,SELECT,UPDATE') ELSE false END) THEN
     RAISE EXCEPTION 'mcp_data_owner has a sequence privilege; refusing';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_namespace ns WHERE ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%' AND ns.nspname <> 'mcp_data' AND pg_catalog.has_schema_privilege('mcp_data_owner', ns.oid, 'CREATE'))
@@ -644,13 +648,13 @@ BEGIN
   -- (d) mcp_reader EFFECTIVE privileges, PUBLIC included (fail closed; no names in the message, run mcp-data.audit.sql for the list)
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
               WHERE c.relkind IN ('r','p','v','m','f') AND ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%'
-                AND (pg_catalog.has_table_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
-                     OR pg_catalog.has_any_column_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,REFERENCES'))) THEN
+                AND (CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_table_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') ELSE false END
+                     OR CASE WHEN c.relkind IN ('r','p','v','m','f') THEN pg_catalog.has_any_column_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,REFERENCES') ELSE false END)) THEN
     RAISE EXCEPTION 'mcp_reader has an effective table or column privilege (possibly through PUBLIC); see mcp-data.audit.sql';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
               WHERE c.relkind = 'S' AND ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%'
-                AND pg_catalog.has_sequence_privilege('mcp_reader', c.oid, 'USAGE,SELECT,UPDATE')) THEN
+                AND CASE WHEN c.relkind = 'S' THEN pg_catalog.has_sequence_privilege('mcp_reader', c.oid, 'USAGE,SELECT,UPDATE') ELSE false END) THEN
     RAISE EXCEPTION 'mcp_reader has an effective sequence privilege; see mcp-data.audit.sql';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_namespace ns WHERE ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%' AND pg_catalog.has_schema_privilege('mcp_reader', ns.oid, 'CREATE'))
@@ -667,7 +671,7 @@ BEGIN
     RAISE EXCEPTION 'mcp_reader can execute a function beyond the six approved ones, or a SECURITY DEFINER function elsewhere (possibly through PUBLIC); see mcp-data.audit.sql';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace = 'pg_catalog'::regnamespace AND pg_catalog.has_function_privilege('mcp_reader', p.oid, 'EXECUTE')
-              AND p.proname IN ('pg_read_file','pg_read_binary_file','pg_ls_dir','pg_stat_file','lo_import','lo_export','pg_terminate_backend','pg_cancel_backend','pg_reload_conf','pg_rotate_logfile','pg_switch_wal','pg_create_restore_point','pg_logical_emit_message')) THEN
+              AND p.proname IN ('pg_read_file','pg_read_binary_file','pg_ls_dir','pg_stat_file','lo_import','lo_export','pg_reload_conf','pg_rotate_logfile','pg_switch_wal','pg_create_restore_point')) THEN
     RAISE EXCEPTION 'mcp_reader can execute a dangerous built-in function; see mcp-data.audit.sql';
   END IF;
 END $$;
