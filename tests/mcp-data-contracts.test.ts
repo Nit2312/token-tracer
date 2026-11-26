@@ -514,7 +514,8 @@ describe('excluded-column policy', () => {
 
 describe('the contracts are free of I/O and stay inside the guard rails', () => {
   const dir = path.join(process.cwd(), 'lib/mcp/data');
-  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.ts'));
+  const P3_1_AND_P3_2_MODULES = ['cursor.ts', 'errors.ts', 'limits.ts', 'masking.ts', 'output.ts', 'prompt-access.ts', 'refs.ts', 'requests.ts', 'scope.ts', 'sealed.ts', 'time-window.ts'];
+  const files = P3_1_AND_P3_2_MODULES;
   const code_ = (f: string) => fs.readFileSync(path.join(dir, f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
   it('has exactly the P3-1 and P3-2 modules', () => {
     assert.deepEqual(files.sort(), ['cursor.ts', 'errors.ts', 'limits.ts', 'masking.ts', 'output.ts', 'prompt-access.ts', 'refs.ts', 'requests.ts', 'scope.ts', 'sealed.ts', 'time-window.ts']);

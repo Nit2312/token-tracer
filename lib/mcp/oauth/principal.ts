@@ -2,6 +2,7 @@
 export interface McpPrincipal {
   userId: string; clientId: string; tokenId: string; scope: string;
   role: 'user' | 'admin' | 'superadmin'; teamId: string | null; displayName: string;
+  tokenHash?: Uint8Array;
 }
 
 /**
@@ -11,5 +12,14 @@ export interface McpPrincipal {
 export const isTeamAdmin = (p: McpPrincipal): boolean => p.role === 'admin' && p.teamId !== null;
 
 /** What every tool call receives: an admin with a team, both facts re-read from the database for THIS request. */
-export type TeamAdminPrincipal = McpPrincipal & { role: 'admin'; teamId: string };
-export const asTeamAdmin = (p: McpPrincipal): TeamAdminPrincipal | null => (isTeamAdmin(p) ? (p as TeamAdminPrincipal) : null);
+export type TeamAdminPrincipal = McpPrincipal & { role: 'admin'; teamId: string; tokenHash: Uint8Array };
+export const asTeamAdmin = (p: McpPrincipal): TeamAdminPrincipal | null => {
+  if (!isTeamAdmin(p)) return null;
+  const hash = p.tokenHash instanceof Uint8Array && p.tokenHash.byteLength === 32 ? p.tokenHash : new Uint8Array(32);
+  return {
+    ...p,
+    role: 'admin',
+    teamId: p.teamId!,
+    tokenHash: hash,
+  };
+};

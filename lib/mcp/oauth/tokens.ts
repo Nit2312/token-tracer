@@ -188,7 +188,10 @@ export async function authenticateAccessToken(pool: McpPool, token: unknown, exp
     const row = r.rows[0];
     if (!row || row.resource !== expectedResource) return null;
     await tx.query(`UPDATE oauth_tokens SET last_used_at = now() WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < now() - interval '5 minutes')`, [row.id]);
-    return { userId: row.user_id, clientId: row.client_id, tokenId: row.id, scope: row.scope, role: row.role, teamId: row.team_id, displayName: row.display_name };
+    return {
+      userId: row.user_id, clientId: row.client_id, tokenId: row.id, scope: row.scope,
+      role: row.role, teamId: row.team_id, displayName: row.display_name, tokenHash: hash,
+    };
   });
 }
 

@@ -299,13 +299,21 @@ describe('database access from the MCP code is confined to the approved authenti
 
   // The ONLY modules that may talk to the database (always as mcp_auth, always through db.ts). Adding one requires a conscious edit here.
   const DB_MODULES = ['lib/mcp/db.ts', 'lib/mcp/oauth/audit.ts', 'lib/mcp/oauth/clients.ts', 'lib/mcp/oauth/grant-user.ts', 'lib/mcp/oauth/rate-limit.ts', 'lib/mcp/oauth/tokens.ts'];
+  // Data plane reader modules (P3-5: talk to the database as mcp_reader only, through lib/mcp/data/db.ts)
+  const DATA_DB_MODULES = [
+    'lib/mcp/data/activity.ts',
+    'lib/mcp/data/db.ts',
+    'lib/mcp/data/developers.ts',
+    'lib/mcp/data/prompts.ts',
+    'lib/mcp/data/sessions.ts',
+  ];
   // The request-serving modules: what answers /mcp. They reach the database ONLY through ./bearer.
   const SERVING = ['lib/mcp/handler.ts', 'lib/mcp/server.ts', 'lib/mcp/config.ts', 'lib/mcp/context.ts', 'lib/mcp/bearer.ts', 'app/mcp/route.ts'];
   const APPROVED_TABLES = ['users', 'teams', 'oauth_clients', 'oauth_authorization_codes', 'oauth_tokens', 'mcp_rate_limits', 'mcp_access_log'];
 
   it('only the approved modules import pg or run queries', () => {
     const touching = all.filter((f) => /from\s+['"]pg['"]|\.query\(|\bnew pg\.|\bPool\b/.test(code(f))).map(rel).sort();
-    assert.deepEqual(touching, [...DB_MODULES].sort());
+    assert.deepEqual(touching, [...DB_MODULES, ...DATA_DB_MODULES].sort());
   });
   it('no MCP module imports application data, session or auth code (consent uses only the session decoder and the signing secret)', () => {
     const allowedOutside: Record<string, string[]> = { 'lib/mcp/oauth/authorize.ts': ['../../session-token', '../../security/return-url', '../../team/env'], 'lib/mcp/oauth/grant-user.ts': ['../../session-token'] };

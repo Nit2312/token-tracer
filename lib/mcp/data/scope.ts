@@ -31,6 +31,14 @@ export function assertScope(value: unknown): asserts value is DataScope {
   if (typeof value !== 'object' || value === null || !HASHES.has(value)) throw dataError('internal');
 }
 
+export function scopeFromPrincipal(principal: { tokenHash: Uint8Array; userId: string; teamId: string }): DataScope {
+  return createDataScope({
+    tokenHash: principal.tokenHash,
+    userId: principal.userId,
+    teamId: principal.teamId,
+  });
+}
+
 /** The ONLY authority passed to the database for a data call. Returns a fresh copy each time. */
 export function scopeDbArgs(scope: DataScope): { tokenHash: Buffer } {
   assertScope(scope);

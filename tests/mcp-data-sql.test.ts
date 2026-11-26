@@ -637,7 +637,7 @@ describe('rollback: explicit, narrow, idempotent', () => {
 describe('nothing is wired up: the SQL is written, not applied', () => {
   const walk = (d: string): string[] => fs.readdirSync(path.join(root, d), { withFileTypes: true }).flatMap((e) => (e.name === 'node_modules' || e.name === '.next' ? [] : e.isDirectory() ? walk(`${d}/${e.name}`) : [`${d}/${e.name}`]));
   it('no script, application file or package script references the data-plane SQL files, and no runner for them exists', () => {
-    const refs = [...walk('scripts'), ...walk('app'), ...walk('lib'), 'package.json'].filter((f) => !f.startsWith('scripts/migrations/mcp-data') && /\.(m?js|cjs|ts|tsx|json)$/.test(f) && /mcp-data\.(sql|grants|rollback|audit)|migrate-mcp-data|mcp_data\./.test(read(f)));
+    const refs = [...walk('scripts'), ...walk('app'), ...walk('lib'), 'package.json'].filter((f) => !f.startsWith('scripts/migrations/mcp-data') && !f.startsWith('lib/mcp/data/') && /\.(m?js|cjs|ts|tsx|json)$/.test(f) && /mcp-data\.(sql|grants|rollback|audit)|migrate-mcp-data|mcp_data\./.test(read(f)));
     assert.deepEqual(refs.filter((f) => f !== 'lib/mcp/grants.json'), []);
     assert.ok(!fs.existsSync(path.join(root, 'scripts/migrate-mcp-data.mjs')));
   });

@@ -263,6 +263,7 @@ None of the new variables is set anywhere yet.
 | `MCP_PUBLIC_BASE_URL` | issuer, resource, audience, challenge URLs | https origin with no path/query (`http://localhost` allowed outside production); missing/invalid → 503; **never** falls back to another variable | no |
 | `MCP_PROMPT_TEXT_ENABLED` | raw prompt text (Phase 3 gate) | **default off.** Exact `true` is necessary but NOT sufficient: text also requires a recorded privacy/legal approval constant in code (`lib/mcp/data/prompt-access.ts`, currently none). The flag alone never enables text | no |
 | `MCP_AUTH_DATABASE_URL` | the `mcp_auth` pool | must connect as `mcp_auth`; missing → 503 | **yes** |
+| `MCP_READER_DATABASE_URL` | the `mcp_reader` data pool (Phase 3) | must connect as `mcp_reader`; missing → 503 / data unavailable; connection limit 5, pool max 3 | **yes** |
 | `MCP_ALLOWED_HOSTS` | optional SDK host allow-list | default: host of `NEXT_PUBLIC_SERVER_URL` (plus `localhost` outside production); must include the canonical host | no |
 | `MCP_ALLOWED_ORIGINS` | optional extra browser `Origin` hostnames | `claude.ai`, `claude.com` and the allowed hosts are always accepted; no `Origin` is allowed | no |
 | `MCP_ALLOW_LOOPBACK_REDIRECTS` | kill switch for Claude Code loopback redirects | set to `false` to refuse them (also for existing clients); default allowed | no |
@@ -590,7 +591,7 @@ Each step is a small local commit, tested (`tsc`, ESLint, unit; live tests from 
 | P3-2 | Masking engine with its corpus and performance tests | **privacy review** | built 2026-11-26; **review outcome: metadata-only for the initial release, masking removed from Phase 3 scope** (16.9) |
 | P3-3 | SQL **written, not applied**: migration, rollback, grants, static SQL checks (role-script generalisation moves to P3-4, where it can be run) | **security review of the SQL and grants** | **written 2026-11-26, awaiting security review** (16.10) |
 | P3-4 | Role provisioning generalised (`setup-mcp-roles.mjs`), regression suite, PUBLIC privilege analysis, managed-host compatibility | security review | **done 2026-11-26** (16.11) |
-| P3-5 | Reader pool and services, token hash in the principal, live tests | integration | planned |
+| P3-5 | Reader pool and services, token hash in the principal, live tests | integration | **done 2026-11-26** (16.12) |
 | P3-6 | Hardening: fuzzing, concurrency, revocation mid-flight, dashboard parity, `EXPLAIN` on a production-sized copy, index recommendation (no index created) | measurements | planned |
 | P3-7 | Documentation consolidation, risk register, runbook additions for the data plane | final review | planned |
 
@@ -696,3 +697,49 @@ Files: `scripts/migrations/mcp-data.sql` (roles, schema, functions), `scripts/mi
 **4. Quality Gates & Regression Suite**
 - Added `tests/mcp-roles-setup.test.ts` (15 regression tests covering CLI argument validation, static attributes, parameter guards, failure exits, and signature matching).
 - All 832 unit tests pass; TypeScript and ESLint pass with 0 errors; SQL parser validation passes.
+
+### 16.12 P3-5 reader pool and data services (complete, 2026-11-26)
+
+**1. Dedicated Reader Pool (`lib/mcp/data/db.ts`)**
+- Isolated connection pool connecting strictly via `MCP_READER_DATABASE_URL` with credentials pinned to `mcp_reader`.
+- Fails closed if the username is not `mcp_reader`, URL is missing/malformed, or points to another role.
+- Bounded connection pool (`max: 3`), well within role's `CONNECTION LIMIT 5`, preventing connection starvation.
+- Strict session-local read-only transactions (`withReaderTx`) applying:
+  - `statement_timeout = 5000` (5s execution ceiling)
+  - `lock_timeout = 2000` (2s lock acquisition ceiling)
+  - `idle_in_transaction_session_timeout = 10000` (10s idle ceiling)
+  - `search_path = 'pg_catalog, pg_temp'` (prevents search_path hijacking)
+  - `default_transaction_read_only = on`
+- Error mapping via `translatePgError` converts PostgreSQL codes (`54000`, `P0002`, `22023`, `57014`) into uniform `DataError` codes (`limit_exceeded`, `not_found`, `invalid_argument`, `window_too_large`, `window_out_of_range`, `unavailable`, `internal`), preventing database detail leaks.
+- Clean shutdown (`closeReaderPool`) and client release guaranteed on all exit paths.
+
+**2. Authenticated Principal & Data Scope (`lib/mcp/oauth/principal.ts`, `lib/mcp/oauth/tokens.ts`, `lib/mcp/data/scope.ts`)**
+- `McpPrincipal` and `TeamAdminPrincipal` carry the 32-byte `tokenHash: Uint8Array`.
+- `authenticateAccessToken` derives the SHA-256 hash server-side during bearer token authentication; neither client input nor plaintext token is trusted or passed.
+- `DataScope` created via `createDataScope` / `scopeFromPrincipal` keeps the token hash in a module-private `WeakMap` registry; serialising or logging a scope reveals only identifiers (`userId`, `teamId`), never the hash.
+- PostgreSQL functions derive tenant scope via `mcp_data._resolve_scope(p_token)` internally from the token hash; no client-supplied team ID or scope is accepted by the data layer.
+
+**3. Typed Data Services for the Approved Functions (`lib/mcp/data/`)**
+- `listDevelopers` (`lib/mcp/data/developers.ts`): calls `mcp_data.list_developers(p_token, p_limit, p_after)`. Implements `limit + 1` probe row, keyset cursor encoding/decoding, budget packing, and metadata validation.
+- `getDeveloperActivity` (`lib/mcp/data/activity.ts`): calls `mcp_data.developer_activity(p_token, p_member, p_from, p_to)`. Enforces 14-day lookback window, maps daily usage rollups, enforces `assertMetadataOnly`.
+- `listSessions` (`lib/mcp/data/sessions.ts`): calls `mcp_data.list_sessions(...)`. Seals session UUIDs into authenticated opaque references (`sessionRef`), generates HMAC-signed cursors bound to filter fingerprints, packs within response budget (24 KiB).
+- `getSessionDetails` (`lib/mcp/data/sessions.ts`): calls `mcp_data.session_details(p_token, p_session)`. Decodes sealed `sessionRef` with team-bound authenticated decryption; retrieves aggregates and tool call distribution (capped at 100 tools); strictly metadata-only.
+- `searchPromptMetadata` (`lib/mcp/data/prompts.ts`): calls `mcp_data.search_prompt_metadata(...)`. Strictly rejects text input / queries (`query`, `text`, `search`); filters on closed intent enums, booleans, numeric char ranges, and short identifiers; lookback capped at 7 days.
+- `getPromptMetadataBatch` (`lib/mcp/data/prompts.ts`): calls `mcp_data.prompt_metadata_batch(p_token, p_ids)`. Decodes up to 20 sealed prompt references; packs results within response budget; never returns raw prompt text or file paths.
+
+**4. Testing & Verification (`tests/mcp-data-services.test.ts`)**
+- 21 comprehensive unit, integration, and adversarial tests covering:
+  - Reader pool URL validation, role name enforcement, connection limits, and error releases.
+  - Principal tokenHash derivation, scope immutability, and unforgeability.
+  - Read-only transaction execution and session setting configuration.
+  - Service functions calling all 6 data functions with pagination probes and cursor generation.
+  - Adversarial cross-tenant isolation: tokens/references/cursors issued to Team A fail closed with `not_found` or `cursor_invalid` when presented by Team B.
+  - Secret tampering: references opened with an incorrect secret fail closed.
+  - Response budget packing: sets `truncated: true` and generates continuation cursor if row volume exceeds 24 KiB budget.
+  - Complete zero leakage verification: no prompt text, no raw file paths, no disallowed columns.
+
+**5. Limitations & Blockers for P3-6**
+- *Empty Capabilities Maintained*: `/mcp` capability discovery remains empty `{}`. Tools are not registered or exposed yet (deferred to Phase 4).
+- *Local-only Validation*: Live database verification was completed against mock pools and unit fixtures. Integration against the fresh Neon test branch requires `MCP_READER_DATABASE_URL` during P3-6 testing.
+- *Performance Measurement*: Query execution plans (`EXPLAIN (ANALYZE, BUFFERS)`) on production-scale session/turn volume deferred to P3-6.
+- *Concurrency & Fuzzing*: Race-condition fuzzing, mid-flight token revocations, and dashboard calculation parity to be executed in P3-6.
