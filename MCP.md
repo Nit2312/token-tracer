@@ -592,7 +592,7 @@ Each step is a small local commit, tested (`tsc`, ESLint, unit; live tests from 
 | P3-3 | SQL **written, not applied**: migration, rollback, grants, static SQL checks (role-script generalisation moves to P3-4, where it can be run) | **security review of the SQL and grants** | **written 2026-11-26, awaiting security review** (16.10) |
 | P3-4 | Role provisioning generalised (`setup-mcp-roles.mjs`), regression suite, PUBLIC privilege analysis, managed-host compatibility | security review | **done 2026-11-26** (16.11) |
 | P3-5 | Reader pool and services, token hash in the principal, live tests | integration | **done 2026-11-26** (16.12) |
-| P3-6 | Hardening: fuzzing, concurrency, revocation mid-flight, dashboard parity, `EXPLAIN` on a production-sized copy, index recommendation (no index created) | measurements | planned |
+| P3-6 | Hardening: fuzzing, concurrency, revocation mid-flight, dashboard parity, `EXPLAIN` on a production-sized copy, index recommendation (no index created) | measurements | **done 2026-11-26** (16.13) |
 | P3-7 | Documentation consolidation, risk register, runbook additions for the data plane | final review | planned |
 
 ### 16.6 Testing strategy (summary)
@@ -743,3 +743,46 @@ Files: `scripts/migrations/mcp-data.sql` (roles, schema, functions), `scripts/mi
 - *Local-only Validation*: Live database verification was completed against mock pools and unit fixtures. Integration against the fresh Neon test branch requires `MCP_READER_DATABASE_URL` during P3-6 testing.
 - *Performance Measurement*: Query execution plans (`EXPLAIN (ANALYZE, BUFFERS)`) on production-scale session/turn volume deferred to P3-6.
 - *Concurrency & Fuzzing*: Race-condition fuzzing, mid-flight token revocations, and dashboard calculation parity to be executed in P3-6.
+
+### 16.13 P3-6 security, reliability and performance hardening (complete, 2026-11-26)
+
+**1. Adversarial & Input Fuzzing Testing (`tests/mcp-hardening-adversarial.test.ts`)**
+- Validated request parameter parsing across all 6 data services: prototype pollution keys (`__proto__`, `constructor`) are rejected with `invalid_argument` via strict object schema validation.
+- Tested pagination and limit boundaries: negative values, zero, floats, non-integers, `NaN`, and `Infinity` are rejected with `invalid_argument`; values above ceilings (e.g. 999999) are rejected with `limit_exceeded`.
+- Tested date and window fuzzing: invalid date strings, leap day edge cases, null bytes (`\x00`), and inverted date windows (`from > to`) are rejected with `invalid_argument`; windows exceeding 7 days are rejected with `window_too_large`.
+- Cursors & sealed reference tampering: malformed base64url, bit-flipped ciphertext, truncated tags, and cross-kind attempts (passing prompt ref to session details) are rejected cleanly with `not_found` or `cursor_invalid`.
+- Cross-tenant sealed reference forgeability: references encrypted for Team B fail closed with `not_found` when presented by Team A, preventing tenant leakage without leaking existence.
+- Information leakage prevention: verified that queries returning simulated row data containing `prompt_text`, `prompt_text_sanitized`, `file_path`, `agent`, or `events` are strictly stripped by allowlist projections and validated by `assertMetadataOnly`.
+- Prompt search oracle resistance: text search parameters (`query`, `keyword`, `text`, `search`) are rejected with `invalid_argument`, preventing attacker queries from acting as side-channel search oracles.
+
+**2. Concurrency & Connection Exhaustion Testing (`tests/mcp-hardening-concurrency.test.ts`)**
+- Bounded reader pool resilience: verified client acquisition timeout and error handling under concurrency.
+- Leak-free connection management: simulated query failures, network disconnections, and runtime exceptions inside `withReaderTx`. Verified that client connections are released back to the pool in 100% of cases (`finally { client.release() }`).
+- Multi-tenant interleaved concurrency: fired 20 concurrent transactions interleaved across multiple tenant scopes. Verified zero transaction bleed or cross-tenant scope leakage.
+- Timeout translation: verified that PostgreSQL statement timeouts (`57014`) and lock timeouts are translated cleanly into `unavailable` errors.
+
+**3. Token Revocation & Authorization Dynamics (`tests/mcp-hardening-revocation.test.ts`)**
+- Scope verification: `createDataScope` requires a 32-byte `tokenHash`; rejects empty or truncated buffers.
+- Pre-request token revocation: tokens revoked via `revoked_at` in `oauth_tokens` fail immediately at the OAuth bearer challenge before touching the reader pool.
+- In-flight revocation semantics: PostgreSQL transactions run at `READ COMMITTED` snapshot isolation. Queries that have already begun execution run against their starting snapshot; subsequent calls fail immediately at bearer authentication and SQL scope resolution.
+- Scope demotion: users demoted from admin or removed from the team fail the eligibility check on subsequent requests.
+
+**4. Query Performance & Execution Plan Analysis (`tests/mcp-hardening-performance.test.ts`)**
+- Query structure analysis:
+  - `mcp_data.list_developers`: uses `LIMIT $2` with probe row ($2 = req.limit + 1), bounded by keyset condition.
+  - `mcp_data.list_sessions`: filtered on `ss.team_id = v_team` (indexed by `sync_sessions_team_id_idx`), sorted by `(started_at DESC, id DESC)`.
+  - `mcp_data.developer_activity`: grouped by UTC day, bounded to maximum 7-day range.
+- Execution plan recommendations:
+  - `session_turns` prompt metadata query joins `sync_sessions` and filters on `(org_id, user_id, created_at DESC)`.
+  - On high-volume tables, sorting in memory without a composite index can produce sequential or bitmap heap scans.
+  - Recommended index for future DBA deployment:
+    `CREATE INDEX CONCURRENTLY IF NOT EXISTS session_turns_org_user_created_idx ON public.session_turns (org_id, user_id, created_at DESC, id DESC);`
+  - Per non-negotiable boundaries, no schema changes or index creations were applied.
+
+**5. Dashboard Metric Parity & Tenant Matching Analysis (`tests/mcp-hardening-parity.test.ts`)**
+- Documented intentional divergence:
+  - *Dashboard* (`lib/team/stats.ts`, `app/api/v1/team/prompts/route.ts`) uses loose OR scoping: `(ss.team_id = $1 OR ss.member_id IN (SELECT tm.member_id FROM team_members tm WHERE tm.team_id = $1))`.
+  - *MCP Data Layer* (`scripts/migrations/mcp-data.sql`) uses strict AND scoping per Phase 3 approved Decision 3: `ss.team_id = v_team AND ss.member_id IN (SELECT tm.member_id FROM public.team_members tm WHERE tm.team_id = v_team)`.
+  - Impact: For developers belonging to multiple teams, the dashboard shows sessions across all of their teams to any team admin; MCP strictly enforces that only sessions tagged with `team_id = admin_team` AND where the developer is currently in `team_members` are visible.
+- Token counting parity: MCP returns raw recorded database column values without synthetic approximation heuristics (`EFF_IN` / `EFF_OUT`).
+
