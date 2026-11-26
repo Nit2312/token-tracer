@@ -46,6 +46,15 @@ AI coding assistants like Claude Code and Cursor can consume millions of tokens 
 
 ## Getting Started
 
+### Requirements
+
+**Node.js 24.x (LTS).** The version is pinned in two places that must stay in step: `.nvmrc` (`24`) and `engines.node` in `package.json` (`24.x`). With [nvm](https://github.com/nvm-sh/nvm), run `nvm install` and `nvm use` in the project folder; it reads `.nvmrc`. npm 11 (bundled with Node 24) is expected.
+
+- **Why 24.x:** Next.js 16.4.2 needs Node ≥ 20.9 and the strictest dependency needs ≥ 20.19 / 22.13 / 24, so 24 is compatible; Node 20 reached end-of-life on 2026-04-30; 24 is an LTS line supported until 2028-04-30 and is the version the whole codebase and its test suites have been built and verified on.
+- **Vercel:** `engines.node` in `package.json` **overrides** the Node.js Version in the Vercel project settings, so deployments use the latest 24.x regardless of the dashboard. Keep it a major-only value such as `24.x` (an open range like `>=24` would auto-upgrade to a newer major on the next deploy).
+- **CI:** there is no CI configuration in this repository. When one is added, use the same pin, e.g. `actions/setup-node` with `node-version-file: .nvmrc`.
+- **Upgrading Node:** change `.nvmrc`, `engines.node` and the major of `@types/node` together, then run `npx tsc --noEmit`, `npm run test:unit`, `npm run build` and the database suites (`npm run test:db`) before deploying. `tests/node-version.test.ts` fails if these drift apart or if you run the tests on a different Node major.
+
 ### Local Setup
 
 1. **Install dependencies**:

@@ -276,6 +276,7 @@ All items in [section 13](#13-production-readiness-checklist) marked *blocker* a
 - Confirm the tenant-isolation migration is already applied in production (earlier program; `5008f2d`, `8f37be9`, `25dc66b`).
 - Confirm production's canonical URL: `NEXT_PUBLIC_SERVER_URL` in Vercel Production is `https://token-tracer-three.vercel.app`.
 - Create a **Neon backup branch** of production and note its name.
+- Node.js is pinned to **24.x** (`.nvmrc` and `engines.node`; see the README). `engines.node` overrides the Vercel project's Node.js Version setting, so the next deployment runs the latest 24.x: check the dashboard value first, and confirm "Node.js 24" in the build log of the preview deployment before promoting.
 - Know the production **endpoint id** (`ep-…`) and have the owner **direct** (non-pooled) connection string in a file outside the repo.
 - Choose a low-traffic window (the migration briefly locks `users` to add the foreign keys).
 
@@ -349,7 +350,7 @@ All database tests and the end-to-end harness run **only** against a dedicated N
 ### Results (2026-11-26, test branch)
 | Check | Result |
 |---|---|
-| Unit tests (`npm run test:unit`) | **466 / 466** (257 are MCP/OAuth/revocation/audit/documentation) |
+| Unit tests (`npm run test:unit`) | **474 / 474** (257 are MCP/OAuth/revocation/audit/documentation; 8 are the Node-version pin guard) |
 | Live database suites (13 files, sequential) | **150 / 150**, 0 skipped (42 pre-existing analyst/isolation + 108 MCP/audit) |
 | Real `next build` + `next start` end-to-end harness | **150 / 150** checks, 8 groups |
 | Role verification (`setup-mcp-roles.mjs --verify`) | all checks pass |
