@@ -1,4 +1,7 @@
 /**
+ * NON-AUTHORITATIVE, OPTIONAL FUTURE WORK. Not part of the Phase 3 scope and not connected to anything (privacy decision, 2026-11-26, MCP.md 16.9):
+ * the initial release is metadata-only, and masking does not make arbitrary prompt text safe to disclose. Nothing may depend on this module.
+ *
  * Best-effort masking of prompt text (P3-2). Pure: no I/O, no environment, no logging.
  *
  * IMPORTANT, AND PART OF THE CONTRACT: this is BEST-EFFORT. It reduces the chance that a secret or a piece of personal data survives into a
