@@ -261,6 +261,7 @@ None of the new variables is set anywhere yet.
 |---|---|---|---|
 | `MCP_ENABLED` | the kill switch | must be exactly `true` to serve; anything else → every MCP route 404 | no |
 | `MCP_PUBLIC_BASE_URL` | issuer, resource, audience, challenge URLs | https origin with no path/query (`http://localhost` allowed outside production); missing/invalid → 503; **never** falls back to another variable | no |
+| `MCP_PROMPT_TEXT_ENABLED` | raw prompt text (Phase 3 gate) | **default off.** Exact `true` is necessary but NOT sufficient: text also requires a recorded privacy/legal approval constant in code (`lib/mcp/data/prompt-access.ts`, currently none). The flag alone never enables text | no |
 | `MCP_AUTH_DATABASE_URL` | the `mcp_auth` pool | must connect as `mcp_auth`; missing → 503 | **yes** |
 | `MCP_ALLOWED_HOSTS` | optional SDK host allow-list | default: host of `NEXT_PUBLIC_SERVER_URL` (plus `localhost` outside production); must include the canonical host | no |
 | `MCP_ALLOWED_ORIGINS` | optional extra browser `Origin` hostnames | `claude.ai`, `claude.com` and the allowed hosts are always accepted; no `Origin` is allowed | no |
@@ -585,7 +586,7 @@ Each step is a small local commit, tested (`tsc`, ESLint, unit; live tests from 
 | Step | Scope | Review stop | Status |
 |---|---|---|---|
 | **P3-0** | Decisions and documentation (this section; phase boundary corrected) | decisions recorded | **done 2026-11-26** |
-| P3-1 | Contracts, DB-free: types, limits, scope and cursor handling, error taxonomy, excluded-column policy, guards | contracts and limits | planned |
+| P3-1 | Contracts, DB-free: types, limits, scope and cursor handling, error taxonomy, excluded-column policy, guards | contracts and limits | **done 2026-11-26** (16.8) |
 | P3-2 | Masking engine with its corpus and performance tests | **privacy review** | planned |
 | P3-3 | SQL **written, not applied**: migration, rollback, grants, role-script generalisation, static SQL checks | **security review of the SQL** | planned |
 | P3-4 | Apply on the **fresh test branch** (decision 7), provision the roles, `--verify`, live cross-tenant isolation fixture | results shown before continuing | planned |
@@ -605,3 +606,22 @@ Each step is a small local commit, tested (`tsc`, ESLint, unit; live tests from 
 - Production additions once built: second role and secret, connection budget shared with `mcp_auth`, pooled-endpoint validation (P3S, CS, PB).
 - Daemon divergence (DV) is outside MCP scope but is the root cause of PT.
 - Phase 4 must define the metadata-only "search" semantics, and the result caps per tool.
+
+### 16.8 P3-1 contracts (built, DB-free)
+Code: `lib/mcp/data/` (ten modules, no I/O, imports only `node:crypto` and siblings), the column policy in `lib/team/mcp-policy.ts`, tests in `tests/mcp-data-contracts.test.ts`. Nothing uses them yet: no SQL, tool, route or role.
+
+- **Text gate.** Text mode needs `MCP_PROMPT_TEXT_ENABLED=true` AND a valid recorded approval in code (`RECORDED_PROMPT_TEXT_APPROVAL`, currently `null`; a tripwire test fails if it is set without this document being updated). No text-bearing type exists.
+- **Metadata only, no indirect leak.** Allowlist projections, a closed intent enum, a deep output guard, no free-text search input at all (a text filter would be an oracle), unknown request keys rejected with one generic error, opaque sealed references and cursors bound to team, user and filters, uniform `not_found`. File paths, labels, events, agent and project names are never read.
+- **Window.** Fixed literal 7 days, half-open UTC, not configurable.
+
+| Limit (provisional) | Value | Justification |
+|---|---|---|
+| Page size, developers | default 25, max 50 | 102 B/row real, 327 B worst: 50 rows = 16 KB worst |
+| Page size, sessions and prompts | default 10, max 25 | 550-580 B/row real (sealed refs ~100 chars), 760 B worst. A page of 50 would be 29 KB, over budget, so the single "50" is not adopted |
+| Batch | 20 | 20 prompt-metadata rows = 14 KB worst |
+| Snippet cap (inactive) | 1,000 chars, text batch 10 | 20 x 2,000 cannot fit (about 34 KB+); 4-byte characters need `packWithinBudget`. Final after measuring prompt lengths in P3-6 |
+| Response budget | 24 KiB | below Claude Code's 10,000-token warning at 3 B/token (the default cap is 25,000) |
+| Default window / cursor TTL | 24 h / 15 min | judgement, finalise in P3-6 |
+
+**Unresolved:** approve the per-list page sizes and batch; snippet cap and text batch; budget; whether to add a lookback cap; the approval-record mechanism; consent wording still overstates masking (needs revision before any text); default window and cursor TTL.
+
