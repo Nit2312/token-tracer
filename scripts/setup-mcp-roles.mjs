@@ -188,7 +188,15 @@ async function verify() {
   const check = (ok, label, detail = '') => { if (!ok) failed++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? ` — ${detail}` : ''}`); };
   const warn = (label, detail = '') => console.log(`WARN  ${label}${detail ? ` — ${detail}` : ''}`);
   const probe = async (sqlText, label, expected, readOnly = false) => {
-    try { await c.query(readOnly ? 'BEGIN READ ONLY' : 'BEGIN'); await c.query(sqlText); check(false, label, 'was allowed'); }
+    try {
+      if (ROLE === 'mcp_reader' && !readOnly) {
+        await c.query('BEGIN READ WRITE');
+      } else {
+        await c.query(readOnly ? 'BEGIN READ ONLY' : 'BEGIN');
+      }
+      await c.query(sqlText);
+      check(false, label, 'was allowed');
+    }
     catch (e) { check(e.code === expected, label, e.code); }
     finally { await c.query('ROLLBACK').catch(() => {}); }
   };
@@ -273,20 +281,20 @@ async function verify() {
         check(grants.functions.every((f) => fns.some((x) => `${x.s}.${x.n}` === fnQual(f))), 'can EXECUTE all six reader functions in mcp_data');
       }
 
-      // Probes: table reads and writes must fail with 42501
+      // Probes: table reads and writes must fail with 42501 (qualification with public. needed because mcp_reader search_path does not include public)
       for (const [s, label] of [
-        ['SELECT password_hash FROM users LIMIT 1', 'users.password_hash'],
-        ['SELECT 1 FROM session_turns LIMIT 1', 'session_turns'],
-        ['SELECT 1 FROM sync_sessions LIMIT 1', 'sync_sessions'],
-        ['SELECT 1 FROM members LIMIT 1', 'members'],
-        ['SELECT 1 FROM audit_log LIMIT 1', 'audit_log'],
-        ['SELECT 1 FROM oauth_tokens LIMIT 1', 'oauth_tokens'],
+        ['SELECT password_hash FROM public.users LIMIT 1', 'users.password_hash'],
+        ['SELECT 1 FROM public.session_turns LIMIT 1', 'session_turns'],
+        ['SELECT 1 FROM public.sync_sessions LIMIT 1', 'sync_sessions'],
+        ['SELECT 1 FROM public.members LIMIT 1', 'members'],
+        ['SELECT 1 FROM public.audit_log LIMIT 1', 'audit_log'],
+        ['SELECT 1 FROM public.oauth_tokens LIMIT 1', 'oauth_tokens'],
       ]) await probe(s, `denied: ${label}`, '42501', true);
 
       for (const [s, label] of [
-        ['DELETE FROM oauth_tokens WHERE false', 'DELETE oauth_tokens'],
-        ['UPDATE users SET active = active WHERE false', 'UPDATE users'],
-        ["INSERT INTO audit_log (action) VALUES ('mcp.probe')", 'INSERT audit_log'],
+        ['DELETE FROM public.oauth_tokens WHERE false', 'DELETE oauth_tokens'],
+        ['UPDATE public.users SET active = active WHERE false', 'UPDATE users'],
+        ["INSERT INTO public.audit_log (action) VALUES ('mcp.probe')", 'INSERT audit_log'],
       ]) await probe(s, `denied: ${label}`, '42501');
     }
   } finally { await c.end(); }
