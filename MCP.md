@@ -1,14 +1,14 @@
 # Token Tracer MCP server — architecture, security and operations
 
 Remote [MCP](https://modelcontextprotocol.io) server hosted inside this Next.js app, with its own OAuth 2.1 authorization server.
-Last updated: 2026-11-26. This is the single reference for the whole program (Phase 0 audit, Phase 1 foundation, Phase 2 OAuth, steps 1–10).
+Last updated: 2026-11-26. This is the single reference for the whole program (Phase 0 audit, Phase 1 foundation, Phase 2 OAuth, steps 1–10) and, from section 16, the approved plan for Phase 3.
 
 ## Contents
 1. [Status at a glance](#1-status-at-a-glance) · 2. [Architecture](#2-architecture) · 3. [OAuth 2.1 flow](#3-oauth-21-flow) · 4. [`/mcp` request handling](#4-mcp-request-handling)
 5. [Database, roles and permissions](#5-database-roles-and-permissions) · 6. [Account lifecycle: revocation, audit, retention](#6-account-lifecycle-revocation-audit-retention)
 7. [Configuration](#7-configuration) · 8. [Operations runbook (documented, not executed)](#8-operations-runbook-documented-not-executed) · 9. [Testing](#9-testing)
 10. [Implementation history](#10-implementation-history) · 11. [Key decisions](#11-key-decisions) · 12. [Risk register](#12-risk-register-and-open-items)
-13. [Production-readiness checklist](#13-production-readiness-checklist) · 14. [Cleanup after sign-off](#14-cleanup-after-sign-off) · 15. [Later phases](#15-later-phases)
+13. [Production-readiness checklist](#13-production-readiness-checklist) · 14. [Cleanup after sign-off](#14-cleanup-after-sign-off) · 15. [Later phases](#15-later-phases) · 16. [Phase 3 plan and decisions](#16-phase-3-plan-and-decisions)
 
 ---
 
@@ -25,11 +25,11 @@ Last updated: 2026-11-26. This is the single reference for the whole program (Ph
 
 ### Not built yet (by design — see [Later phases](#15-later-phases))
 - **No tools, resources or prompts exist.** `/mcp` authenticates callers and then advertises empty capabilities. No tenant, session or prompt data is reachable through MCP.
-- **Phase 3 (data-level tenant authorization)** — the identity half is done (the principal is an active database admin of an existing team, re-read on every request); scoping *data* queries to that team needs tools and the read-only data role (`mcp_reader`), both Phase 4.
-- Phase 4 read-only tools, Phase 5 access logging and `/mcp` rate limiting, Phase 6 test with a real Claude client, Phase 7 production rollout.
+- **Phase 3 (tenant-isolated data-access layer)** — planned and approved, **not started in code**: P3-0 (decisions and documentation) is done; no Phase 3 code, SQL, role or environment variable exists. The identity half of tenant isolation is done (the principal is an active database admin of an existing team, re-read on every request). Phase 3 adds the data half — the `mcp_reader` role, identity-bound database functions, services, masking, cursors and limits — and still has **no tools and no HTTP surface** ([section 16](#16-phase-3-plan-and-decisions)).
+- Phase 4 read-only tools (built on the Phase 3 services), Phase 5 access logging and `/mcp` rate limiting, Phase 6 test with a real Claude client, Phase 7 production rollout.
 
 ### Production-readiness blockers (NOT completed — all must be closed or explicitly accepted before `MCP_ENABLED=true` in production)
-1. **Legal/HR approval of the consent wording** (the wording says a connected app can read the team's developers' activity, session metadata and prompt text with sensitive values masked). Technically approved; legal/HR unconfirmed.
+1. **Legal/HR approval of the consent wording** (today's wording says a connected app can read the team's developers' activity, session metadata and prompt text with sensitive values masked). Technically approved for Phase 2; legal/HR unconfirmed. **It must be revised before raw prompt text can ever be enabled** (decision 4 of [section 16](#16-phase-3-plan-and-decisions): the initial release exposes prompt metadata only, and masking is best-effort).
 2. **`mcp_auth` connection sizing** — role limit 5, pool 3 per instance: can exhaust under concurrent serverless instances (fail-closed 503, never open).
 3. **Validate `mcp_auth` over the Neon pooled (PgBouncer) endpoint** — all tests ran over the direct endpoint.
 4. **Platform rate limiting for `/oauth/*`** (R9) — every OAuth request costs a database round trip.
@@ -37,6 +37,8 @@ Last updated: 2026-11-26. This is the single reference for the whole program (Ph
 6. **Verify the production `NEXT_PUBLIC_SERVER_URL` / `MCP_PUBLIC_BASE_URL`** equal the canonical domain `https://token-tracer-three.vercel.app`.
 7. **Real-client verification (Phase 6)** — Claude's actual registration payload, revocation and `resource` behaviour are unverified.
 8. Production migration, role provisioning and environment variables — each needs explicit approval and a backup branch.
+9. **Raw prompt text** — stored verbatim and unmasked by the existing pipeline; stays behind a default-off flag until privacy/legal approval exists (PT).
+10. **Phase 3 production additions** (once built): a second database role and secret (`mcp_reader`) with its own connection budget validated over the pooled endpoint, and an index decision taken only from production-sized measurements (P3S, IX).
 
 Full register: [section 12](#12-risk-register-and-open-items). Checklist: [section 13](#13-production-readiness-checklist).
 
@@ -212,8 +214,13 @@ Plus `USAGE` on sequence `mcp_access_log_id_seq` and `EXECUTE` on `mcp_audit_eve
 
 **Verification:** `node scripts/setup-mcp-roles.mjs --verify` (using `MCP_AUTH_DATABASE_URL`) compares the live role to `grants.json` by catalog across **all** non-system schemas (including views), checks attributes, memberships, sequences, schema privileges and executable functions, and runs real denial probes that must fail with `42501` (e.g. `password_hash`, `members`, `session_turns`, `audit_log`, `DELETE oauth_tokens`, direct `INSERT audit_log`). It also checks the effective `search_path`.
 
-### Future role `mcp_reader` (Phase 4 — does not exist)
-A separate read-only role for tenant data, designed with the tools. **Open decision:** the original constraint said MCP data retrieval must use `ANALYST_DATABASE_URL`; the recommendation was a dedicated `mcp_reader` instead (so the analyst login keeps its own purpose and limits). Not decided — settle before Phase 4.
+### Role `mcp_reader` — approved design (Phase 3; does not exist yet)
+Decided 2026-11-26 ([section 16](#16-phase-3-plan-and-decisions)). Three database principals will serve MCP; only the first exists today.
+- **`mcp_auth`** (exists) — the identity plane described above.
+- **`mcp_data_owner`** (planned) — `NOLOGIN`, owns the data functions, holds read-only **column** grants on exactly the columns the functions read, and nothing else. A bug inside a function is therefore bounded by these grants, not by the database owner's rights.
+- **`mcp_reader`** (planned) — the data-plane login. **No table privileges at all**: `USAGE` on one dedicated schema and `EXECUTE` on a handful of fixed functions, read-only by default, short statement timeout, its own connection limit. It cannot run arbitrary SQL even if its credential leaks.
+
+It is deliberately **not** `analyst_login`: the analyst role's grants exclude prompt text, include a table that `MCP_EXCLUDED_TABLES` forbids for MCP, are global across tenants, and carry a connection limit of 3. `ANALYST_DATABASE_URL` is never used for MCP data. The functions are identity-bound: each takes the caller's token hash, re-validates the token, user, team and client inside the database with the same eligibility rule as bearer authentication, and derives the team itself — no function accepts a team id from the caller.
 
 ### Connection handling
 `lib/mcp/db.ts`: only `MCP_AUTH_DATABASE_URL`, which must connect as `mcp_auth` (any other user is refused); verified TLS; pool `max: 3`; every unit of work is one transaction with local limits; missing/invalid configuration throws (fail closed — there is no fallback to the owner or analyst credentials).
@@ -425,7 +432,8 @@ Findings that changed the design along the way: the audit function replaced dire
 - **Who may connect:** database admins with a team only; `superadmin` and the built-in accounts are excluded; ineligible = invalid token (401), not 403.
 - **Scopes:** `mcp:read` only; `offline_access` accepted and never stored.
 - **Audit:** OAuth security events → `audit_log` only through `mcp_audit_event`; tool-access events → `mcp_access_log` (Phase 4/5).
-- **Roles:** `mcp_auth` now; `mcp_reader` in Phase 4. The `ANALYST_DATABASE_URL` vs dedicated-role question is **open**.
+- **Roles:** `mcp_auth` (identity plane, built) and a dedicated `mcp_reader` (data plane, **decided 2026-11-26**, built in Phase 3) — separate from `analyst_login`; `ANALYST_DATABASE_URL` is never used for MCP data.
+- **Phase 3 decisions (approved 2026-11-26, details in [section 16](#16-phase-3-plan-and-decisions)):** identity-bound `SECURITY DEFINER` functions owned by a minimal no-login role; strict `sync_sessions.team_id` match plus current team membership; prompt **metadata only** initially, raw text behind a default-off flag pending privacy/legal approval, masking best-effort; measure index performance on a production-sized copy before any index; session file paths are never exposed; a fresh test branch is provided before P3-4.
 - **Host policy:** empty 404 for any non-canonical host, everywhere.
 - **No database trigger on `users`** for revocation (owner decision): route hooks plus a guard test instead.
 - **Consent wording:** technically approved 2026-11-24; legal/HR sign-off outstanding.
@@ -435,7 +443,7 @@ Findings that changed the design along the way: the audit function replaced dire
 ## 12. Risk register and open items
 
 ### Closed during the program
-R1 (trigger firing and `SECURITY DEFINER` privileges — proven live) · R5 (pooled `SET` defaults — every transaction applies local limits) · R8 (re-authentication at consent — 15-minute rule) · inconsistent Host answers · hidden schema pass in the revoke helper · lost audit rows for built-in accounts.
+D4 (decided 2026-11-26: dedicated `mcp_reader`, never the analyst role) · R1 (trigger firing and `SECURITY DEFINER` privileges — proven live) · R5 (pooled `SET` defaults — every transaction applies local limits) · R8 (re-authentication at consent — 15-minute rule) · inconsistent Host answers · hidden schema pass in the revoke helper · lost audit rows for built-in accounts.
 
 ### Unresolved — must be decided or accepted before production
 | ID | Risk / open item | Impact | Current mitigation | Required before production |
@@ -446,10 +454,9 @@ R1 (trigger firing and `SECURITY DEFINER` privileges — proven live) · R5 (poo
 | **R10** | Dynamic clients can claim any name | phishing-style consent prompts | page says it is unverified and shows the real destination | accept, or restrict registration |
 | **CS** | `mcp_auth` limit 5 vs pool 3 per instance; several serverless instances can exhaust it (found when parallel test files hit `53300`) | `/mcp` and `/oauth/*` answer 503 under load | fails closed | pooled endpoint, per-instance pool of 1, limit sized from measured concurrency |
 | **PB** | All tests used the direct endpoint; behaviour of `set_config(…, true)`, prepared statements and role limits over PgBouncer is unproven | possible production-only failures | — | run the live suites against the pooled `mcp_auth` URL |
-| **LH** | Legal/HR approval of the consent wording (employee notice, monitoring disclosure, data-protection basis) | compliance | text matches the intended access model | written sign-off; text lives in `app/oauth/authorize/consent-form.tsx` |
+| **LH** | Legal/HR approval of the consent wording (employee notice, monitoring disclosure, data-protection basis). The current text promises prompt text "with sensitive values masked", which overclaims: the first release exposes prompt metadata only and masking is best-effort | compliance | text matches the Phase 2 access model; raw prompt text stays off | written sign-off **and** revised wording before raw text is enabled; text lives in `app/oauth/authorize/consent-form.tsx` |
 | **CV** | Claude's actual registration payload, revocation calls, `resource` and `iss` handling are unverified (design used researched, partly unverified behaviour) | connector may not complete | standards-compliant implementation | Phase 6 test with a real client |
 | **VE** | Production `NEXT_PUBLIC_SERVER_URL` / `MCP_PUBLIC_BASE_URL` not yet checked against the canonical domain | wrong audience or issuer | `MCP_PUBLIC_BASE_URL` is validated and independent | verify in Vercel before enabling |
-| **D4** | `mcp_reader` vs `ANALYST_DATABASE_URL` for tool data (Phase 4) | design | none (no tools) | decide before Phase 4 |
 | **R3** | `mcp_access_log` has no event allowlist | free-form event text in an append-only table | no prompt text, grants limit columns | add a `CHECK` when Phase 4 fixes the event set |
 | **R6** | Neon needs the role password in plaintext in the `CREATE/ALTER ROLE` statement | exposure if logged | scripts never print it; TLS | rotate the password if an apply fails |
 | **NR** | No `/mcp` rate limit yet | cost of a flood with well-formed tokens | malformed requests cost no database work | Phase 5 |
@@ -458,6 +465,10 @@ R1 (trigger firing and `SECURITY DEFINER` privileges — proven live) · R5 (poo
 | **SL** | One run of the negative suite hung ~18 minutes and never recurred in four reruns; cause unknown | CI flake | `--test-timeout` on `test:db` | watch for recurrence |
 | **AH** | Audit rows built-in accounts should have written before 2026-11-26 do not exist | audit history gap | fixed going forward | none (unrecoverable) |
 | **DL** | The shared database layer logs error code, ≤ 200 chars of message and SQL text (never parameters) | server-side error text in logs | by design, existing | none |
+| **PT** | Raw user and assistant prompt text is stored verbatim and **unmasked**: the shipped daemon (public copy, v1.3.1) uploads event text; the server stores it as-is in `session_turns.prompt_text_sanitized` (7 days) and `sync_sessions.events` (2 days); `sync_sessions.label` can carry the first prompt. No secret scrubbing was found in the daemon or the server. The column name is aspirational | secrets or personal data pasted into prompts sit in the database | nothing exposes it through MCP today; Phase 3 decisions 4 and 6 keep it off by default and file paths never exposed | metadata-only first; raw text only behind a default-off flag after privacy/legal approval; masking is best-effort and must be described that way |
+| **DV** | The daemon sources disagree: the copy in `bin/` forbids prompt fields in the sync payload, the built copy machines download uploads event text | root cause of PT | none | outside MCP scope: owner to decide which behaviour is intended and align the two |
+| **IX** | No index covers `session_turns (org_id, user_id, created_at)`; prompt-metadata queries by developer and time window may be slow on production-sized data | latency / load on a hot table | none; **no index will be created** until measured | measure with `EXPLAIN (ANALYZE, BUFFERS)` on a production-sized copy (P3-6); any index is a separate, approved migration |
+| **P3S** | Phase 3 adds a second database role, secret (`MCP_READER_DATABASE_URL`, proposed name) and connection pool | doubles the connection-budget problem (CS) | function-only role; pool sized small | size both roles together; validate over the pooled endpoint before production |
 
 ### Related, outside MCP scope (noticed along the way — not addressed here)
 - The git remote `company` embeds a credential in its URL (not rotated) — rotate it and re-add the remote without the secret.
@@ -475,6 +486,9 @@ Items marked **blocker** must be closed or explicitly accepted by the owner. Not
 - [ ] **blocker** Platform rate limiting configured for `/oauth/*` (R9)
 - [ ] **blocker** R2 mitigated or accepted in writing
 - [ ] **blocker** Production `NEXT_PUBLIC_SERVER_URL` / `MCP_PUBLIC_BASE_URL` verified (VE)
+- [ ] **blocker** (Phase 3) Privacy/legal written approval before raw prompt text is enabled; revised consent wording; the flag stays default-off until then (PT, LH)
+- [ ] **blocker** (Phase 3) `mcp_reader` role, `MCP_READER_DATABASE_URL`, shared connection budget and pooled-endpoint validation (P3S, CS, PB)
+- [ ] (Phase 3) Index decision taken from production-sized measurements; no index created without approval (IX)
 - [ ] R7, R10 accepted (or mitigated)
 - [ ] Neon backup branch of production created; maintenance window chosen
 - [ ] Migration dry run reviewed, then applied with explicit approval (8.2)
@@ -494,8 +508,100 @@ The test branch holds a **copy of production data** and test credentials. After 
 ## 15. Later phases
 | Phase | Scope |
 |---|---|
-| 3 | Data-level tenant authorization — scope every query to the principal's team (identity half already done) |
-| 4 | Read-only tools (list team developers, developer activity, developer sessions, session details, prompt search, prompt batch); max 7-day window, cursor pagination, masking of sensitive values, **no** arbitrary SQL and **no** write tools; the `mcp_reader` role; `mcp_access_log` event set (R3) |
+| 3 | **Tenant-isolated data-access layer** (approved 2026-11-26, [section 16](#16-phase-3-plan-and-decisions)): the function-only `mcp_reader` role, identity-bound database functions, typed services, masking engine, signed cursors, window and size limits, and cross-tenant isolation proofs. **No tools, no HTTP surface, `/mcp` capabilities stay empty.** Identity half already done in Phase 2 |
+| 4 | Read-only **tools** built on the Phase 3 services (list team developers, developer activity, developer sessions, session details, prompt metadata search, prompt batch); tool schemas, descriptions and result formatting; **no** arbitrary SQL and **no** write tools; prompt *text* only if the flag is on and privacy/legal approval exists; revised consent wording; the `mcp_access_log` event set (R3). Because text search needs raw text, "search" is metadata filtering until the flag is on |
 | 5 | Access logging for tool calls and `/mcp` rate limiting (NR) |
 | 6 | Integration and end-to-end test with a real Claude client (CV) |
 | 7 | Production rollout using [section 8](#8-operations-runbook-documented-not-executed) |
+
+---
+
+## 16. Phase 3 plan and decisions
+
+**Status (2026-11-26): P3-0 (decisions and documentation) is complete. No Phase 3 code, SQL, role or environment variable exists.** This section is the approved plan. Every later step stops at a review checkpoint and needs explicit approval. Throughout Phase 3: test branch only; no production access, no environment-variable changes, `MCP_ENABLED` untouched, nothing pushed or deployed.
+
+### 16.1 Objective, boundary and non-goals
+**Objective:** every read of team data by MCP code goes through one reviewed, least-privilege, read-only path whose tenant isolation is enforced **by the database itself** (not only by application queries), with size and window limits and best-effort masking — proven by cross-tenant tests before any tool exists.
+
+**Phase 3 delivers:** the `mcp_reader` login role, the minimal no-login owner role, identity-bound database functions, a reader connection pool and typed services, a masking engine, signed pagination cursors, window and size limits, an exact-privilege `--verify` for the new roles, a multi-tenant test fixture with planted canary values, updated guards and documentation.
+
+**Phase 3 does not deliver:** MCP tools, any change to what `/mcp` advertises (capabilities stay empty), any new HTTP route, access logging or `/mcp` rate limiting (Phase 5), testing with a real Claude client (Phase 6), or anything in production.
+
+**The Phase 3 / Phase 4 boundary (corrected — earlier text put the role in Phase 4):**
+
+| Concern | Phase 3 | Phase 4 |
+|---|---|---|
+| `mcp_reader` role, `mcp_data_owner`, data functions, reader pool | built and proven | consumed |
+| Services, masking engine, cursors, limits | built and proven | consumed |
+| Cross-tenant isolation proof | yes (service level, live on the test branch) | extended with HTTP end to end |
+| MCP tools (schemas, descriptions, result formatting) | no | yes |
+| `/mcp` capability discovery | unchanged (empty) | tools appear |
+| Raw prompt text | service support behind a default-off flag, tested with masking | exposed through a tool only after privacy/legal approval |
+| Consent wording | recorded as needing revision | revised before raw text can be enabled |
+| `mcp_access_log` event set (R3) | no | yes (logging itself is Phase 5) |
+
+### 16.2 Approved decisions (2026-11-26)
+| # | Decision | Consequences |
+|---|---|---|
+| 1 | **Dedicated `mcp_reader` role, separate from `analyst_login`.** `ANALYST_DATABASE_URL` is never used for MCP data. | Supersedes the original constraint that MCP data retrieval use `ANALYST_DATABASE_URL`. Reasons in 16.3 (finding 2). |
+| 2 | **Identity-bound `SECURITY DEFINER` functions with minimal ownership privileges.** | Three principals: `mcp_auth` (exists), `mcp_data_owner` (no login; owns the functions; read-only column grants on exactly what they read), `mcp_reader` (login; `EXECUTE` on the functions only; no table privileges). Each function takes the caller's token hash, re-validates token, user, team and client with the Phase 2 eligibility rule, and derives the team inside the database. No function accepts a team id. Pinned `search_path`, no dynamic SQL, `EXECUTE` revoked from `PUBLIC`. A leaked reader credential cannot run arbitrary SQL or name another team. |
+| 3 | **Strict `sync_sessions.team_id` matching plus current team membership.** | A session is visible to an admin only if its `team_id` equals the admin's team **and** the developer is currently in `team_members` for that team. Applied to prompts through the four-key join and to daily rollups through `team_id` plus membership. The dashboard's looser rule (`team_id = team OR member in team`) is unchanged and is **not** used by MCP. Ingest assigns each session to the member's *earliest* team, so for a developer in several teams the admins of the later teams see none of that developer's sessions through MCP (the dashboard may still show them). |
+| 4 | **Metadata-only prompt access initially.** Raw prompt text stays behind a **default-off feature flag** (proposed name `MCP_PROMPT_TEXT_ENABLED`) **pending privacy/legal approval**. **Masking is best-effort.** | Prompt metadata means: ids, session reference, turn index, timestamps, character length, the code/path/traceback flags, intent category, tool, model, and the token counts of the answering turn — never text. Text search is unavailable until the flag is on, so the Phase 4 "search" tool filters on metadata only at first. Masking is described everywhere as best-effort and fails closed (if masking cannot be applied safely, return metadata only). The consent wording must be revised before raw text can be enabled (LH, PT). |
+| 5 | **Measure index performance on a production-sized copy. No index is created yet.** | Measurement happens in P3-6 with `EXPLAIN (ANALYZE, BUFFERS)`. The candidate (`session_turns (org_id, user_id, created_at)`) is **not approved**; any index is a separate migration (`CREATE INDEX CONCURRENTLY`) that needs its own approval and evidence (IX). |
+| 6 | **Session file paths are never exposed.** | No function, service or tool may return `sync_session_files.path`, `daily_member_files.path` or any path-bearing column or field. Counts such as "files touched" are allowed. Enforced by an excluded-column policy and a static guard. |
+| 7 | **A fresh test branch will be provided before P3-4.** | Until then there is no live database work: P3-1 to P3-3 are DB-free or written-not-applied. The previous test branch credentials were removed during cleanup. |
+
+### 16.3 Findings behind the decisions (read from the code, 2026-11-26)
+1. **Raw prompt text is stored and nothing masks it.** The shipped daemon (the built copy that machines download, v1.3.1) uploads user and assistant message text; the server stores `userEvent.text` verbatim in `session_turns.prompt_text_sanitized` (retained 7 days) and the events in `sync_sessions.events` (nulled after 2 days). `sync_sessions.label` can carry the first prompt. No secret scrubbing was found in the daemon or the server; the column name is aspirational. The source daemon in `bin/` forbids prompt fields, so the two copies disagree (DV).
+2. **The analyst role cannot serve MCP.** Its grants exclude prompt text, **include** `redundant_reprompt_events` (which `MCP_EXCLUDED_TABLES` forbids for MCP), are global across tenants by design (superadmin chat), and its connection limit is 3.
+3. **Existing visibility differs by surface.** The team-admin prompts API uses the looser OR rule; ingest tags each session with the member's earliest team; so the rules must be chosen explicitly for MCP (decision 3).
+4. **Tenant keys are inconsistent.** Session and daily tables use `team_id` / `member_id` UUIDs; `session_turns` uses `org_id` / `user_id` text copies without foreign keys, so every join must use the full four-key identity (session id, org, user, tool).
+5. **Retention** (turns 7 days, events 2 days, sessions 14 days) matches the 7-day maximum query window.
+6. **Indexes:** `sync_sessions` and the daily tables are well indexed for team, member and time; `session_turns` has no index on `(org_id, user_id, created_at)` (decision 5). Live index facts still have to be confirmed on the fresh test branch.
+
+### 16.4 Approved design (to be built — nothing below exists yet)
+- **Scope derivation.** The principal carries the token's SHA-256 hash (never the plaintext token). A function validates it against the identity tables, applies the same eligibility predicate as bearer authentication (active, role `admin`, team exists, client enabled, token live), and returns the team. A token revoked between the bearer check and the data call makes the next call refuse. A test will run the same state matrix through the TypeScript predicate and the SQL one to catch drift.
+- **No session-level state.** Scoping uses function arguments, not session settings, so it does not depend on `SET LOCAL` surviving connection pooling.
+- **Functions (names tentative):** list team developers; developer activity (daily rollups); list developer sessions; session details (aggregates only); prompt metadata search; prompt batch (metadata, or text only when the flag is on).
+- **Never exposed:** credentials and keys (`users` password hash, API keys, `member_keys`), `audit_log`, auth tables, `sync_sessions.events`, `sync_sessions.label`, `sync_sessions.payload_hash`, any file path, `prompt_embeddings`, the tables in `MCP_EXCLUDED_TABLES`, and the cross-organisation `daily_org_*` tables.
+- **Limits (proposed defaults, fixed at the P3-1 review):** query window at most 7 days (enforced in the database too); page size 50; batch size 20; when the flag is on, prompt text snippets at most 2,000 characters; statement timeout and a response-size cap. Cursors are HMAC-signed, opaque, and bound to principal, query filters and expiry. An id belonging to another team gets the same "not found" as one that does not exist.
+- **Masking engine (best-effort).** Pattern-based redaction of common secret shapes (API keys, bearer tokens and JWTs, private-key blocks, connection strings, environment-style secret assignments, e-mail addresses, and similar), with linear-time patterns, input length caps, and a measured corpus. It reduces risk; it **cannot guarantee** that no secret survives, and it is documented that way. It is used only when the text flag is on.
+- **Untrusted content.** Stored prompts are data written by developers and will be read by an LLM; results are to be marked as untrusted data, stripped of control characters, and length-capped. Indirect prompt injection is a documented residual risk.
+- **Planned new configuration (proposed names; not in the configuration table because no code reads them yet):** `MCP_READER_DATABASE_URL` (secret; must connect as `mcp_reader`; missing means the data layer fails closed) and `MCP_PROMPT_TEXT_ENABLED` (default off).
+- **Planned files** (for orientation; none exist):
+
+```
+scripts/migrations/mcp-data.sql            + rollback   (schema, functions, roles' privileges; written first, applied to a test branch only)
+scripts/migrate-mcp-data.mjs                             (runner modelled on the existing migration runner)
+lib/mcp/data/   db, scope, masking, cursor, limits, errors, developers, activity, sessions, prompts
+lib/mcp/grants.json, scripts/setup-mcp-roles.mjs         (extended for the two new roles; exact-match --verify)
+tests/          masking, cursors, SQL guards, live isolation fixture, concurrency, drift guards
+```
+  Existing files to be modified later: the principal and token types (adds the token hash), the foundation guards (split into identity modules and data modules with separate table allow-lists), the excluded-table policy (adds excluded columns), the documentation drift guard, the package test lists.
+
+### 16.5 Implementation sequence and checkpoints
+Each step is a small local commit, tested (`tsc`, ESLint, unit; live tests from P3-4), followed by a review stop. Nothing proceeds without approval.
+
+| Step | Scope | Review stop | Status |
+|---|---|---|---|
+| **P3-0** | Decisions and documentation (this section; phase boundary corrected) | decisions recorded | **done 2026-11-26** |
+| P3-1 | Contracts, DB-free: types, limits, scope and cursor handling, error taxonomy, excluded-column policy, guards | contracts and limits | planned |
+| P3-2 | Masking engine with its corpus and performance tests | **privacy review** | planned |
+| P3-3 | SQL **written, not applied**: migration, rollback, grants, role-script generalisation, static SQL checks | **security review of the SQL** | planned |
+| P3-4 | Apply on the **fresh test branch** (decision 7), provision the roles, `--verify`, live cross-tenant isolation fixture | results shown before continuing | planned |
+| P3-5 | Reader pool and services, token hash in the principal, live tests | integration | planned |
+| P3-6 | Hardening: fuzzing, concurrency, revocation mid-flight, dashboard parity, `EXPLAIN` on a production-sized copy, index recommendation (no index created) | measurements | planned |
+| P3-7 | Documentation consolidation, risk register, runbook additions for the data plane | final review | planned |
+
+### 16.6 Testing strategy (summary)
+- **Unit, DB-free:** masking (positive and negative corpus, long inputs), cursors, limits, error mapping, static analysis of the SQL (no dynamic `EXECUTE`, only allow-listed tables and columns, no excluded column, no path), guards and drift tests.
+- **Live, fresh test branch only:** three teams including a developer in several teams, with canary strings in every table. For every function, every principal's results contain only its own canaries. Fuzzed ids, cursors, dates and injection-like strings. A role matrix proving `mcp_reader` cannot read any table (`42501`). Revocation mid-flight. Concurrent waves of different principals. Parity of the numbers with the dashboard's own computation. TypeScript versus SQL eligibility drift.
+- **End to end:** a service-level harness (issued token → services → assertions). HTTP end to end belongs to Phase 4, when tools exist.
+
+### 16.7 Open items and dependencies for Phase 3
+- A fresh test branch and `TEST_*` variables before P3-4 (decision 7).
+- Privacy/legal approval, and revised consent wording, before raw prompt text can be enabled (PT, LH); the flag stays off until then.
+- Index decision after measurement (IX); no index until approved.
+- Production additions once built: second role and secret, connection budget shared with `mcp_auth`, pooled-endpoint validation (P3S, CS, PB).
+- Daemon divergence (DV) is outside MCP scope but is the root cause of PT.
+- Phase 4 must define the metadata-only "search" semantics, and the result caps per tool.
