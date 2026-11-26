@@ -22,10 +22,10 @@ Last updated: 2026-11-26. This is the single reference for the whole program (Ph
 | 0 | Read-only audit of the app, database and auth model (no code) | done |
 | 1 | Stateless MCP endpoint `/mcp`: handshake and capability discovery, empty capabilities, feature flag, Host/Origin guards | done |
 | 2 | OAuth 2.1 authorization server (discovery, dynamic client registration, authorize + consent, token, refresh rotation, revoke), bearer authentication on `/mcp`, least-privilege database role, revocation on every account change, nightly retention, end-to-end and negative test suites (steps 1–10) | done |
+| 3 | Tenant-isolated data-access layer: `mcp_reader` role, identity-bound SQL functions, dedicated reader pool, authenticated principal with unforgeable `tokenHash`, typed metadata-only services, AES-256-GCM sealed references & signed cursors, strict budget packing (24 KiB), adversarial fuzzing, concurrency and revocation hardening (P3-0 through P3-7) | done |
 
 ### Not built yet (by design — see [Later phases](#15-later-phases))
-- **No tools, resources or prompts exist.** `/mcp` authenticates callers and then advertises empty capabilities. No tenant, session or prompt data is reachable through MCP.
-- **Phase 3 (tenant-isolated data-access layer)** — planned and approved, **not started in code**: P3-0 (decisions and documentation) is done; no Phase 3 code, SQL, role or environment variable exists. The identity half of tenant isolation is done (the principal is an active database admin of an existing team, re-read on every request). Phase 3 adds the data half — the `mcp_reader` role, identity-bound database functions, services, masking, cursors and limits — and still has **no tools and no HTTP surface** ([section 16](#16-phase-3-plan-and-decisions)).
+- **No tools, resources or prompts exist.** `/mcp` authenticates callers and then advertises empty capabilities. Tools are exposed in Phase 4.
 - Phase 4 read-only tools (built on the Phase 3 services), Phase 5 access logging and `/mcp` rate limiting, Phase 6 test with a real Claude client, Phase 7 production rollout.
 
 ### Production-readiness blockers (NOT completed — all must be closed or explicitly accepted before `MCP_ENABLED=true` in production)
@@ -57,18 +57,37 @@ Claude (hosted connector, Claude Code)
         ▼
 Next.js app (Vercel, Node runtime)
   proxy.ts ........... session refresh; CSRF check for /api/* only (OAuth routes carry their own checks)
-  lib/mcp/handler.ts . flag → config → canonical Host → Origin → bearer → SDK handler → per-request server (no tools)
-  lib/mcp/oauth/* .... OAuth logic: crypto/PKCE, redirect rules, endpoints, consent, tokens, clients, rate limits
-  two database paths:
+  lib/mcp/handler.ts . flag → config → canonical Host → Origin → bearer → SDK handler → per-request server (empty capabilities)
+  lib/mcp/oauth/* .... OAuth logic: crypto/PKCE, redirect rules, endpoints, consent, tokens, clients, rate limits, principal derivation
+  lib/mcp/data/* ..... Data layer: reader pool, unforgeable scope, 6 metadata-only data services, sealed refs, signed cursors, budgets
+  three database paths:
      mcp_auth pool (lib/mcp/db.ts) ............ ALL runtime OAuth and bearer work; least privilege
+     mcp_reader pool (lib/mcp/data/db.ts) ..... ALL runtime data service calls; functions only, read-only
      application owner connection (lib/team/db.ts) .. only: revoke hooks, nightly purge, the shared audit writer
         │
         ▼
-Neon Postgres: oauth_clients · oauth_authorization_codes · oauth_tokens · mcp_rate_limits · mcp_access_log
-               mcp_audit_event() · mcp_oauth_purge() · guard triggers      + the existing app tables (read-only subset for mcp_auth)
+Neon Postgres:
+  Identity plane: oauth_clients · oauth_authorization_codes · oauth_tokens · mcp_rate_limits · mcp_access_log
+                  mcp_audit_event() · mcp_oauth_purge() · guard triggers
+  Data plane:     schema mcp_data (owned by mcp_data_owner)
+                  6 functions: list_developers, developer_activity, list_sessions, session_details, search_prompt_metadata, prompt_metadata_batch
+                  All functions identity-bound: derive tenant internally via _resolve_scope(p_token) from token hash
 ```
 
-**Identity plane vs data plane.** `mcp_auth` is the *identity* role: it can run the OAuth/bearer flows and read just enough of `users` and `teams` to decide who a token belongs to. It has **no** privilege on prompts, sessions, audit logs, members or any analytics table. A separate read-only *data* role, `mcp_reader`, is designed for Phase 4 and does not exist.
+**Identity plane vs data plane.**
+- `mcp_auth` is the *identity* role: it can run the OAuth/bearer flows and read just enough of `users` and `teams` to decide who a token belongs to. It has **no** privilege on prompts, sessions, audit logs, members or any analytics table.
+- `mcp_reader` is the *data* role: it connects to the database via `MCP_READER_DATABASE_URL` with connection limit 5. It holds **zero table privileges** across the entire database; it only holds `USAGE` on schema `mcp_data` and `EXECUTE` on the 6 approved identity-bound functions.
+- `mcp_data_owner` is the *function owner* role (`NOLOGIN`): owns schema `mcp_data` and the 6 `SECURITY DEFINER` functions; holds strictly column-level `SELECT` grants on the exact columns needed to project metadata. A flaw inside a function is bounded by these grants.
+- `ANALYST_DATABASE_URL` is never used for MCP.
+
+**Complete Request Lifecycle (OAuth to Data Service):**
+1. **Bearer Authentication:** Client requests `POST /mcp` with `Authorization: Bearer tt_at_...`.
+2. **Identity Verification & Hash Derivation:** Server parses bearer token, validates SHA-256 hash against `oauth_tokens` via `mcp_auth` pool (`authenticateAccessToken`). Verifies token is not expired, not revoked (`revoked_at IS NULL`), associated client is not disabled, and user is an active team admin. Server extracts `tokenHash: Uint8Array(32)`.
+3. **Principal & Scope Construction:** Server constructs unforgeable `TeamAdminPrincipal` containing server-derived `tokenHash`. Constructs `DataScope` storing `tokenHash` in a module-private registry (`WeakMap`). No client-supplied team ID, user ID, or role is accepted or trusted.
+4. **Data Service Execution:** Service function (e.g. `listSessions`, `searchPromptMetadata`) decodes any input cursors/references using AES-256-GCM bound to `teamId`. Acquires client from dedicated `mcp_reader` pool with 5s acquisition timeout.
+5. **Database Transaction:** Runs `BEGIN READ ONLY` with strict session limits (`statement_timeout = 5000`, `search_path = 'pg_catalog, pg_temp'`). Calls SQL function passing `tokenHash`.
+6. **SQL Scope Resolution:** Function calls `mcp_data._resolve_scope(p_token)` which matches `p_token = ot.token_hash` in `oauth_tokens`, verifies `ot.revoked_at IS NULL` and user eligibility, and returns the verified `v_team`.
+7. **Projection & Sanitization:** SQL function filters strictly on `team_id = v_team`. Service applies allowlist projection, strips all unapproved fields, validates via `assertMetadataOnly`, seals session/prompt IDs into opaque references, packs within 24 KiB budget, and returns result. Connection is released back to pool.
 
 **Design principles** (each is enforced by tests, not just convention):
 - **Stateless.** Nothing about a user is cached between requests; the SDK handler is shared but holds no per-user state; the principal reaches the per-request server through a request-scoped `AsyncLocalStorage` that fails closed.
@@ -214,11 +233,24 @@ Plus `USAGE` on sequence `mcp_access_log_id_seq` and `EXECUTE` on `mcp_audit_eve
 
 **Verification:** `node scripts/setup-mcp-roles.mjs --verify` (using `MCP_AUTH_DATABASE_URL`) compares the live role to `grants.json` by catalog across **all** non-system schemas (including views), checks attributes, memberships, sequences, schema privileges and executable functions, and runs real denial probes that must fail with `42501` (e.g. `password_hash`, `members`, `session_turns`, `audit_log`, `DELETE oauth_tokens`, direct `INSERT audit_log`). It also checks the effective `search_path`.
 
-### Role `mcp_reader` — approved design (Phase 3; does not exist yet)
-Decided 2026-11-26 ([section 16](#16-phase-3-plan-and-decisions)). Three database principals will serve MCP; only the first exists today.
+### Role `mcp_reader` & `mcp_data_owner` — exact privileges (`lib/mcp/grants.json`)
+Decided 2026-11-26 ([section 16](#16-phase-3-plan-and-decisions)). Three database principals serve MCP:
 - **`mcp_auth`** (exists) — the identity plane described above.
-- **`mcp_data_owner`** (planned) — `NOLOGIN`, owns the data functions, holds read-only **column** grants on exactly the columns the functions read, and nothing else. A bug inside a function is therefore bounded by these grants, not by the database owner's rights.
-- **`mcp_reader`** (planned) — the data-plane login. **No table privileges at all**: `USAGE` on one dedicated schema and `EXECUTE` on a handful of fixed functions, read-only by default, short statement timeout, its own connection limit. It cannot run arbitrary SQL even if its credential leaks.
+- **`mcp_data_owner`** — `NOLOGIN`, owns schema `mcp_data` and the 6 `SECURITY DEFINER` functions; holds read-only **column** grants on exactly the columns the functions read, and nothing else:
+  - `public.users`: `id, display_name, role, team_id, active`
+  - `public.teams`: `id, name`
+  - `public.team_members`: `team_id, member_id`
+  - `public.sync_sessions`: `id, team_id, member_id, source, model, started_at, ended_at, activity_at, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, api_cost, priced, edits, additions, deletions, changed_lines, files_touched, tool_calls, tool_errors, rework_loops, corrections, abandoned`
+  - `public.daily_member_usage`: `day, team_id, member_id, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, api_cost, session_count, tool_calls, tool_errors, edits, additions, deletions, changed_lines, files_touched, rework_loops, corrections, abandoned_count`
+  - `public.session_turns`: `id, sync_session_id, org_id, user_id, turn_index, created_at, tool, model, prompt_char_len, has_code_block, has_file_path, has_traceback, intent_category, answer_input_tokens, answer_output_tokens, answer_cache_read_tokens, answer_cache_write_tokens`
+  - `public.oauth_tokens`: `token_hash, user_id, client_id, scope, expires_at, revoked_at`
+  - `public.oauth_clients`: `client_id, disabled_at`
+- **`mcp_reader`** — the data-plane login. **No table privileges at all**:
+  - Attributes: `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT CONNECTION LIMIT 5`.
+  - Schema privilege: `USAGE ON SCHEMA mcp_data`.
+  - Executable privilege: `EXECUTE` on the 6 functions: `list_developers`, `developer_activity`, `list_sessions`, `session_details`, `search_prompt_metadata`, `prompt_metadata_batch`.
+  - Role defaults: `statement_timeout 5s`, `lock_timeout 2s`, `idle_in_transaction_session_timeout 10s`, `search_path 'pg_catalog', 'pg_temp'`, `default_transaction_read_only = on`.
+  - Revocations: `EXECUTE` on all functions in `mcp_data` revoked from `PUBLIC`. Zero table/view/sequence privileges across all schemas.
 
 It is deliberately **not** `analyst_login`: the analyst role's grants exclude prompt text, include a table that `MCP_EXCLUDED_TABLES` forbids for MCP, are global across tenants, and carry a connection limit of 3. `ANALYST_DATABASE_URL` is never used for MCP data. The functions are identity-bound: each takes the caller's token hash, re-validates the token, user, team and client inside the database with the same eligibility rule as bearer authentication, and derives the team itself — no function accepts a team id from the caller.
 
@@ -299,21 +331,32 @@ CONFIRM_MCP_MIGRATION=yes EXPECTED_ENDPOINT=<prod-endpoint-id> node --env-file=<
 ```
 Expect: 5 tables, 5 functions, 4 foreign keys (only to `users` and `oauth_clients`), 3 triggers, no function executable by `PUBLIC`. The runner never prints the connection string and verifies TLS.
 
-### 8.3 Role provisioning
-```
+### 8.3 Role provisioning & Data plane setup
+```bash
 # Print the SQL that would run (connects to nothing)
-node scripts/setup-mcp-roles.mjs
+node scripts/setup-mcp-roles.mjs --role=mcp_auth
+node scripts/setup-mcp-roles.mjs --role=mcp_reader
 
-# Create/refresh the role (password ≥ 24 printable ASCII from the environment, e.g. openssl rand -hex 24)
-MCP_AUTH_PASSWORD=<generated> CONFIRM_MCP_ROLES=yes EXPECTED_ENDPOINT=<prod-endpoint-id> node --env-file=<owner-env-file> scripts/setup-mcp-roles.mjs --apply
+# Create/refresh mcp_auth role (password ≥ 24 printable ASCII from environment)
+MCP_AUTH_PASSWORD=<generated> CONFIRM_MCP_ROLES=yes EXPECTED_ENDPOINT=<prod-endpoint-id> \
+  node --env-file=<owner-env-file> scripts/setup-mcp-roles.mjs --role=mcp_auth --apply
 
-# Verify the live role matches grants.json exactly (exit code non-zero on any FAIL)
-MCP_AUTH_DATABASE_URL=<mcp_auth connection string> node scripts/setup-mcp-roles.mjs --verify
+# Create/refresh mcp_reader role and apply database defaults
+MCP_READER_PASSWORD=<generated> CONFIRM_MCP_ROLES=yes EXPECTED_ENDPOINT=<prod-endpoint-id> \
+  node --env-file=<owner-env-file> scripts/setup-mcp-roles.mjs --role=mcp_reader --apply
+
+# Apply Phase 3 data schema and grants (owner connection)
+CONFIRM_MCP_MIGRATION=yes EXPECTED_ENDPOINT=<prod-endpoint-id> \
+  node --env-file=<owner-env-file> scripts/migrate-mcp-oauth.mjs
+
+# Verify the live roles match grants.json exactly (exit code non-zero on any FAIL)
+MCP_AUTH_DATABASE_URL=<mcp_auth connection string> node scripts/setup-mcp-roles.mjs --role=mcp_auth --verify
+MCP_READER_DATABASE_URL=<mcp_reader connection string> node scripts/setup-mcp-roles.mjs --role=mcp_reader --verify
 ```
-Neon needs the plaintext password in the statement; if an apply fails, rotate the password. Build `MCP_AUTH_DATABASE_URL` as `postgresql://mcp_auth:<password>@<host>/<db>?sslmode=require`. Before go-live decide direct vs pooled host and pool/limit sizing (blockers 2 and 3).
+Neon needs the plaintext password in the statement; if an apply fails, rotate the password. Build connection strings with `?sslmode=require`.
 
 ### 8.4 Environment variables (Vercel → Production)
-Add `MCP_AUTH_DATABASE_URL` (sensitive) and `MCP_PUBLIC_BASE_URL=https://token-tracer-three.vercel.app`. Optionally `MCP_ALLOWED_HOSTS`, `MCP_ALLOWED_ORIGINS`. **Leave `MCP_ENABLED` unset.** Vercel applies environment changes on the next deployment.
+Add `MCP_AUTH_DATABASE_URL` (sensitive), `MCP_READER_DATABASE_URL` (sensitive), and `MCP_PUBLIC_BASE_URL=https://token-tracer-three.vercel.app`. Optionally `MCP_ALLOWED_HOSTS`, `MCP_ALLOWED_ORIGINS`. **Leave `MCP_ENABLED` unset.** Vercel applies environment changes on the next deployment.
 
 ### 8.5 Deploy with the flag off, then verify
 Push and deploy the MCP commits. With `MCP_ENABLED` unset, verify: `/mcp`, `/.well-known/oauth-*` and every `/oauth/*` route return **404**; normal login, password reset, role/team edits and the nightly cron behave as before (the revoke hooks and the purge now find the tables and function and act on them).
@@ -339,14 +382,25 @@ Push and deploy the MCP commits. With `MCP_ENABLED` unset, verify: `/mcp`, `/.we
 1. **Switch off** — unset `MCP_ENABLED`, redeploy. Reversible; nothing is lost. If any compromise is suspected, also revoke all tokens (8.7).
 2. **Revoke** — the owner `UPDATE` above. Reversible by re-authorizing.
 3. **Code rollback** — redeploy the previous Vercel deployment or `git revert` the MCP commits ([section 10](#10-implementation-history)). The database objects are ignored by older code. **Revoke tokens first**: older code has no revoke hooks, so password resets would stop ending MCP access.
-4. **Database rollback** — destructive for the five new tables only:
+4. **Data-plane database rollback** — drops schema `mcp_data`, functions and owner grants without affecting OAuth (`scripts/migrations/mcp-data.rollback.sql` via owner connection):
+   ```bash
+   CONFIRM_MCP_MIGRATION=yes CONFIRM_MCP_ROLLBACK_DATA_LOSS=yes EXPECTED_ENDPOINT=<prod-endpoint-id> \
+     node --env-file=<owner-env-file> scripts/migrate-mcp-oauth.mjs --rollback
    ```
+5. **OAuth database rollback** — destructive for the five OAuth tables:
+   ```bash
    CONFIRM_MCP_MIGRATION=yes CONFIRM_MCP_ROLLBACK_DATA_LOSS=yes EXPECTED_ENDPOINT=<prod-endpoint-id> \
      node --env-file=<owner-env-file> scripts/migrate-mcp-oauth.mjs --rollback
    ```
    The runner prints the row counts it will destroy and refuses without the data-loss confirmation. All issued tokens, codes and clients are lost (connectors must re-register); `mcp_access_log` is dropped (export it first if needed). **`audit_log` rows with action `mcp.*` are never removed.** Nothing existing references the new objects; no `CASCADE` is used. Remove the app's connection first (step 1) so nothing is connected while tables disappear.
-5. **Role removal** — `CONFIRM_MCP_ROLES=yes EXPECTED_ENDPOINT=<prod-endpoint-id> node --env-file=<owner-env-file> scripts/setup-mcp-roles.mjs --drop`. Order relative to step 4 does not matter.
-6. **Environment cleanup** — remove `MCP_AUTH_DATABASE_URL`, `MCP_PUBLIC_BASE_URL` and the optional variables from Vercel.
+6. **Role removal** —
+   ```bash
+   CONFIRM_MCP_ROLES=yes EXPECTED_ENDPOINT=<prod-endpoint-id> \
+     node --env-file=<owner-env-file> scripts/setup-mcp-roles.mjs --role=mcp_reader --drop
+   CONFIRM_MCP_ROLES=yes EXPECTED_ENDPOINT=<prod-endpoint-id> \
+     node --env-file=<owner-env-file> scripts/setup-mcp-roles.mjs --role=mcp_auth --drop
+   ```
+7. **Environment cleanup** — remove `MCP_AUTH_DATABASE_URL`, `MCP_READER_DATABASE_URL`, `MCP_PUBLIC_BASE_URL` and the optional variables from Vercel.
 
 Because the revoke helper and the cron purge check the catalog first, the app keeps working at every rollback level, including after step 4. The nightly purge simply reports `skipped`.
 
@@ -574,7 +628,7 @@ The test branch holds a **copy of production data** and test credentials. After 
 
 ```
 scripts/migrations/mcp-data.sql            + rollback   (schema, functions, roles' privileges; written first, applied to a test branch only)
-scripts/migrate-mcp-data.mjs                             (runner modelled on the existing migration runner)
+scripts/migrate-mcp-oauth.mjs                             (runner modelled on the existing migration runner)
 lib/mcp/data/   db, scope, cursor, limits, errors, developers, activity, sessions, prompts   (masking.ts exists but is isolated and out of scope, see 16.9)
 lib/mcp/grants.json, scripts/setup-mcp-roles.mjs         (extended for the two new roles; exact-match --verify)
 tests/          cursors, SQL guards, live isolation fixture, concurrency, drift guards
@@ -593,7 +647,7 @@ Each step is a small local commit, tested (`tsc`, ESLint, unit; live tests from 
 | P3-4 | Role provisioning generalised (`setup-mcp-roles.mjs`), regression suite, PUBLIC privilege analysis, managed-host compatibility | security review | **done 2026-11-26** (16.11) |
 | P3-5 | Reader pool and services, token hash in the principal, live tests | integration | **done 2026-11-26** (16.12) |
 | P3-6 | Hardening: fuzzing, concurrency, revocation mid-flight, dashboard parity, `EXPLAIN` on a production-sized copy, index recommendation (no index created) | measurements | **done 2026-11-26** (16.13) |
-| P3-7 | Documentation consolidation, risk register, runbook additions for the data plane | final review | planned |
+| P3-7 | Documentation consolidation, risk register, runbook additions for the data plane | final review | **done 2026-11-26** (16.14) |
 
 ### 16.6 Testing strategy (summary)
 - **Unit, DB-free:** cursors, limits, error mapping, static analysis of the SQL (no dynamic `EXECUTE`, only allow-listed tables and columns, no excluded column, no path), guards and drift tests.
@@ -785,4 +839,22 @@ Files: `scripts/migrations/mcp-data.sql` (roles, schema, functions), `scripts/mi
   - *MCP Data Layer* (`scripts/migrations/mcp-data.sql`) uses strict AND scoping per Phase 3 approved Decision 3: `ss.team_id = v_team AND ss.member_id IN (SELECT tm.member_id FROM public.team_members tm WHERE tm.team_id = v_team)`.
   - Impact: For developers belonging to multiple teams, the dashboard shows sessions across all of their teams to any team admin; MCP strictly enforces that only sessions tagged with `team_id = admin_team` AND where the developer is currently in `team_members` are visible.
 - Token counting parity: MCP returns raw recorded database column values without synthetic approximation heuristics (`EFF_IN` / `EFF_OUT`).
+
+### 16.14 P3-7 documentation consolidation and operational runbook (complete, 2026-11-26)
+
+**1. Architectural Consolidation**
+- Updated Sections 1, 2, and 5 to document the complete end-to-end MCP data plane architecture.
+- Detailed the multi-role model (`mcp_auth` on identity plane, `mcp_reader` on data plane, `mcp_data_owner` as non-login function owner).
+- Documented the full request lifecycle from bearer challenge to AES-256-GCM reference sealing and budget enforcement.
+
+**2. Operational Runbook & Migration Guide**
+- Consolidated Section 8 into an operational runbook.
+- Added step-by-step commands for role provisioning (`scripts/setup-mcp-roles.mjs` for `mcp_auth` and `mcp_reader`).
+- Added data plane migration commands (`scripts/migrations/mcp-data.sql`), verification probes (`--verify`), and rollback procedures.
+- Clearly separated zero-data-loss procedures (switch off, revoke) from destructive data rollbacks.
+
+**3. Risk Register & Production Readiness**
+- Confirmed zero schema modifications or indexes applied to production or test databases.
+- Preserved all baseline commits: P3-3 `60bbe11`, P3-4 `a882805`, P3-5 `171a087`, P3-6 `9bbd7f9`.
+- Verified that all quality gates (unit tests, TypeScript compilation, ESLint, documentation drift guards) pass with 0 errors.
 
