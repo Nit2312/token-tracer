@@ -268,10 +268,11 @@
       "mcp_data._resolve_scope(bytea)",
       "mcp_data._session_rows(uuid, uuid, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid)",
       "mcp_data._prompt_rows(uuid, bigint[], uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint)"
-    ]
+    ],
+    "roleMarker": "mcp-data v1: created by scripts/migrations/mcp-data.sql"
   },
   "mcp_reader": {
-    "_comment": "LOGIN role for the data plane. NO table, sequence or column privilege anywhere (every read of a table is a 42501). USAGE on schema mcp_data and EXECUTE on the six reader functions only; the helpers are not executable by it. Every function derives the team from the token hash. Read-only by default (default_transaction_read_only). Connection limit is a proposal pending connection sizing (CS).",
+    "_comment": "LOGIN role for the data plane. NO table, sequence or column privilege anywhere (every read of a table is a 42501). USAGE on schema mcp_data and EXECUTE on the six reader functions only; the helpers are not executable by it. Every function derives the team from the token hash. Read-only by default (default_transaction_read_only), which is a DEFAULT a session may override: the real boundary is the absence of privileges. Privileges inherited through PUBLIC cannot be removed per role; grants.sql FAILS CLOSED if they give the role any table, schema-CREATE or extra SECURITY DEFINER access, and mcp-data.audit.sql reports them. Connection limit is a proposal pending connection sizing (CS). search_path is a LIST: each schema is its own quoted element.",
     "schemaUsage": [
       "mcp_data"
     ],
@@ -293,7 +294,10 @@
       "statement_timeout": "5000",
       "lock_timeout": "2000",
       "idle_in_transaction_session_timeout": "10000",
-      "search_path": "pg_catalog, pg_temp",
+      "search_path": [
+        "pg_catalog",
+        "pg_temp"
+      ],
       "default_transaction_read_only": "on"
     }
   }

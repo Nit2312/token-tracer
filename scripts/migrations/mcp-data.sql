@@ -1,7 +1,26 @@
--- MCP data plane (Phase 3, P3-3). WRITTEN FOR REVIEW — NOT APPLIED ANYWHERE. Touches no existing table, row, column or privilege.
--- Creates: the NOLOGIN role mcp_data_owner, the schema mcp_data, and 13 functions (6 callable by mcp_reader, 7 internal helpers).
--- Grants are NOT here: scripts/migrations/mcp-data.grants.sql owns them (and lib/mcp/grants.json is their source of truth).
--- Run as the schema OWNER (the app's owner role) inside ONE transaction, on a TEST BRANCH first. Requires PostgreSQL 16 or later.
+-- MCP data plane (Phase 3, P3-3, revision 2). WRITTEN FOR REVIEW — NOT APPLIED ANYWHERE. Touches no existing table, row, column or privilege.
+-- Creates: the NOLOGIN role mcp_data_owner (or validates an exactly-matching pre-existing one), the schema mcp_data, and 13 functions
+-- (6 callable by mcp_reader, 7 internal helpers). Privileges are NOT here: scripts/migrations/mcp-data.grants.sql owns them (lib/mcp/grants.json is
+-- the source of truth). Rollback: scripts/migrations/mcp-data.rollback.sql. Read-only effective-privilege report: scripts/migrations/mcp-data.audit.sql.
+--
+-- TRANSACTION BOUNDARY (enforced by this file, not just documented)
+--  * Run as the schema OWNER's LOGIN role, in ONE explicit transaction: BEGIN; \i mcp-data.sql; COMMIT;  (psql: --single-transaction with
+--    ON_ERROR_STOP=1; or the future runner's BEGIN/COMMIT). Requires PostgreSQL 16 or later.
+--  * SET LOCAL ROLE has NO effect outside a transaction block, and a function created while it silently had no effect would be owned by the
+--    application owner role (and, being SECURITY DEFINER, would run with ITS rights). So the first two statements prove the transaction: a LOCAL
+--    setting must survive from one statement to the next, otherwise the script stops before changing anything. After SET LOCAL ROLE an assertion
+--    proves current_user really is mcp_data_owner, and a final assertion proves every object in mcp_data is owned by it.
+--  * Everything (role creation, its marker comment, the temporary membership, the schema, the functions) commits or rolls back TOGETHER.
+--
+-- ROLE HANDLING
+--  * mcp_data_owner is created here if absent and marked (COMMENT ON ROLE) so a rollback knows this migration created it.
+--  * If it already exists it must match EXACTLY: NOLOGIN, no attributes, default connection limit, no expiry, no role settings, member of no role,
+--    owner of nothing except the mcp_data schema and its functions, and not a member of / granted to anything except the migration role's own
+--    ADMIN-only link, AND it must appear in no ACL at all (a clean privilege baseline). Anything else aborts the migration (fail closed). A pre-existing
+--    role is adopted, NOT marked, and is never dropped by the rollback. Consequence: this migration is not re-runnable after grants.sql; roll back first.
+--  * The migration role holds membership of mcp_data_owner ONLY for the duration of this transaction (SET option, no INHERIT), granted after the
+--    ADMIN OPTION check; ONLY what is missing is added, and at the end only that is removed, after which the membership rows are proven identical to their
+--    state before the script (an existing ADMIN-only link, with any grantor, is preserved). A superuser needs no membership and none is created.
 --
 -- DESIGN (approved decisions 1-6, MCP.md section 16)
 --  * Every reader function takes the caller's access-token SHA-256 hash and derives the team IN THE DATABASE (mcp_data._resolve_scope). No function
@@ -23,6 +42,18 @@
 --  * SECURITY DEFINER functions pin search_path = pg_catalog, pg_temp and schema-qualify every object (nothing resolves through public or a temp schema).
 --  * No dynamic SQL (no EXECUTE), no writes, no temp tables, no sequences, no extension use.
 
+-- ── 0. Transaction proof (must be the first statements; nothing above changes anything) ────────────────────────────────────────────────
+SELECT pg_catalog.set_config('mcp_data.tx_guard', 'on', true);
+DO $$
+BEGIN
+  IF pg_catalog.current_setting('mcp_data.tx_guard', true) IS DISTINCT FROM 'on' THEN
+    RAISE EXCEPTION 'mcp-data.sql must run inside ONE explicit transaction (BEGIN ... COMMIT); nothing was changed';
+  END IF;
+  IF current_user <> session_user THEN RAISE EXCEPTION 'mcp-data.sql must run as the login role, not under SET ROLE; nothing was changed'; END IF;
+  IF pg_catalog.current_setting('transaction_read_only') <> 'off' THEN RAISE EXCEPTION 'mcp-data.sql needs a read-write transaction; nothing was changed'; END IF;
+END $$;
+
+-- ── 1. Prerequisites ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 DO $$
 BEGIN
   IF current_setting('server_version_num')::int < 160000 THEN RAISE EXCEPTION 'mcp-data.sql requires PostgreSQL 16 or later'; END IF;
@@ -58,23 +89,87 @@ BEGIN
   IF missing IS NOT NULL THEN RAISE EXCEPTION 'tables have an unexpected shape (missing columns: %)', missing; END IF;
 END $$;
 
--- ── The owner role: NOLOGIN, no attributes, no password, owns ONLY the mcp_data schema and its functions ─────────────────────────────
+-- ── 2. The owner role: create and mark it, or validate a pre-existing one EXACTLY (fail closed), then a TEMPORARY membership ────────────
 DO $$
+DECLARE
+  r pg_catalog.pg_roles%ROWTYPE;
+  v_schema oid := COALESCE(to_regnamespace('mcp_data')::oid, 0);
+  v_me oid := (SELECT x.oid FROM pg_catalog.pg_roles x WHERE x.rolname = current_user);
+  v_super boolean := (SELECT x.rolsuper FROM pg_catalog.pg_roles x WHERE x.rolname = current_user);
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mcp_data_owner') THEN
-    CREATE ROLE mcp_data_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;
+  SELECT * INTO r FROM pg_catalog.pg_roles WHERE rolname = 'mcp_data_owner';
+  IF NOT FOUND THEN
+    CREATE ROLE mcp_data_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT CONNECTION LIMIT -1;
+    COMMENT ON ROLE mcp_data_owner IS 'mcp-data v1: created by scripts/migrations/mcp-data.sql';   -- the marker the rollback looks for
+    SELECT * INTO r FROM pg_catalog.pg_roles WHERE rolname = 'mcp_data_owner';
+  ELSE
+    IF r.rolsuper OR r.rolcanlogin OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls OR r.rolinherit OR r.rolconnlimit <> -1 OR r.rolvaliduntil IS NOT NULL THEN
+      RAISE EXCEPTION 'pre-existing role mcp_data_owner has unexpected attributes; refusing (nothing was changed)';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_db_role_setting s WHERE s.setrole = r.oid) THEN RAISE EXCEPTION 'pre-existing role mcp_data_owner has role settings; refusing'; END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member = r.oid) THEN RAISE EXCEPTION 'pre-existing role mcp_data_owner is a member of another role; refusing'; END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.roleid = r.oid AND (m.member <> v_me OR m.set_option OR m.inherit_option)) THEN
+      RAISE EXCEPTION 'pre-existing role mcp_data_owner has members other than this role''s ADMIN-only link; refusing';
+    END IF;
+    -- CLEAN PRIVILEGE BASELINE: an adopted role must appear in NO ACL (pg_shdepend 'a' entries: tables, columns, schemas, functions, databases...).
+    -- Otherwise grants.sql would add to privileges this migration cannot account for, and the rollback could not restore the true prior state.
+    -- (Consequence: this migration cannot be re-run after grants.sql has been applied; run the rollback first.)
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_shdepend d WHERE d.refclassid = 'pg_catalog.pg_authid'::regclass AND d.refobjid = r.oid AND d.deptype = 'a'
+                AND d.dbid IN (0, (SELECT db.oid FROM pg_catalog.pg_database db WHERE db.datname = pg_catalog.current_database()))) THEN
+      RAISE EXCEPTION 'pre-existing role mcp_data_owner already appears in ACL entries (existing grants); refusing (if this is a previous installation, run the rollback first)';
+    END IF;
   END IF;
-  -- Ownership transfer needs the migration role to be able to SET ROLE to it. Kept after the migration: rollback needs it to drop the functions.
-  IF NOT pg_has_role(current_user, 'mcp_data_owner', 'USAGE') OR NOT pg_has_role(current_user, 'mcp_data_owner', 'SET') THEN
-    GRANT mcp_data_owner TO CURRENT_USER WITH INHERIT TRUE, SET TRUE;
+  -- ownership: it may own only the mcp_data schema and the functions inside it
+  IF EXISTS (
+    SELECT 1 FROM pg_catalog.pg_shdepend d
+     WHERE d.refclassid = 'pg_catalog.pg_authid'::regclass AND d.refobjid = r.oid AND d.deptype = 'o'
+       AND d.dbid IN (0, (SELECT db.oid FROM pg_catalog.pg_database db WHERE db.datname = pg_catalog.current_database()))
+       AND NOT COALESCE((d.classid = 'pg_catalog.pg_namespace'::regclass AND d.objid = v_schema)
+                     OR (d.classid = 'pg_catalog.pg_proc'::regclass AND EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid = d.objid AND p.pronamespace = v_schema)), false)
+  ) THEN RAISE EXCEPTION 'role mcp_data_owner owns objects outside the mcp_data schema; refusing'; END IF;
+  -- a pre-existing mcp_data schema must be owned by it and hold nothing but our function names (a partial earlier run)
+  IF v_schema <> 0 THEN
+    IF (SELECT n.nspowner FROM pg_catalog.pg_namespace n WHERE n.oid = v_schema) <> r.oid THEN RAISE EXCEPTION 'schema mcp_data exists but is not owned by mcp_data_owner; refusing'; END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.relnamespace = v_schema) THEN
+      RAISE EXCEPTION 'schema mcp_data holds unexpected objects; refusing';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND p.proname NOT IN (
+         '_safe_ident','_norm_intent','_iso_utc','_check_window','_resolve_scope','_session_rows','_prompt_rows',
+         'list_developers','developer_activity','list_sessions','session_details','search_prompt_metadata','prompt_metadata_batch')) THEN
+      RAISE EXCEPTION 'schema mcp_data holds unexpected functions; refusing';
+    END IF;
+  END IF;
+  -- TEMPORARY membership: ownership transfer needs the right to SET ROLE to it. Granted only after the ADMIN OPTION check, revoked at the end of this
+  -- transaction (section 6). A superuser needs none. The SET option is enough: no INHERIT, so the migration role never ACQUIRES its privileges.
+  IF NOT v_super THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.roleid = r.oid AND m.member = v_me AND m.admin_option) THEN
+      RAISE EXCEPTION 'the migration role lacks ADMIN OPTION on mcp_data_owner (it must be the role that created it, or a superuser)';
+    END IF;
+    -- MEMBERSHIP PRESERVATION: snapshot every existing membership row of the migration role in mcp_data_owner first, add ONLY what is missing, and remember exactly what was
+    -- added, so the end of the transaction removes only that and then proves the rows are identical to the snapshot (an existing ADMIN-only link survives).
+    PERFORM pg_catalog.set_config('mcp_data.membership_snapshot', COALESCE((SELECT pg_catalog.string_agg(m.grantor::text || ':' || m.admin_option::text || ':' || m.inherit_option::text || ':' || m.set_option::text, ',' ORDER BY m.grantor) FROM pg_catalog.pg_auth_members m WHERE m.roleid = r.oid AND m.member = v_me), ''), true);
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.roleid = r.oid AND m.member = v_me AND m.set_option) THEN
+      PERFORM pg_catalog.set_config('mcp_data.membership_mode', 'none', true);          -- already able to SET ROLE: nothing is added, nothing will be removed
+    ELSIF EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.roleid = r.oid AND m.member = v_me AND m.grantor = v_me) THEN
+      GRANT mcp_data_owner TO CURRENT_USER WITH SET TRUE GRANTED BY CURRENT_USER;                                -- my own existing row: add the SET option only (admin / inherit untouched)
+      PERFORM pg_catalog.set_config('mcp_data.membership_mode', 'set_option', true);
+    ELSE
+      GRANT mcp_data_owner TO CURRENT_USER WITH SET TRUE, INHERIT FALSE GRANTED BY CURRENT_USER;                  -- no row of mine: a new one, which is removed again in full
+      PERFORM pg_catalog.set_config('mcp_data.membership_mode', 'row', true);
+    END IF;
   END IF;
 END $$;
 
+-- ── 3. The schema, created BY mcp_data_owner (AUTHORIZATION) so ownership is right from the first moment; no ownership transfer is needed ──
 CREATE SCHEMA IF NOT EXISTS mcp_data AUTHORIZATION mcp_data_owner;
-REVOKE ALL ON SCHEMA mcp_data FROM PUBLIC;
 
--- Everything below is created AND its privileges set BY mcp_data_owner, so the owner is exactly that role (RESET ROLE at the very end).
+-- ── 4. From here every statement runs AS mcp_data_owner; the assertion proves SET LOCAL ROLE took effect ───────────────────────────────
 SET LOCAL ROLE mcp_data_owner;
+DO $$
+BEGIN
+  IF current_user <> 'mcp_data_owner' OR session_user = 'mcp_data_owner' THEN RAISE EXCEPTION 'SET LOCAL ROLE did not take effect; refusing to create functions under the wrong owner'; END IF;
+END $$;
+REVOKE ALL ON SCHEMA mcp_data FROM PUBLIC;
 
 -- ── Internal helpers (EXECUTE is NOT granted to mcp_reader) ──────────────────────────────────────────────────────────────────────────
 -- A string a stored column may pass through: short identifier charset only (client-controlled strings such as tool and model names).
@@ -327,7 +422,7 @@ BEGIN
                                                    NULL::integer, NULL::integer, NULL::text, NULL::text, 20, NULL::timestamptz, NULL::bigint);
 END $$;
 
--- ── Privileges on the functions: nobody by default ────────────────────────────────────────────────────────────────────────────────────
+-- ── 5. Privileges on the functions: nobody by default (still AS mcp_data_owner) ────────────────────────────────────────────────────────
 -- Functions default to EXECUTE for PUBLIC. Remove it from all thirteen; mcp-data.grants.sql re-grants EXECUTE on the six callable ones to mcp_reader only.
 REVOKE ALL ON FUNCTION mcp_data._safe_ident(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION mcp_data._norm_intent(text) FROM PUBLIC;
@@ -343,4 +438,41 @@ REVOKE ALL ON FUNCTION mcp_data.session_details(bytea, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION mcp_data.search_prompt_metadata(bytea, uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint) FROM PUBLIC;
 REVOKE ALL ON FUNCTION mcp_data.prompt_metadata_batch(bytea, bigint[]) FROM PUBLIC;
 
+-- Ownership and exposure assertions (as the owner): thirteen functions, all owned by mcp_data_owner, exactly six SECURITY DEFINER, none executable by PUBLIC.
+DO $$
+DECLARE v_schema oid := to_regnamespace('mcp_data')::oid; v_owner oid := 'mcp_data_owner'::regrole::oid;
+BEGIN
+  IF (SELECT count(*) FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema) <> 13 THEN RAISE EXCEPTION 'mcp_data must hold exactly 13 functions'; END IF;
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND p.proowner <> v_owner) THEN RAISE EXCEPTION 'a function in mcp_data is not owned by mcp_data_owner'; END IF;
+  IF (SELECT n.nspowner FROM pg_catalog.pg_namespace n WHERE n.oid = v_schema) <> v_owner THEN RAISE EXCEPTION 'schema mcp_data is not owned by mcp_data_owner'; END IF;
+  IF (SELECT count(*) FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND p.prosecdef) <> 6 THEN RAISE EXCEPTION 'exactly six functions must be SECURITY DEFINER'; END IF;
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND NOT EXISTS (SELECT 1 FROM pg_catalog.unnest(p.proconfig) c WHERE c = 'search_path=pg_catalog, pg_temp')) THEN
+    RAISE EXCEPTION 'every function in mcp_data must pin search_path = pg_catalog, pg_temp';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p, pg_catalog.aclexplode(COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) a WHERE p.pronamespace = v_schema AND a.grantee = 0) THEN
+    RAISE EXCEPTION 'a function in mcp_data is still executable by PUBLIC';
+  END IF;
+END $$;
+
 RESET ROLE;
+
+-- ── 6. Remove ONLY what this transaction added to the membership, and prove the membership rows are exactly as they were ──────────────────
+DO $$
+DECLARE v_me oid := (SELECT x.oid FROM pg_catalog.pg_roles x WHERE x.rolname = current_user);
+BEGIN
+  IF NULLIF(pg_catalog.current_setting('mcp_data.membership_mode', true), '') = 'row' THEN
+    REVOKE mcp_data_owner FROM CURRENT_USER GRANTED BY CURRENT_USER;
+  ELSIF NULLIF(pg_catalog.current_setting('mcp_data.membership_mode', true), '') = 'set_option' THEN
+    REVOKE SET OPTION FOR mcp_data_owner FROM CURRENT_USER GRANTED BY CURRENT_USER;   -- removes only the option this transaction added
+  END IF;
+  IF current_user <> session_user THEN RAISE EXCEPTION 'the session role was not restored'; END IF;
+  IF NULLIF(pg_catalog.current_setting('mcp_data.membership_mode', true), '') IS NOT NULL
+     AND COALESCE((SELECT pg_catalog.string_agg(m.grantor::text || ':' || m.admin_option::text || ':' || m.inherit_option::text || ':' || m.set_option::text, ',' ORDER BY m.grantor) FROM pg_catalog.pg_auth_members m WHERE m.roleid = 'mcp_data_owner'::regrole AND m.member = v_me), '') IS DISTINCT FROM COALESCE(pg_catalog.current_setting('mcp_data.membership_snapshot', true), '') THEN
+    RAISE EXCEPTION 'the migration role''s membership rows were not restored exactly to their state before this script';
+  END IF;
+  IF NOT (SELECT x.rolsuper FROM pg_catalog.pg_roles x WHERE x.rolname = current_user)
+     AND NULLIF(pg_catalog.current_setting('mcp_data.membership_mode', true), '') IS NOT NULL
+     AND EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.roleid = 'mcp_data_owner'::regrole AND m.member = v_me AND m.grantor = v_me AND m.set_option AND NULLIF(pg_catalog.current_setting('mcp_data.membership_mode', true), '') <> 'none') THEN
+    RAISE EXCEPTION 'the migration role still holds the SET option this transaction added';
+  END IF;
+END $$;
