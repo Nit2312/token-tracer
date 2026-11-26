@@ -1,28 +1,300 @@
 {
-  "_comment": "Exact privileges of the mcp_auth database role (identity plane: OAuth clients/codes/tokens + the minimum user lookup for consent). Source of truth for scripts/setup-mcp-roles.mjs (provision AND exact-match verify). Anything not listed is denied. No DELETE/TRUNCATE/REFERENCES/TRIGGER anywhere. NO privilege on audit_log: security events go through the allowlisting SECURITY DEFINER function mcp_audit_event. users.username/password_hash/api_key/member_id, members, team_members and every session/prompt/event table are unreadable. mcp_reader (data plane) is NOT defined here: it is designed and reviewed in Phase 4, where members/team_members access is justified.",
+  "_comment": "Exact privileges of the mcp_auth database role (identity plane: OAuth clients/codes/tokens + the minimum user lookup for consent). Source of truth for scripts/setup-mcp-roles.mjs (provision AND exact-match verify). Anything not listed is denied. No DELETE/TRUNCATE/REFERENCES/TRIGGER anywhere. NO privilege on audit_log: security events go through the allowlisting SECURITY DEFINER function mcp_audit_event. users.username/password_hash/api_key/member_id, members, team_members and every session/prompt/event table are unreadable. The Phase 3 data plane (mcp_data_owner and mcp_reader) is defined below and rendered into scripts/migrations/mcp-data.grants.sql; scripts/setup-mcp-roles.mjs does NOT read those two entries yet (P3-4).",
   "mcp_auth": {
     "select": {
-      "users": ["id", "display_name", "role", "team_id", "active"],
-      "teams": ["id", "name"],
-      "oauth_clients": ["client_id", "client_name", "redirect_uris", "grant_types", "token_endpoint_auth_method", "scope", "registration", "created_at", "created_ip_hash", "last_used_at", "disabled_at"],
-      "oauth_authorization_codes": ["code_hash", "client_id", "user_id", "redirect_uri", "code_challenge", "resource", "scope", "family_id", "created_at", "expires_at", "consumed_at"],
-      "oauth_tokens": ["id", "token_hash", "kind", "family_id", "client_id", "user_id", "resource", "scope", "created_at", "expires_at", "absolute_expires_at", "last_used_at", "rotated_at", "replaced_by_id", "revoked_at", "revoked_reason"],
-      "mcp_rate_limits": ["key", "window_start", "count"]
+      "users": [
+        "id",
+        "display_name",
+        "role",
+        "team_id",
+        "active"
+      ],
+      "teams": [
+        "id",
+        "name"
+      ],
+      "oauth_clients": [
+        "client_id",
+        "client_name",
+        "redirect_uris",
+        "grant_types",
+        "token_endpoint_auth_method",
+        "scope",
+        "registration",
+        "created_at",
+        "created_ip_hash",
+        "last_used_at",
+        "disabled_at"
+      ],
+      "oauth_authorization_codes": [
+        "code_hash",
+        "client_id",
+        "user_id",
+        "redirect_uri",
+        "code_challenge",
+        "resource",
+        "scope",
+        "family_id",
+        "created_at",
+        "expires_at",
+        "consumed_at"
+      ],
+      "oauth_tokens": [
+        "id",
+        "token_hash",
+        "kind",
+        "family_id",
+        "client_id",
+        "user_id",
+        "resource",
+        "scope",
+        "created_at",
+        "expires_at",
+        "absolute_expires_at",
+        "last_used_at",
+        "rotated_at",
+        "replaced_by_id",
+        "revoked_at",
+        "revoked_reason"
+      ],
+      "mcp_rate_limits": [
+        "key",
+        "window_start",
+        "count"
+      ]
     },
     "insert": {
-      "oauth_clients": ["client_id", "client_name", "redirect_uris", "grant_types", "token_endpoint_auth_method", "scope", "registration", "created_ip_hash"],
-      "oauth_authorization_codes": ["code_hash", "client_id", "user_id", "redirect_uri", "code_challenge", "resource", "scope", "family_id", "expires_at"],
-      "oauth_tokens": ["token_hash", "kind", "family_id", "client_id", "user_id", "resource", "scope", "expires_at", "absolute_expires_at"],
-      "mcp_rate_limits": ["key", "window_start", "count"],
-      "mcp_access_log": ["user_id", "team_id", "client_id", "token_id", "event", "tool", "target_member_ids", "outcome", "status", "row_count", "duration_ms", "ip_hash"]
+      "oauth_clients": [
+        "client_id",
+        "client_name",
+        "redirect_uris",
+        "grant_types",
+        "token_endpoint_auth_method",
+        "scope",
+        "registration",
+        "created_ip_hash"
+      ],
+      "oauth_authorization_codes": [
+        "code_hash",
+        "client_id",
+        "user_id",
+        "redirect_uri",
+        "code_challenge",
+        "resource",
+        "scope",
+        "family_id",
+        "expires_at"
+      ],
+      "oauth_tokens": [
+        "token_hash",
+        "kind",
+        "family_id",
+        "client_id",
+        "user_id",
+        "resource",
+        "scope",
+        "expires_at",
+        "absolute_expires_at"
+      ],
+      "mcp_rate_limits": [
+        "key",
+        "window_start",
+        "count"
+      ],
+      "mcp_access_log": [
+        "user_id",
+        "team_id",
+        "client_id",
+        "token_id",
+        "event",
+        "tool",
+        "target_member_ids",
+        "outcome",
+        "status",
+        "row_count",
+        "duration_ms",
+        "ip_hash"
+      ]
     },
     "update": {
-      "oauth_clients": ["last_used_at"],
-      "oauth_authorization_codes": ["consumed_at"],
-      "oauth_tokens": ["last_used_at", "rotated_at", "replaced_by_id", "revoked_at", "revoked_reason"],
-      "mcp_rate_limits": ["count"]
+      "oauth_clients": [
+        "last_used_at"
+      ],
+      "oauth_authorization_codes": [
+        "consumed_at"
+      ],
+      "oauth_tokens": [
+        "last_used_at",
+        "rotated_at",
+        "replaced_by_id",
+        "revoked_at",
+        "revoked_reason"
+      ],
+      "mcp_rate_limits": [
+        "count"
+      ]
     },
-    "sequences": ["mcp_access_log_id_seq"],
-    "functions": ["mcp_audit_event(text, uuid, text, text, jsonb)"]
+    "sequences": [
+      "mcp_access_log_id_seq"
+    ],
+    "functions": [
+      "mcp_audit_event(text, uuid, text, text, jsonb)"
+    ]
+  },
+  "mcp_data_owner": {
+    "_comment": "NOLOGIN owner of schema mcp_data and its functions (SECURITY DEFINER runs as this role). COLUMN-level SELECT only, and only the columns the functions read. Deliberately NOT granted: session_turns.prompt_text_sanitized, sync_sessions.label/events/agent/payload_hash, daily_member_usage.project/source/model, any path column, users.username/password_hash/api_key/member_id, members beyond id+display_name, member_keys, audit_log, prompt_embeddings, redundant_reprompt_events, daily_org_* tables. No INSERT/UPDATE/DELETE anywhere.",
+    "schemaUsage": [
+      "public"
+    ],
+    "select": {
+      "oauth_tokens": [
+        "token_hash",
+        "kind",
+        "scope",
+        "user_id",
+        "client_id",
+        "revoked_at",
+        "expires_at",
+        "absolute_expires_at"
+      ],
+      "oauth_clients": [
+        "client_id",
+        "disabled_at"
+      ],
+      "users": [
+        "id",
+        "team_id",
+        "role",
+        "active"
+      ],
+      "teams": [
+        "id"
+      ],
+      "members": [
+        "id",
+        "display_name"
+      ],
+      "team_members": [
+        "team_id",
+        "member_id",
+        "role"
+      ],
+      "sync_sessions": [
+        "id",
+        "team_id",
+        "member_id",
+        "source",
+        "session_id",
+        "model",
+        "started_at",
+        "ended_at",
+        "synced_at",
+        "tokens_in",
+        "tokens_out",
+        "tokens_cache_read",
+        "tokens_cache_write",
+        "api_cost",
+        "priced",
+        "edits",
+        "additions",
+        "deletions",
+        "changed_lines",
+        "files_touched",
+        "tool_calls",
+        "tool_errors",
+        "rework_loops",
+        "corrections",
+        "abandoned"
+      ],
+      "sync_session_tools": [
+        "sync_session_id",
+        "tool_name",
+        "call_count"
+      ],
+      "session_turns": [
+        "id",
+        "session_id",
+        "org_id",
+        "user_id",
+        "tool",
+        "model",
+        "turn_index",
+        "turn_role",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "prompt_char_len",
+        "has_code_block",
+        "has_file_path",
+        "has_traceback",
+        "intent_category",
+        "created_at"
+      ],
+      "daily_member_usage": [
+        "day",
+        "team_id",
+        "member_id",
+        "tokens_in",
+        "tokens_out",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "api_cost",
+        "edits",
+        "additions",
+        "deletions",
+        "changed_lines",
+        "files_touched",
+        "tool_calls",
+        "tool_errors",
+        "rework_loops",
+        "corrections",
+        "abandoned_count",
+        "session_count"
+      ]
+    },
+    "ownsSchema": "mcp_data",
+    "ownsFunctions": [
+      "mcp_data.list_developers(bytea, integer, uuid)",
+      "mcp_data.developer_activity(bytea, uuid, timestamptz, timestamptz)",
+      "mcp_data.list_sessions(bytea, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid)",
+      "mcp_data.session_details(bytea, uuid)",
+      "mcp_data.search_prompt_metadata(bytea, uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint)",
+      "mcp_data.prompt_metadata_batch(bytea, bigint[])",
+      "mcp_data._safe_ident(text)",
+      "mcp_data._norm_intent(text)",
+      "mcp_data._iso_utc(timestamptz)",
+      "mcp_data._check_window(timestamptz, timestamptz, interval)",
+      "mcp_data._resolve_scope(bytea)",
+      "mcp_data._session_rows(uuid, uuid, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid)",
+      "mcp_data._prompt_rows(uuid, bigint[], uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint)"
+    ]
+  },
+  "mcp_reader": {
+    "_comment": "LOGIN role for the data plane. NO table, sequence or column privilege anywhere (every read of a table is a 42501). USAGE on schema mcp_data and EXECUTE on the six reader functions only; the helpers are not executable by it. Every function derives the team from the token hash. Read-only by default (default_transaction_read_only). Connection limit is a proposal pending connection sizing (CS).",
+    "schemaUsage": [
+      "mcp_data"
+    ],
+    "select": {},
+    "insert": {},
+    "update": {},
+    "sequences": [],
+    "functions": [
+      "mcp_data.list_developers(bytea, integer, uuid)",
+      "mcp_data.developer_activity(bytea, uuid, timestamptz, timestamptz)",
+      "mcp_data.list_sessions(bytea, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid)",
+      "mcp_data.session_details(bytea, uuid)",
+      "mcp_data.search_prompt_metadata(bytea, uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint)",
+      "mcp_data.prompt_metadata_batch(bytea, bigint[])"
+    ],
+    "login": true,
+    "connectionLimit": 5,
+    "roleSettings": {
+      "statement_timeout": "5000",
+      "lock_timeout": "2000",
+      "idle_in_transaction_session_timeout": "10000",
+      "search_path": "pg_catalog, pg_temp",
+      "default_transaction_read_only": "on"
+    }
   }
 }

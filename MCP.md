@@ -588,7 +588,7 @@ Each step is a small local commit, tested (`tsc`, ESLint, unit; live tests from 
 | **P3-0** | Decisions and documentation (this section; phase boundary corrected) | decisions recorded | **done 2026-11-26** |
 | P3-1 | Contracts, DB-free: types, limits, scope and cursor handling, error taxonomy, excluded-column policy, guards | contracts and limits | **done 2026-11-26** (16.8) |
 | P3-2 | Masking engine with its corpus and performance tests | **privacy review** | built 2026-11-26; **review outcome: metadata-only for the initial release, masking removed from Phase 3 scope** (16.9) |
-| P3-3 | SQL **written, not applied**: migration, rollback, grants, role-script generalisation, static SQL checks | **security review of the SQL** | planned |
+| P3-3 | SQL **written, not applied**: migration, rollback, grants, static SQL checks (role-script generalisation moves to P3-4, where it can be run) | **security review of the SQL and grants** | **written 2026-11-26, awaiting security review** (16.10) |
 | P3-4 | Apply on the **fresh test branch** (decision 7), provision the roles, `--verify`, live cross-tenant isolation fixture | results shown before continuing | planned |
 | P3-5 | Reader pool and services, token hash in the principal, live tests | integration | planned |
 | P3-6 | Hardening: fuzzing, concurrency, revocation mid-flight, dashboard parity, `EXPLAIN` on a production-sized copy, index recommendation (no index created) | measurements | planned |
@@ -638,3 +638,22 @@ Code: `lib/mcp/data/` (ten modules, no I/O, imports only `node:crypto` and sibli
 
 **Engine summary (for a future reviewer).** Bound input (16,384 characters) → normalise (NFKC, invisible and control characters removed, percent-decoding) → redact by family → verify (withhold if a high-confidence secret remains) → cut on a code-point boundary. 136 tests and mutation checks cover the implementation (corpus per family, multilingual and evasion inputs, false positives, idempotence, boundaries, adversarial timing, fuzzing).
 
+### 16.10 P3-3 data-plane SQL (written, NOT applied, awaiting security review)
+Files: `scripts/migrations/mcp-data.sql` (roles, schema, functions), `scripts/migrations/mcp-data.grants.sql` (every privilege, generated from `lib/mcp/grants.json`), `scripts/migrations/mcp-data.rollback.sql`, static tests in `tests/mcp-data-sql.test.ts`. **Nothing has been executed**: no database was contacted, no role exists, no runner script exists, no application code references them. The SQL was parsed with the real PostgreSQL parser (including every plpgsql body) and checked statically; it has never run. Metadata-only policy: no function reads, filters on or returns prompt text, labels, events, paths, agent or project names.
+
+**Shape.** Schema `mcp_data`, owned by the NOLOGIN role `mcp_data_owner`. Six reader functions (`SECURITY DEFINER`): `list_developers`, `developer_activity`, `list_sessions`, `session_details`, `search_prompt_metadata`, `prompt_metadata_batch`; seven internal helpers the reader cannot execute. `mcp_reader` gets `USAGE` on the schema and `EXECUTE` on the six functions, and nothing on any table. `mcp_data_owner` gets **column-level** `SELECT` on ten tables, only the columns the functions read (a test fails if a granted column is unused, or a used column is not granted).
+
+**Isolation.** Each reader function takes the token SHA-256 hash first and derives the team in the database (`_resolve_scope`, same predicate as bearer authentication). No reader function has a team, user or tenant parameter. Sessions need `sync_sessions.team_id` = the derived team **and** the developer a current `team_members` row; turns use the full 4-key identity. A missing row, another team's row and a non-member give the same fixed error. A revoked, expired, demoted or deactivated principal fails on its next call.
+
+**Limits in the database too.** 7-day span, 14-day lookback (7 days for prompts), 5-minute future skew, page size plus one probe row (51/26/26), batch 20, closed intent set, short-identifier filters. Constants are compared with the TypeScript ones by tests.
+
+**Reviewer checklist and known points**
+1. Requires PostgreSQL 16 or later; the ownership transfer needs the migration role to hold `SET` and `INHERIT` on `mcp_data_owner` (granted by the migration, kept so the rollback can drop the objects). Whether the hosted role may do this is untested until P3-4.
+2. The OAuth resource (audience) check stays in the application; the database cannot know the public base URL. The data call only ever receives hashes of tokens that already passed that check.
+3. `statement_timeout`, `lock_timeout`, read-only default and a pinned `search_path` are role settings in the grants file; a function-level timeout would not cover its own statement.
+4. Rollup activity is daily: a partial day is returned whole; sums are over the rollup rows and may combine sources and models.
+5. A developer removed from the team stops being visible, including past sessions (decision 3). Developers are ordered by member id, not by name.
+6. No index is created. The prompt query filters `session_turns` by `org_id` (existing index prefix) and sorts in memory; its cost is unmeasured and belongs to P3-6.
+7. `scripts/setup-mcp-roles.mjs` does not yet read the new grants entries, and its signature check does not accept schema-qualified or array types; generalising it (so `--verify` is exact for the two new roles) is P3-4 work. The reader login role and its password are created by that script, never by these files.
+8. The connection limit of 5 for `mcp_reader` is a proposal pending connection sizing (CS).
+9. Rollback drops only what these files created, without `CASCADE`; the identity plane is untouched.
