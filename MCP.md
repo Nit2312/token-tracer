@@ -1,194 +1,500 @@
-# Token Tracer MCP server
+# Token Tracer MCP server — architecture, security and operations
 
-Remote [MCP](https://modelcontextprotocol.io) server hosted inside this Next.js app. Status: **Phase 1 (foundation) shipped; Phase 2 (OAuth 2.1) in progress — steps 1–3 written: building blocks, migration, role. Nothing is applied to any database, and `/mcp` still has no authentication.**
+Remote [MCP](https://modelcontextprotocol.io) server hosted inside this Next.js app, with its own OAuth 2.1 authorization server.
+Last updated: 2026-11-26. This is the single reference for the whole program (Phase 0 audit, Phase 1 foundation, Phase 2 OAuth, steps 1–10).
 
-## What exists
+## Contents
+1. [Status at a glance](#1-status-at-a-glance) · 2. [Architecture](#2-architecture) · 3. [OAuth 2.1 flow](#3-oauth-21-flow) · 4. [`/mcp` request handling](#4-mcp-request-handling)
+5. [Database, roles and permissions](#5-database-roles-and-permissions) · 6. [Account lifecycle: revocation, audit, retention](#6-account-lifecycle-revocation-audit-retention)
+7. [Configuration](#7-configuration) · 8. [Operations runbook (documented, not executed)](#8-operations-runbook-documented-not-executed) · 9. [Testing](#9-testing)
+10. [Implementation history](#10-implementation-history) · 11. [Key decisions](#11-key-decisions) · 12. [Risk register](#12-risk-register-and-open-items)
+13. [Production-readiness checklist](#13-production-readiness-checklist) · 14. [Cleanup after sign-off](#14-cleanup-after-sign-off) · 15. [Later phases](#15-later-phases)
 
-`POST /mcp` — stateless Streamable HTTP (`@modelcontextprotocol/server` 2.4.0, pinned). It answers `initialize`, `ping` and the
-`notifications/initialized` notification, and advertises **empty capabilities**: no tools, resources or prompts, no database access,
-no authentication or OAuth yet. 2025-era clients (what Claude speaks today) are served by the SDK's stateless fallback: no session id,
-`GET`/`DELETE`/other methods → `405` with `Allow: POST`.
+---
 
-## Feature flag (off by default)
+## 1. Status at a glance
 
-| Variable | Meaning |
-|---|---|
-| `MCP_ENABLED` | Must be exactly `true` to serve. Otherwise **every method on `/mcp` returns 404**. |
-| `MCP_ALLOWED_HOSTS` | Optional, comma-separated hostnames accepted in the `Host` header. Default: the host of `NEXT_PUBLIC_SERVER_URL` (plus `localhost` outside production). If enabled with no allowed host in production, `/mcp` returns 503 (fail closed). |
-| `MCP_ALLOWED_ORIGINS` | Optional extra hostnames accepted in a browser `Origin` header. `claude.ai`, `claude.com` and the allowed hosts are always accepted. A request with no `Origin` (server-to-server) is allowed. |
+**Production state:** nothing MCP-related has been applied to production. No migration, no database role, no environment variable, no deployment; `MCP_ENABLED` is unset, so every MCP route answers 404. At the time of writing all commits are local (not pushed). Everything below was built and verified against a dedicated Neon **test branch** only.
 
-Request guards: Host validation (see the Host policy below; since Step 7 a non-canonical Host is an empty 404), Origin validation (403), JSON content type (415), `Accept` must offer both `application/json` and
-`text/event-stream` (406), body limit 64 KiB (413), `MCP-Protocol-Version` validation (400). Responses are `Cache-Control: no-store`.
-Logs contain only a fixed rejection category, never request data.
-
-## Code map
-
-- `app/mcp/route.ts` — Node.js runtime route (`maxDuration = 30`), all HTTP methods delegate to the handler.
-- `lib/mcp/handler.ts` — flag, configuration, Host/Origin checks, SDK handler. Imports nothing from the application.
-- `lib/mcp/config.ts`, `lib/mcp/server.ts` — configuration and the per-request server factory (registers nothing).
-- `tests/mcp-foundation.test.ts` — protocol, request-validation, transport, flag and "no application data" tests (no database needed).
-
-## Phase 2 (OAuth 2.1) — decisions and what exists so far
-
-Canonical server URL: `https://token-tracer-three.vercel.app` (resource `…/mcp`). The issuer, resource and token audience come from an explicit
-`MCP_PUBLIC_BASE_URL` (to be validated at startup: https, no path) and are **never derived from a request `Host` header**. Both `*.vercel.app`
-aliases serve the whole app, so the OAuth and `.well-known` endpoints must also reject any non-canonical `Host`.
-
-Decisions: DCR + static clients (CIMD advertised **false**); hosted callbacks `https://claude.ai/api/mcp/auth_callback` and
-`https://claude.com/api/mcp/auth_callback`; loopback `http://localhost|127.0.0.1|[::1][:port]/callback` with a consent warning (port ignored when
-matching, per RFC 8252 / OAuth 2.1); PKCE S256 only; access token 30 min, refresh 14 days idle / 60 days absolute, authorization code 60 s;
-strict refresh-reuse detection with no grace period; `offline_access` accepted (never stored); OAuth security events → `audit_log` (only via
-`mcp_audit_event`), tool-access events → `mcp_access_log`; `mcp_auth` provisioned in Phase 2, `mcp_reader` designed in Phase 4.
-
-Written, not yet applied anywhere: `lib/mcp/oauth/*` (PKCE, secrets, redirect rules, scopes, errors), `lib/security/return-url.ts`,
-`scripts/migrations/mcp-oauth.sql` (+ `.rollback.sql`, runner `scripts/migrate-mcp-oauth.mjs`), `lib/mcp/grants.json` +
-`scripts/setup-mcp-roles.mjs` (default mode is a printed plan). Required order: migration on a Neon **test branch** → `--verify` → live tests →
-review → only then production, with explicit approval and a backup branch.
-
-### Accepted residual risks (revisit before production rollout, Phase 7)
-
-- **R2 — misattributed audit rows.** `mcp_auth` can only write `audit_log` through `mcp_audit_event`, which enforces a fixed event allowlist, an
-  `mcp.` action prefix, known target types, a bounded target id, object-only metadata ≤ 2 KiB and a real actor whose username it looks up itself.
-  A compromised `mcp_auth` credential can still record a *valid* `mcp.*` event attributed to any existing user, with free-form metadata inside those
-  bounds. Mitigation today: the `mcp.` prefix distinguishes these rows; callers pass ids/counts only. Options before rollout: rate-limit the
-  function, or drop the caller-supplied actor in favour of an id derived from the token row.
-- **R3 — `mcp_access_log` has no event allowlist** (append-only, no prompt text). Add a `CHECK` once Phase 4 defines the event set.
-- **R5/R6** — role-level `SET` defaults may not reach pooled sessions (the app must use `SET LOCAL`); Neon needs the role password in plaintext
-  in the statement, so rotate it if an apply fails.
-- **R1 (open, to be closed by live tests)** — trigger firing and `SECURITY DEFINER` execution privileges are verified only on a Neon test branch.
-
-## Later phases (not implemented)
-
-OAuth 2.1 (Phase 2), tenant-scoped authorization (3), read-only tools (4), audit and rate limits (5), end-to-end tests (6), rollout (7).
-Prompt-level data will use a dedicated read-only database role, never the application owner role.
-
-## Phase 2, Step 5 — OAuth HTTP endpoints (implemented; MCP stays disabled)
-
-Routes (all `runtime = 'nodejs'`, `dynamic = 'force-dynamic'`, thin wrappers over `lib/mcp/oauth/endpoints.ts`):
-
-| Route | Method | Purpose |
+### Completed (verified on the test branch)
+| Phase | Scope | State |
 |---|---|---|
-| `/.well-known/oauth-authorization-server` | GET | RFC 8414 metadata (issuer = canonical base URL, S256 only, public clients, CIMD false) |
-| `/.well-known/oauth-protected-resource/mcp` and `/.well-known/oauth-protected-resource` | GET | RFC 9728 metadata (`resource` = `<base>/mcp`) |
-| `/oauth/register` | POST | RFC 7591 DCR, public clients only; 10/h per hashed IP + 300/h global |
-| `/oauth/token` | POST | `authorization_code` + `refresh_token`; form-encoded only; 120/min per IP, 60/min per client |
-| `/oauth/revoke` | POST | RFC 7009; always 200 |
+| 0 | Read-only audit of the app, database and auth model (no code) | done |
+| 1 | Stateless MCP endpoint `/mcp`: handshake and capability discovery, empty capabilities, feature flag, Host/Origin guards | done |
+| 2 | OAuth 2.1 authorization server (discovery, dynamic client registration, authorize + consent, token, refresh rotation, revoke), bearer authentication on `/mcp`, least-privilege database role, revocation on every account change, nightly retention, end-to-end and negative test suites (steps 1–10) | done |
 
-Rules every handler enforces, in order: `MCP_ENABLED` off → 404; `MCP_PUBLIC_BASE_URL` missing/invalid → 503 (fail closed); any `Host`/`X-Forwarded-Host` that is not the canonical host → 404 (so the second Vercel alias never serves OAuth). Back-channel endpoints then refuse browser cross-site requests (`Sec-Fetch-Site`), any `Authorization` header or `client_secret`, wrong content types, repeated parameters and oversized bodies — all before any database call. Error bodies are fixed strings; nothing from the request is echoed or logged. `proxy.ts`'s CSRF check only covers `/api/`, so these routes carry their own checks.
+### Not built yet (by design — see [Later phases](#15-later-phases))
+- **No tools, resources or prompts exist.** `/mcp` authenticates callers and then advertises empty capabilities. No tenant, session or prompt data is reachable through MCP.
+- **Phase 3 (data-level tenant authorization)** — the identity half is done (the principal is an active database admin of an existing team, re-read on every request); scoping *data* queries to that team needs tools and the read-only data role (`mcp_reader`), both Phase 4.
+- Phase 4 read-only tools, Phase 5 access logging and `/mcp` rate limiting, Phase 6 test with a real Claude client, Phase 7 production rollout.
 
-New environment variables (NOT set anywhere yet): `MCP_PUBLIC_BASE_URL` (https origin, no path), `MCP_AUTH_DATABASE_URL` (the `mcp_auth` login), optional `MCP_ALLOW_LOOPBACK_REDIRECTS=false` (kill-switch for Claude Code loopback redirects).
+### Production-readiness blockers (NOT completed — all must be closed or explicitly accepted before `MCP_ENABLED=true` in production)
+1. **Legal/HR approval of the consent wording** (the wording says a connected app can read the team's developers' activity, session metadata and prompt text with sensitive values masked). Technically approved; legal/HR unconfirmed.
+2. **`mcp_auth` connection sizing** — role limit 5, pool 3 per instance: can exhaust under concurrent serverless instances (fail-closed 503, never open).
+3. **Validate `mcp_auth` over the Neon pooled (PgBouncer) endpoint** — all tests ran over the direct endpoint.
+4. **Platform rate limiting for `/oauth/*`** (R9) — every OAuth request costs a database round trip.
+5. **R2 decision** — audit rows attributable to any user by a compromised `mcp_auth` credential.
+6. **Verify the production `NEXT_PUBLIC_SERVER_URL` / `MCP_PUBLIC_BASE_URL`** equal the canonical domain `https://token-tracer-three.vercel.app`.
+7. **Real-client verification (Phase 6)** — Claude's actual registration payload, revocation and `resource` behaviour are unverified.
+8. Production migration, role provisioning and environment variables — each needs explicit approval and a backup branch.
 
-Verified on a real `next build` + `next start` (production DB variables forced to an unreachable placeholder, `mcp_auth` of the test branch only): `.well-known` route folders work and coexist with `proxy.ts`; canonical host → 200; the other alias, an unknown host, `localhost` and a spoofed `X-Forwarded-Host` → 404; cross-site → 403; GET on POST-only routes → 405; `/mcp` unchanged.
+Full register: [section 12](#12-risk-register-and-open-items). Checklist: [section 13](#13-production-readiness-checklist).
 
-Known limits: no CORS on the POST endpoints (browser-based clients are not supported; Claude's connectors call server-side); the registration limit is per hashed client address and the global cap can be exhausted by an attacker (registration only — token flows are unaffected).
+---
 
-## Phase 2, Step 6 — consent and login integration (implemented; MCP stays disabled)
+## 2. Architecture
 
-Flow: client → `GET /oauth/authorize` → (no session) `/?returnTo=/oauth/authorize?…` → password → TOTP (admins) → back to `/oauth/authorize` → consent page → `POST /oauth/decision` (fetch) → browser navigates to the **server-built** redirect with `code`, `state`, `iss`.
+```
+Claude (hosted connector, Claude Code)
+  1 discovery  GET  /.well-known/oauth-protected-resource/mcp  →  /.well-known/oauth-authorization-server
+  2 register   POST /oauth/register                      (dynamic client registration, public clients)
+  3 authorize  GET  /oauth/authorize → login (/) + TOTP → consent page → POST /oauth/decision → redirect with code
+  4 token      POST /oauth/token (authorization_code + PKCE, refresh_token) · POST /oauth/revoke
+  5 use        POST /mcp   Authorization: Bearer tt_at_…
+        │
+        ▼
+Next.js app (Vercel, Node runtime)
+  proxy.ts ........... session refresh; CSRF check for /api/* only (OAuth routes carry their own checks)
+  lib/mcp/handler.ts . flag → config → canonical Host → Origin → bearer → SDK handler → per-request server (no tools)
+  lib/mcp/oauth/* .... OAuth logic: crypto/PKCE, redirect rules, endpoints, consent, tokens, clients, rate limits
+  two database paths:
+     mcp_auth pool (lib/mcp/db.ts) ............ ALL runtime OAuth and bearer work; least privilege
+     application owner connection (lib/team/db.ts) .. only: revoke hooks, nightly purge, the shared audit writer
+        │
+        ▼
+Neon Postgres: oauth_clients · oauth_authorization_codes · oauth_tokens · mcp_rate_limits · mcp_access_log
+               mcp_audit_event() · mcp_oauth_purge() · guard triggers      + the existing app tables (read-only subset for mcp_auth)
+```
 
-Who may authorize: a **database** account with role `admin` and a team, in a full (MFA-complete), non-impersonated session. Re-read from the database at page view AND at decision time (role/team/active are never trusted from the cookie). Built-in `team`/`superadmin` logins (non-UUID ids), plain users, team-less admins, inactive accounts, impersonation and stale sessions all get a fixed refusal message and no consent token.
+**Identity plane vs data plane.** `mcp_auth` is the *identity* role: it can run the OAuth/bearer flows and read just enough of `users` and `teams` to decide who a token belongs to. It has **no** privilege on prompts, sessions, audit logs, members or any analytics table. A separate read-only *data* role, `mcp_reader`, is designed for Phase 4 and does not exist.
 
-Rules worth remembering:
-- `client_id` + `redirect_uri` are verified against the registration FIRST. If either is unusable, or any parameter is repeated, the user sees an error page and there is **no redirect**. Every later defect (scope, PKCE, state, resource) is returned to the verified redirect URI as an OAuth error.
-- The consent token (`lib/mcp/oauth/consent.ts`) binds one approval to user, login session, client, redirect URI, PKCE challenge, scope, state and resource; 5-minute life; signed with a key derived from the session secret under a separate label, so it can never be accepted as a session cookie (verified by test). Not single-use (see below).
-- The decision route requires `Origin == canonical base URL`, `Sec-Fetch-Site` same-origin, JSON, a valid session, and a token minted for that exact user and session. The consent page uses `fetch` because the site CSP has `form-action 'self'`.
-- The client name (attacker-controlled via DCR) is rendered only as escaped React text; the page is `frame-ancestors 'none'` / `X-Frame-Options: DENY`.
-- Login change (the only edit to existing auth code): the login route honours `returnTo` for **database users only**, only if `safeReturnTo()` accepts it (exactly `/oauth/authorize?…`); the MFA step already carries the signed redirect. The inline login script forwards `?returnTo=`. Everything else (`proxy.ts`, MFA verify, cookies, built-in accounts) is unchanged.
-- Authorization responses carry `iss` (RFC 9207, advertised in the metadata).
+**Design principles** (each is enforced by tests, not just convention):
+- **Stateless.** Nothing about a user is cached between requests; the SDK handler is shared but holds no per-user state; the principal reaches the per-request server through a request-scoped `AsyncLocalStorage` that fails closed.
+- **Never trust the client for identity.** User, role and team come only from the database row behind the validated token; cookies, `X-Team-Id`-style headers and `?access_token=` are never read.
+- **Fail closed.** Missing/invalid configuration → 503; flag off → 404; database unavailable → 503 (never "allow").
+- **One answer for every bad token** (401 `invalid_token`) and one answer for every wrong host (empty 404): nothing for an attacker to distinguish.
+- **Hash-only secrets.** Access tokens, refresh tokens and authorization codes are 256-bit random values stored only as SHA-256 hashes; plaintext exists in memory only while being returned once.
+- **One-way state.** Revocation, code consumption and refresh rotation can never be undone — enforced by database triggers that also bind the table owner.
+- **Least privilege + defence in depth.** Column-level grants, `SECURITY DEFINER` only for the audit function (with pinned `search_path`), guard triggers, per-request re-validation, and revocation on every account change.
+- **Canonical URL.** Issuer, resource and token audience come from `MCP_PUBLIC_BASE_URL`, never from the request `Host`.
 
-Verified end to end on a real `next start` (test-branch database only): login → TOTP enrolment → redirect back → consent → decision → token exchange → code-replay revocation; hostile `returnTo` ignored; foreign/missing Origin 403; no session 401; unregistered `redirect_uri` → error page without redirect; non-canonical Host 404; non-admin refused.
+### File map
+| Area | Files |
+|---|---|
+| Routes | `app/mcp/route.ts` · `app/.well-known/oauth-authorization-server/route.ts` · `app/.well-known/oauth-protected-resource/route.ts` · `app/.well-known/oauth-protected-resource/mcp/route.ts` · `app/oauth/register/route.ts` · `app/oauth/token/route.ts` · `app/oauth/revoke/route.ts` · `app/oauth/decision/route.ts` · `app/oauth/reauthenticate/route.ts` · `app/oauth/authorize/page.tsx` · `app/oauth/authorize/consent-form.tsx` |
+| MCP core | `lib/mcp/handler.ts` · `lib/mcp/bearer.ts` · `lib/mcp/config.ts` · `lib/mcp/context.ts` · `lib/mcp/server.ts` · `lib/mcp/db.ts` · `lib/mcp/grants.json` |
+| OAuth logic | `lib/mcp/oauth/endpoints.ts` · `authorize.ts` · `authorize-request.ts` · `consent.ts` · `grant-user.ts` · `tokens.ts` · `clients.ts` · `rate-limit.ts` · `audit.ts` · `principal.ts` · `config.ts` · `metadata.ts` · `crypto.ts` · `redirect-rules.ts` · `scopes.ts` · `errors.ts` · `http.ts` |
+| Integration with the app | `lib/security/return-url.ts` · `lib/team/mcp-revoke.ts` · `lib/team/audit.ts` · `app/api/auth/login/route.ts` (returnTo) · `app/page.tsx` (forwards returnTo) · `app/api/internal/rollup/route.ts` (purge) · revoke hooks listed in [section 6](#6-account-lifecycle-revocation-audit-retention) |
+| Database and scripts | `scripts/migrations/mcp-oauth.sql` · `scripts/migrations/mcp-oauth.rollback.sql` · `scripts/migrate-mcp-oauth.mjs` · `scripts/setup-mcp-roles.mjs` · `scripts/e2e-mcp.mjs` |
 
-Accepted residual risks (Step 6):
-- **R7 — consent token replay:** within its 5 minutes, the same logged-in admin can submit one token twice and get two codes for the same client/redirect/PKCE challenge. Useless without the verifier.
-- **R8 — re-authentication at consent: RESOLVED (decision 2026-11-24).** The admin must have authenticated (password + TOTP) within the previous **15 minutes** (`GRANT_MAX_LOGIN_AGE_MS`), measured by the session's `issuedAt`, which is set only at login (`proxy.ts` refreshes `lastActive`, never `issuedAt`). Enforced at page view AND again at the click. A session that is valid but older sends the admin to `GET /oauth/reauthenticate`, which clears that session cookie (only if it is stale) and redirects to the normal login with `returnTo`; `app/page.tsx` would otherwise bounce a logged-in admin straight to `/team`. After login the flow returns to consent. Accounts that can never qualify (non-admin, built-in, inactive, no team) are refused directly, not asked to sign in again. A decision made after the window closed returns `login_required` (the page reloads and re-authenticates). Residual: an attacker who has the admin's password AND current TOTP can still consent — that is the authentication assumption, not a session-theft gap.
-- **R9 — unauthenticated database cost:** `/oauth/authorize`, `/oauth/token`, `/oauth/register` each cost a database round trip per request; the registration/token limits are per hashed IP and `mcp_auth` has a 3-connection pool. Add platform rate limiting (Vercel Firewall) for `/oauth/*` before enabling in production.
-- **R10 — unverified client names:** DCR clients can claim any name; the page says so and shows the real destination.
+---
 
-### Host policy (one rule for every MCP-related route — decided during Step 7 review)
-- A request whose `Host` or `X-Forwarded-Host` is **not the canonical host** (`MCP_PUBLIC_BASE_URL`), or that carries no host at all, gets an **empty `404`** — on `/mcp`, `/.well-known/oauth-*`, `/oauth/register|token|revoke|decision|reauthenticate` and `/oauth/authorize` alike. The resource does not exist under that name; nothing is revealed about other aliases (e.g. the second Vercel domain). This replaces the Step 7 draft that answered `/mcp` with 403 and the Phase 1 behavior (403 from the SDK's host check); one test asserts every route gives the same answer.
-- `403` is reserved for a **disallowed `Origin`** (browser-driven calls) and for cross-site `/oauth` POSTs — a different class of refusal.
-- The SDK allow-list (`MCP_ALLOWED_HOSTS`, else the site URL's host) is kept as a backstop behind the canonical check: it only matters if the allow-list was configured without the canonical host (misconfiguration), and then answers 403 instead of serving.
-- The flag-off answer (404) and the not-configured answer (503) come before the Host check, so they do not depend on it.
+## 3. OAuth 2.1 flow
 
-## Phase 2, Step 7 — bearer authentication on `/mcp` (implemented; MCP stays disabled)
+**Canonical server:** `https://token-tracer-three.vercel.app` (resource `…/mcp`). Both `*.vercel.app` aliases serve the whole app, so every MCP and OAuth route answers any non-canonical `Host` with an empty 404.
 
-Every `/mcp` request is authenticated from scratch (`lib/mcp/bearer.ts` → `authenticateAccessToken`). Order of checks: `MCP_ENABLED` (404) → valid OAuth config (503) → **canonical Host** (404) → Host allow-list backstop (403) → Origin (403) → bearer token (401/403/503) → SDK. Refused requests never reach the database.
+### Endpoints
+| Route | Method | Purpose | Limits |
+|---|---|---|---|
+| `/.well-known/oauth-authorization-server` | GET | RFC 8414 metadata: S256 only, public clients only, DCR advertised, CIMD **false**, `authorization_response_iss_parameter_supported: true`, `scopes_supported: [mcp:read, offline_access]` | public, `ACAO: *` (read-only document) |
+| `/.well-known/oauth-protected-resource` and `/mcp` | GET | RFC 9728 metadata: `resource` = `<base>/mcp`, `scopes_supported: [mcp:read]`, bearer in header | same |
+| `/oauth/register` | POST | RFC 7591 dynamic client registration, public clients (`token_endpoint_auth_method: none`) | 10/h per hashed IP, 300/h global; body ≤ 8 KiB |
+| `/oauth/authorize` | GET (page) | validates the request, requires login, shows consent | — |
+| `/oauth/decision` | POST (fetch) | approve/deny; issues the authorization code | 30 per 10 min per user; body ≤ 8 KiB |
+| `/oauth/reauthenticate` | GET | clears a stale login session and sends the admin to a fresh sign-in | — |
+| `/oauth/token` | POST | `authorization_code` and `refresh_token` grants, form-encoded only | 120/min per IP, 60/min per client; body ≤ 4 KiB |
+| `/oauth/revoke` | POST | RFC 7009; always 200 | 120/min per IP; body ≤ 4 KiB |
 
-One query per request re-reads the token, the user, their team and the client: token is `kind='access'`, not revoked, not expired (idle and absolute), audience equals the canonical resource; user is **active, role `admin`, and in a team that still exists**; client is not disabled. The same predicate (`ELIGIBLE_USER_SQL` in `tokens.ts`) also gates code exchange and refresh, so a demoted/deactivated/team-less admin can neither use nor obtain tokens. Nothing is cached: a change in the database takes effect on the very next request with the same token (and reverts the same way); the principal's team always comes from the database, never from the token or the request.
+### Sequence
+1. **Discovery.** The client calls `/mcp` unauthenticated, gets `401` with `WWW-Authenticate: Bearer resource_metadata="…", scope="mcp:read"`, reads the protected-resource metadata, then the authorization-server metadata.
+2. **Registration.** `POST /oauth/register` with `redirect_uris` (1–5). Only Claude's hosted callbacks `https://claude.ai/api/mcp/auth_callback` and `https://claude.com/api/mcp/auth_callback`, or loopback `http://localhost|127.0.0.1|[::1][:port]/callback` (Claude Code; the port is ignored when matching a registration, per RFC 8252), are accepted. `grant_types ⊆ {authorization_code, refresh_token}`, `scope` must normalise to `mcp:read`. Returns a `tt_…` client id; **no client secret exists**.
+3. **Authorize.** `GET /oauth/authorize?response_type=code&client_id&redirect_uri&code_challenge&code_challenge_method=S256&state&scope&resource`.
+   - `client_id` and `redirect_uri` are verified against the registration **first**. If either is unusable, or any parameter is repeated, the user sees an error page and there is **no redirect**. All later defects (scope, PKCE, state, resource) return to the verified redirect URI as OAuth errors, with `state` echoed only if valid.
+   - No session → `/?returnTo=/oauth/authorize?…` → password → TOTP (admins) → back to authorize. `returnTo` is honoured for **database users only** and only if it is exactly `/oauth/authorize` + query (`safeReturnTo`); anything else is ignored.
+   - **Who may authorize:** a database account with role `admin` and a team, in a full (MFA-complete), non-impersonated session. Built-in `team` / `superadmin` logins (non-UUID ids), plain users, team-less admins, inactive accounts, impersonation and stale sessions get a fixed refusal and no consent token. Role, team and active flag are **re-read from the database** at page view and again at the click.
+   - **Recent login (decided 2026-11-24):** the admin must have authenticated within the previous **15 minutes** (the session's `issuedAt`, which is set only at login). Older but valid session → `/oauth/reauthenticate` clears that cookie and redirects to login; a decision made after the window closed returns `login_required` and the page re-authenticates.
+4. **Consent.** The page shows who is asking (`client_name`, escaped text — attacker-controlled via registration), the real destination, the team, what will be readable, and a loopback warning where applicable. The browser posts the decision with `fetch` (the site CSP has `form-action 'self'`), then navigates to the **server-built** redirect carrying `code`, `state` and `iss` (RFC 9207). The consent token is bound to user, login session, client, redirect URI, PKCE challenge, scope, state and resource; 5 minutes; signed with a key derived from the session secret under a separate label (it can never be accepted as a session cookie).
+5. **Token exchange.** The code (60 s, single use) is consumed by one atomic `UPDATE` **before** anything else is checked, so a wrong verifier or redirect URI still burns it. The code is bound to the *exact* redirect URI (port included) it was issued for. Replaying a consumed code revokes every token minted from it. Returns `access_token` (30 min), `refresh_token`, `scope: mcp:read`.
+6. **Refresh.** Rotation with **strict** reuse detection and no grace period: each refresh token works once; presenting a rotated one, or losing a concurrent race for it, revokes the **whole family**. The family keeps its original 60-day absolute expiry (rotation never extends it); idle expiry is 14 days.
+7. **Use.** `/mcp` with `Authorization: Bearer tt_at_…` ([section 4](#4-mcp-request-handling)).
+8. **Revoke.** `POST /oauth/revoke` with an access or refresh token revokes the whole family, only for the client it was issued to; unknown tokens are silently accepted.
 
-Responses (exact strings are pinned by tests):
+### Token facts
+| Item | Value |
+|---|---|
+| Access token | 256-bit random, prefix `tt_at_`, 30 min, SHA-256 hash stored |
+| Refresh token | 256-bit random, prefix `tt_rt_`, 14 days idle / 60 days absolute, rotated on use |
+| Authorization code | 256-bit random, prefix `tt_ac_`, 60 s, single use |
+| Client id | `tt_` + 128-bit random (public identifier) |
+| Scope | `mcp:read` only. `offline_access` is accepted and ignored (never stored); it is advertised in the authorization-server metadata only |
+| PKCE | S256 only; verifier 43–128 chars of the RFC 7636 alphabet |
+| Audience | tokens are bound to `<MCP_PUBLIC_BASE_URL>/mcp` |
+
+### Attack → control
+| Threat | Control |
+|---|---|
+| Open redirect / phishing via `redirect_uri` | exact registration match first; unusable → error page, never a redirect; only Claude callbacks or canonical loopback |
+| Code interception / guessing | PKCE S256, 60 s single-use code, atomic consume, exact redirect binding, replay revokes family |
+| Stolen refresh token | rotation + strict reuse detection; revoke-before-and-after on every account change |
+| Consent CSRF / clickjacking | decision needs `Origin` = canonical URL, same-origin fetch metadata, JSON, session, bound consent token; page is `frame-ancestors 'none'`, `no-store` |
+| Malicious client name | rendered only as escaped React text; page states it is unverified |
+| Host-header issuer confusion | URLs come only from `MCP_PUBLIC_BASE_URL`; any other Host → empty 404 |
+| Token oracle | every token-state failure is the identical 401 |
+| Compromised `mcp_auth` credential | column-level grants, no DELETE/TRUNCATE, no prompt/session/audit access, audit only through an allow-listed function, tamper-guard triggers |
+| Enumeration / abuse of OAuth endpoints | per-IP, per-client and global rate limits, size caps, content-type and repeated-parameter checks before any database work |
+
+---
+
+## 4. `/mcp` request handling
+
+Every request is authenticated from scratch. Order of checks:
+
+`MCP_ENABLED` (404) → valid OAuth configuration (503) → **canonical Host** (empty 404) → Host allow-list backstop (403) → `Origin` (403) → bearer token (401 / 403 / 503) → SDK (method, content type, body size, protocol version).
+
+Requests refused before the bearer step never reach the database.
+
+**One query per request** re-reads the token, user, team and client: the token is an unrevoked, unexpired (idle and absolute) `access` token for the canonical resource; the user is **active, role `admin`, in a team that still exists**; the client is not disabled. The same predicate also gates code exchange and refresh, so a demoted, deactivated or team-less admin can neither use nor obtain tokens. Nothing is cached: a database change takes effect on the next request with the same token, and reverts the same way.
+
 | Situation | Status | `WWW-Authenticate` |
 |---|---|---|
 | No `Authorization`, or a non-Bearer scheme | 401 | `Bearer resource_metadata="<base>/.well-known/oauth-protected-resource/mcp", scope="mcp:read"` |
-| Bearer token that does not authenticate — unknown, malformed, expired, revoked, rotated/refresh token, wrong audience, user deactivated/demoted/team-less, team deleted, client disabled | 401 | `Bearer error="invalid_token", error_description="The access token is invalid or has expired.", resource_metadata="…", scope="mcp:read"` — **identical for every cause** (no oracle) |
+| Bearer token that does not authenticate (unknown, malformed, expired, revoked, refresh token, wrong audience, user deactivated/demoted/team-less, team deleted, client disabled) | 401 | `Bearer error="invalid_token", error_description="The access token is invalid or has expired.", resource_metadata="…", scope="mcp:read"` — identical for every cause |
 | Valid token without `mcp:read` | 403 | `… error="insufficient_scope" …` |
 | Authentication database unavailable | 503 + `Retry-After: 5` | none (a client must not discard a good token) |
 
-Principal → tools: `lib/mcp/context.ts` (`McpToolContext`, frozen, holds the admin principal, **never the token**). The SDK handler is created once and shared (it holds no per-user state; creating one logs a warning); the context reaches `createTokenTracerMcpServer(ctx)` through an `AsyncLocalStorage` scope that lives for one request, and the factory throws if no scope exists (fail closed). Concurrent requests with different tokens are tested not to see each other's principal. Cookies, `X-Team-Id`-style headers and `?access_token=` are never read. No tools are registered, so capability discovery is still empty.
+**Host policy (one rule for every MCP route):** a `Host` or `X-Forwarded-Host` that is not the canonical host, or no host at all, gets an empty `404` — on `/mcp`, `/.well-known/oauth-*`, and all `/oauth/*` routes. `403` is reserved for a disallowed `Origin` and cross-site OAuth POSTs. The SDK allow-list (`MCP_ALLOWED_HOSTS`) remains only as a misconfiguration backstop.
 
-Logging: the only new log line is the fixed text `[mcp] authentication unavailable`; no token, header, error object or database detail is ever logged (guarded by a test that inspects every `console.*` call in `lib/mcp`).
+**Principal → tools.** `lib/mcp/context.ts` gives the per-request server a frozen `McpToolContext` holding the admin principal (user, client, token id, scope, role, team, display name) and **never the token**. Tools (Phase 4) must take team and user from it exclusively. No tools are registered, so capability discovery is empty.
 
-Guards (`tests/mcp-foundation.test.ts`, replacing the Phase 1 "no database" rule): only six modules may import `pg` or run queries (`db.ts`, `oauth/{audit,clients,grant-user,rate-limit,tokens}.ts`); the request-serving modules reach the database only through `bearer.ts`; SQL may name only `users, teams, oauth_*, mcp_rate_limits, mcp_access_log` and never prompt/session/audit tables; environment reads are limited to `MCP_*`, `NODE_ENV`, `NEXT_PUBLIC_SERVER_URL` and (consent only) `SESSION_SECRET`. `mcp_auth` was **not** granted anything new for this step (`--verify` unchanged).
+**Protocol limits:** `POST` only (others 405 with `Allow: POST`), JSON content type (415), `Accept` must offer `application/json` and `text/event-stream` (406), body ≤ 64 KiB (413), `MCP-Protocol-Version` validated (400), `Cache-Control: no-store`. Stateless Streamable HTTP via `@modelcontextprotocol/server` 2.4.0 (pinned).
 
-Decisions and residual notes:
-- **Ineligible = invalid token (401), not 403.** A demoted admin's token is simply no longer valid; a 403 would imply the token is good. Re-authorization is then refused at consent for the same reason.
-- **`last_used_at`** is updated at most every 5 minutes per token (a write on a read path; bounded).
-- **No `/mcp` rate limit yet** — Phase 5. An unauthenticated flood costs one database round trip per request with a well-formed token (a missing/malformed header costs none); platform rate limiting (R9) applies.
-- The SDK prints one warning at start-up about `responseMode: 'json'`; it contains no request data.
+**Logging.** MCP code logs only fixed text: `[mcp] rejected: <category>`, `[mcp] request error`, `[mcp] authentication unavailable`, `[mcp] revocation audit unavailable`, `[mcp] purge failed`. A test inspects every `console.*` call in `lib/mcp`. (The existing shared database layer logs error code, up to 200 characters of message and SQL text for any failed query — never bound parameters; tokens are only ever bound parameters.)
 
-## Phase 2, Step 8 — revocation hooks and retention (implemented; MCP stays disabled)
+---
 
-**Why hooks are needed even though `/mcp` re-reads the user on every request:** a re-read only blocks a token *while* the account is ineligible. A demoted admin who is later re-promoted — or moved to another team — would get an old token back, with access the user never consented to for that team. A password or MFA reset has no re-read at all. So every change to an account's security state revokes that account's MCP tokens (live test: without the hook the token revives after re-promotion; with it, it stays dead).
+## 5. Database, roles and permissions
 
-`lib/team/mcp-revoke.ts` (application side, owner connection; it only ever runs the one-way `UPDATE oauth_tokens SET revoked_at, revoked_reason … WHERE revoked_at IS NULL` that the guard trigger allows; ids must be UUIDs; the MCP tables not existing yet is tolerated so these routes keep working before the migration is applied). `withMcpRevocation` = **revoke → change → revoke**: the first revoke runs before the change (a real database error aborts the whole operation), the second closes the window in which a stolen refresh token could still be exchanged. Audit rows go through `mcp_audit_event` (`tokens_revoked_for_user`, count + reason); an audit failure never undoes a revoke.
+### Tables (all new; created by `scripts/migrations/mcp-oauth.sql`)
+| Table | Purpose | Key constraints |
+|---|---|---|
+| `oauth_clients` | registered clients (DCR or static) | `scope = 'mcp:read'`, `token_endpoint_auth_method = 'none'`, `grant_types ⊆ {authorization_code, refresh_token}`, 1–5 redirect URIs, name 1–100 chars, `registration ∈ {dcr, static}`, salted IP hash only |
+| `oauth_authorization_codes` | single-use codes | `code_hash` bytea(32) primary key, `code_challenge` length 43, `scope = 'mcp:read'`, FKs to `users` and `oauth_clients` (`ON DELETE CASCADE`) |
+| `oauth_tokens` | access and refresh tokens | `token_hash` bytea(32) unique, `kind ∈ {access, refresh}`, FKs `ON DELETE CASCADE`, `absolute_expires_at`, rotation/revocation columns |
+| `mcp_rate_limits` | fixed-window counters | primary key `(key, window_start)`; keys contain hashed IPs, never raw |
+| `mcp_access_log` | tool-access trail (Phase 4/5) | append-only; no prompt text or token material; deliberately no foreign keys |
+
+### Integrity triggers (`BEFORE UPDATE`, bind the table owner too)
+- `oauth_tokens`: identity columns immutable; `revoked_at`/`revoked_reason` set once, never cleared or rewritten; `rotated_at`/`replaced_by_id` set once.
+- `oauth_authorization_codes`: only `consumed_at` may change, and only once.
+- `oauth_clients`: registration data immutable; only `last_used_at` and `disabled_at` change.
+
+### Functions
+- **`mcp_audit_event(event, actor, target_type, target_id, meta)`** — `SECURITY DEFINER`, `search_path = pg_catalog, public`, the **only** way `mcp_auth` writes `audit_log`. Fixed allowlist of 10 events (`client_registered`, `authorization_granted`, `authorization_denied`, `code_replayed`, `token_issued`, `token_refreshed`, `refresh_reuse_detected`, `token_revoked`, `tokens_revoked_for_user`, `access_denied`); action is always written as `mcp.<event>`; target type ∈ {`oauth_client`, `oauth_token`, `oauth_code`, `user`}; target id ≤ 128 chars of a restricted charset; metadata an object ≤ 2 KiB; the actor must be a real user and the **username is looked up inside the function**, never supplied.
+- **`mcp_oauth_purge()`** — owner-only; deletes codes expired > 1 h, access tokens expired > 1 day, any token past its absolute expiry + 1 day, rate-limit windows > 2 days, access-log rows > 180 days, and DCR clients unused for 30 days that hold no tokens or codes. Consumed codes are kept past their life so replay detection survives. Returns per-table counts.
+- Three guard functions (invoker rights, pinned `search_path`). All five functions have `EXECUTE` revoked from `PUBLIC`.
+
+### Role `mcp_auth` — exact privileges (`lib/mcp/grants.json`)
+Attributes: `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT`, `CONNECTION LIMIT 5`, no memberships, no `CREATE` in any schema; role defaults `statement_timeout 5s`, `lock_timeout 2s`, `idle_in_transaction_session_timeout 10s`, `search_path pg_catalog, public` (the app also applies them per transaction with `set_config(…, true)` because pooled sessions may ignore role defaults).
+
+| Table | SELECT (columns) | INSERT (columns) | UPDATE (columns) |
+|---|---|---|---|
+| `users` | `id, display_name, role, team_id, active` | — | — |
+| `teams` | `id, name` | — | — |
+| `oauth_clients` | all | `client_id, client_name, redirect_uris, grant_types, token_endpoint_auth_method, scope, registration, created_ip_hash` | `last_used_at` |
+| `oauth_authorization_codes` | all | `code_hash, client_id, user_id, redirect_uri, code_challenge, resource, scope, family_id, expires_at` | `consumed_at` |
+| `oauth_tokens` | all | `token_hash, kind, family_id, client_id, user_id, resource, scope, expires_at, absolute_expires_at` | `last_used_at, rotated_at, replaced_by_id, revoked_at, revoked_reason` |
+| `mcp_rate_limits` | all | `key, window_start, count` | `count` |
+| `mcp_access_log` | — | `user_id, team_id, client_id, token_id, event, tool, target_member_ids, outcome, status, row_count, duration_ms, ip_hash` | — |
+
+Plus `USAGE` on sequence `mcp_access_log_id_seq` and `EXECUTE` on `mcp_audit_event(text, uuid, text, text, jsonb)`. **No** `DELETE`, `TRUNCATE`, `REFERENCES` or `TRIGGER` anywhere.
+
+**Not accessible to `mcp_auth`:** `users.password_hash`, `users.api_key`, `users.username`, `members`, `team_members`, `member_keys`, `session_turns`, `sync_sessions`, prompt data, `audit_log` (no read, no write — only through the function), `auth_totp`, and every other table.
+
+**Verification:** `node scripts/setup-mcp-roles.mjs --verify` (using `MCP_AUTH_DATABASE_URL`) compares the live role to `grants.json` by catalog across **all** non-system schemas (including views), checks attributes, memberships, sequences, schema privileges and executable functions, and runs real denial probes that must fail with `42501` (e.g. `password_hash`, `members`, `session_turns`, `audit_log`, `DELETE oauth_tokens`, direct `INSERT audit_log`). It also checks the effective `search_path`.
+
+### Future role `mcp_reader` (Phase 4 — does not exist)
+A separate read-only role for tenant data, designed with the tools. **Open decision:** the original constraint said MCP data retrieval must use `ANALYST_DATABASE_URL`; the recommendation was a dedicated `mcp_reader` instead (so the analyst login keeps its own purpose and limits). Not decided — settle before Phase 4.
+
+### Connection handling
+`lib/mcp/db.ts`: only `MCP_AUTH_DATABASE_URL`, which must connect as `mcp_auth` (any other user is refused); verified TLS; pool `max: 3`; every unit of work is one transaction with local limits; missing/invalid configuration throws (fail closed — there is no fallback to the owner or analyst credentials).
+
+---
+
+## 6. Account lifecycle: revocation, audit, retention
+
+**Why revoke even though `/mcp` re-reads the user:** a re-read only blocks a token *while* the account is ineligible. An admin who is demoted and later re-promoted, or moved to another team, would otherwise get an old token back with access never consented to for that team; a password or MFA reset has no re-read at all. So every change to an account's security state revokes that account's tokens (live test: without the hook the token revives after re-promotion; with it, it stays dead).
+
+`lib/team/mcp-revoke.ts` (application side): runs only the one-way `UPDATE oauth_tokens SET revoked_at, revoked_reason … WHERE revoked_at IS NULL`; ids must be UUIDs; **revoke → change → revoke** (a database error on the first aborts the whole operation; the second closes the window in which a stolen refresh token could still be exchanged). Before the MCP migration exists it checks the catalog first (`to_regclass`) and does nothing, quietly — so these routes keep working everywhere. Audit rows go through `mcp_audit_event`; an audit failure never undoes a revoke.
 
 | Site | Trigger | Reason recorded |
 |---|---|---|
-| `POST /api/admin/users/reset-password` | password reset (superadmin) | `password_reset` |
-| `POST /api/v1/team/members/reset-password` | password reset (admin / platform admin), by user or member | `password_reset` |
+| `POST /api/admin/users/reset-password` | password reset | `password_reset` |
+| `POST /api/v1/team/members/reset-password` | password reset by (platform) admin | `password_reset` |
 | `PUT /api/auth/profile` | own password change | `password_changed` |
 | `POST /api/admin/users/reset-mfa` | authenticator reset | `mfa_reset` |
-| `PUT /api/admin/users` | role, active or team **actually changes** (display-name-only or same-value edits do not revoke) | `role_changed` / `deactivated` / `reactivated` / `team_changed` |
-| `PUT /api/v1/team/members` | role or active actually changes for the member's accounts | as above |
-| `deleteMember()` (soft removal from a team) | member removed | `member_removed` |
+| `PUT /api/admin/users` | role / active / team **actually changes** (display-name-only or same-value edits do not) | `role_changed`, `deactivated`, `reactivated`, `team_changed` |
+| `PUT /api/v1/team/members` | role or active actually changes | as above |
+| `deleteMember()` | soft removal from a team | `member_removed` |
 | `DELETE /api/admin/teams` | team deleted (`users.team_id` becomes NULL) | `team_deleted` |
-| `DELETE` of a user / hard member delete | nothing to do: `oauth_tokens` and `oauth_authorization_codes` cascade from `users` | — |
+| user delete / hard member delete | nothing needed — tokens and codes cascade from `users` | — |
 
-A guard test (`tests/mcp-revocation-hooks.test.ts`) fails if any file that updates `users.password_hash|role|active|team_id`, deletes a team, calls `resetMfa` or defines `deleteMember` does not import the helper (mutation-checked: removing the import from one route fails it), so a future write path cannot silently skip revocation.
+A guard test fails if any file that updates `users.password_hash|role|active|team_id`, deletes a team, calls `resetMfa` or defines `deleteMember` does not import the helper (mutation-checked). Revocation is per token, not a ban: the user can authorize again through consent, which re-checks eligibility. A database trigger on `users`/`auth_totp` would cover future write paths automatically but alters an existing hot table; **it was deliberately not added** (owner decision, 2026-11-26).
 
-**Nightly retention:** the existing daily cron (`/api/internal/rollup`) now also runs `SELECT mcp_oauth_purge()` as the table owner (expired codes, dead tokens, stale rate-limit windows, access-log rows past 180 days, unused DCR clients). It is isolated — a purge problem never fails the rollup — and silently skipped where the MCP migration is absent. The response reports counts only. No new cron entry, no `vercel.json` change.
+**Audit trail.** `lib/team/audit.ts` (`recordAuditEvent`) is the only application code that writes `audit_log`. `audit_log.actor_user_id` is a UUID foreign key to `users`; the built-in `superadmin`/`team` accounts have session ids `"superadmin"`/`"admin"` and no `users` row, so before 2026-11-26 every audited action they performed (impersonation, password resets, pricing changes) failed with `22P02` and was silently lost. Now: a non-UUID actor is written with `actor_user_id` NULL, the username kept and `metadata.builtinActor` = the original id; a UUID whose user was deleted is retried once unlinked with `metadata.actorUserMissing`; database users are unchanged. It resolves `true`/`false` and never throws, so audit logging still cannot break the action it records. Audit rows the built-in accounts should have written before the fix do not exist and cannot be recovered.
 
-Known semantics and open points:
-- **Team = `users.team_id`.** An admin's MCP team is the account's `team_id` (as for dashboard login). Removing an admin from a `team_members` row alone does not change `users.team_id`; the soft-removal hook still revokes their tokens, but the account keeps its `team_id` — unchanged existing behaviour.
-- **Optional hardening (decision for the owner, not done):** a database trigger on `users` (and `auth_totp`) that revokes tokens when those columns change would cover every future write path, including manual SQL and FK actions, atomically. It changes an existing hot table in production, so it is deliberately not part of this step.
-- Revocation is per token, not a ban: after a change the user can authorize again through consent (which re-checks eligibility).
+**Retention.** The existing daily cron (`/api/internal/rollup`, `0 2 * * *`) also runs `mcp_oauth_purge()` as the owner. It is isolated (a purge problem never fails the rollup), checks `to_regprocedure` first (skipped where the migration is absent), and reports counts only. No new cron entry and no `vercel.json` change.
 
-## Phase 2, Step 9 — end-to-end and negative testing (done on the test branch only)
+---
 
-**Real-server harness** (`npm run test:e2e:mcp`, `scripts/e2e-mcp.mjs`): builds and starts the real app against the dedicated test branch and drives it over HTTP — 150 checks in eight groups (the eighth is the audit trail, added with the audit fix). It reads only explicit `TEST_*` variables (never an env file), refuses unless the endpoint matches `TEST_DATABASE_EXPECTED_ENDPOINT` and differs from any production variable in the environment, gives the server it starts test-only secrets and built-in account credentials, and removes every row it creates (restoring any function or table it temporarily renamed).
-1. **OAuth lifecycle:** DCR → authorize → login → TOTP enrolment → consent → token → `/mcp` → refresh rotation → reuse kills the family → revoke endpoint → code replay.
-2. **Edge cases:** loopback client on any port, unregistered/malformed redirect URIs (error page, never a redirect), bad PKCE method, repeated parameters, oversize body, stale login → re-authenticate, non-admin refused.
-3. **Host / Origin / CSRF / CORS / headers:** every route answers another alias and a spoofed `X-Forwarded-Host` with 404; `/mcp` and `/oauth/decision` Origin rules; cross-site POSTs refused; no CORS headers on POST endpoints; HSTS/nosniff everywhere; consent page unframeable and uncacheable.
-4. **Revocation through the real routes:** password reset (two routes), own password change, MFA reset, demotion/deactivation/team change/member removal/team deletion — each kills the access token **and** the refresh token; display-name-only and same-value edits do not; re-promotion does not revive old tokens; admin-user deletion cascades.
-5. **Cron:** secret required; purge removes expired rows and reports counts; missing function → rollup still succeeds (quiet skip); purge raising → rollup still succeeds, `error:true`, fixed log line, no database text in the response.
-6. **Rate limits** enforced over HTTP (429 + `Retry-After`).
-7. **Existing behaviour unchanged:** built-in `team` / `superadmin` login + env TOTP, `returnTo` ignored for them, and they can never authorize MCP access.
+## 7. Configuration
 
-**Negative/edge database suite** (`tests/mcp-negative-db.test.ts`, 19 tests): refresh idle/absolute expiry; replay of the middle or oldest refresh token; two concurrent exchanges of one code; exact-port binding for loopback; PKCE verifier edges; hard delete cascade; rate limits enforced at their real thresholds (token per IP and per client, revoke, global registration cap, consent) incl. window reset and no raw IPs in keys; body-size limits and no CORS; three teams × two admins in concurrent waves with revocations in between; purge (two at once, no collateral deletes, replay detection survives it, `mcp_auth` cannot run it).
+None of the new variables is set anywhere yet.
 
-**Analyst / existing-functionality regression:** no analyst, NL2SQL, chat, research or prompt file changed anywhere in the MCP program (verified against the tenant-isolation baseline `25dc66b`). The only existing files touched are the account/admin routes listed under Step 8, `app/api/auth/login/route.ts` + `app/page.tsx` (returnTo), `lib/team/stats.ts` and the cron route. All five pre-existing database suites (analyst, analyst login, session-turns isolation, tenant isolation, rollup concurrency; 42 tests) pass on the test branch, with the analyst login provisioned there with a fresh password (no production credential used).
+| Variable | Needed for | Behaviour / default | Secret |
+|---|---|---|---|
+| `MCP_ENABLED` | the kill switch | must be exactly `true` to serve; anything else → every MCP route 404 | no |
+| `MCP_PUBLIC_BASE_URL` | issuer, resource, audience, challenge URLs | https origin with no path/query (`http://localhost` allowed outside production); missing/invalid → 503; **never** falls back to another variable | no |
+| `MCP_AUTH_DATABASE_URL` | the `mcp_auth` pool | must connect as `mcp_auth`; missing → 503 | **yes** |
+| `MCP_ALLOWED_HOSTS` | optional SDK host allow-list | default: host of `NEXT_PUBLIC_SERVER_URL` (plus `localhost` outside production); must include the canonical host | no |
+| `MCP_ALLOWED_ORIGINS` | optional extra browser `Origin` hostnames | `claude.ai`, `claude.com` and the allowed hosts are always accepted; no `Origin` is allowed | no |
+| `MCP_ALLOW_LOOPBACK_REDIRECTS` | kill switch for Claude Code loopback redirects | set to `false` to refuse them (also for existing clients); default allowed | no |
+| `NEXT_PUBLIC_SERVER_URL` | existing; default allowed host | unchanged | no |
+| `SESSION_SECRET` | existing; derives the consent-token key, salts IP hashes | rotating it invalidates sessions and consent tokens and resets rate-limit keys; tokens are unaffected (random, hashed in the database) | **yes** |
 
-**Findings from Step 9 and what was done**
-- **Fixed — hidden schema pass in the revoke helper.** The shared `query()` helper reacts to a missing-table error by running `ensureSchema()` and retrying. The Step 8 helper relied on that error to detect "MCP migration not applied", so before the migration (i.e. in production today) every hooked password reset or role edit would have triggered a full DDL pass and an error log. The helper and the cron purge now check the catalog first (`to_regclass` / `to_regprocedure`), which never raises. Guard tests and a harness scenario (table temporarily renamed) pin this.
-- **Documented, pre-existing — DB error logging.** `lib/team/db.ts` logs `[DATABASE-QUERY-ERROR] <code> <message ≤200 chars> | query: <SQL ≤160 chars>` for any failed query and deliberately never bound parameters. A server-side error message can therefore appear in server logs; tokens/hashes never do (they are only ever bound parameters, and `mcp_auth` queries use their own pool, not this wrapper).
-- **Fixed afterwards — audit rows for built-in accounts.** Admin routes pass `session.userId` straight into `audit_log.actor_user_id` (UUID, foreign key to `users`). For the built-in `superadmin` / `team` accounts that value is `"superadmin"` / `"admin"`, so the insert failed (`22P02`) and was swallowed and logged: actions by built-in accounts, including impersonation and password resets, were never written to `audit_log`. A UUID whose user no longer exists (a stale session of a deleted account) failed the same way (`23503`). Fixed once, in the only writer (`lib/team/audit.ts`): a non-UUID actor is written with `actor_user_id` NULL, the username kept and `metadata.builtinActor` = the original id; a missing user is retried once unlinked with `metadata.actorUserMissing`; database users are unchanged. `recordAuditEvent` now resolves `true`/`false` (still never throws) so failure can be asserted. Covered by 14 DB-free tests (mutation-checked), 6 live tests on the real table (with a control proving the original failures), and an end-to-end scenario with real superadmin, `team` and database-admin actions through the running server, plus a check that no `[audit-log-error]` appears anywhere in the server log. History: audit rows by built-in accounts written before this fix do not exist and cannot be recovered.
-- **Unexplained, not reproduced — one slow run.** The first execution of the negative suite ran for ~18 minutes without finishing (killed; leftovers showed it had reached the cross-tenant concurrency tests). Four subsequent runs passed in 46–71 s with no hang. `test:db` now has `--test-timeout=180000` so a recurrence fails with the test's name instead of blocking. Treat as open until it has stayed clean for a while.
-- **Not covered by design:** there is no rate limit on `/mcp` itself yet (Phase 5); no tools exist, so there is no tenant *data* access to test for cross-tenant leakage — what is proven is identity isolation (principal per request, no cross-contamination, revocation) and that `mcp_auth` has no privilege on prompt, session, audit or member data (`setup-mcp-roles.mjs --verify`).
+Script-only: `DATABASE_URL` (owner, for the migration and role scripts), `EXPECTED_ENDPOINT`, `CONFIRM_MCP_MIGRATION`, `CONFIRM_MCP_ROLLBACK_DATA_LOSS`, `CONFIRM_MCP_ROLES`, `MCP_AUTH_PASSWORD`. Tests only: `TEST_DATABASE_URL`, `TEST_DATABASE_EXPECTED_ENDPOINT`, `TEST_MCP_AUTH_DATABASE_URL`, `TEST_ANALYST_DATABASE_URL` (never production values; see [section 9](#9-testing)).
 
-### Connection sizing for `mcp_auth` (found in Step 7 testing; open for production readiness)
-`mcp_auth` has `CONNECTION LIMIT 5` and each server instance's pool allows up to 3 connections (`lib/mcp/db.ts`, `max: 3`). Running the live DB test files in parallel exceeded the limit (`53300 too many connections for role "mcp_auth"`); `npm run test:db` is now sequential (`--test-concurrency=1`). The same arithmetic applies in production: several concurrent serverless instances, each opening up to 3 connections, can exhaust 5 and make `/mcp` and `/oauth/*` answer 503 (fail closed, never open). Before enabling in production: point `MCP_AUTH_DATABASE_URL` at the Neon **pooled** (PgBouncer) endpoint, lower the per-instance pool to 1, and set the role's connection limit from measured concurrency (or confirm how Neon counts pooled connections against it). Not changed in this step.
+---
 
-### Production-readiness approval items (must be signed off before `MCP_ENABLED=true` in production)
-1. **Consent wording — legal/HR (OPEN).** Technically approved on 2026-11-24 (it matches the access model: a team admin's connected app can read team developers' activity, session metadata and prompt text with sensitive values masked). **Not confirmed as meeting legal or HR requirements** (employee notice, monitoring disclosure, data-protection basis). Owner: product/legal. The text is in `app/oauth/authorize/consent-form.tsx`.
-2. R2 (audit actor attribution by a compromised `mcp_auth`), R7, R9 (platform rate limiting for `/oauth/*`), R10, and the `mcp_auth` connection sizing above.
-3. Vercel production `NEXT_PUBLIC_SERVER_URL` / `MCP_PUBLIC_BASE_URL` verification, production migration and role provisioning, new environment variables.
+## 8. Operations runbook (documented, not executed)
+
+**Nothing in this section has been run against production.** Every production step needs explicit approval and a backup branch. Commands use placeholders; connection strings and passwords come from the environment, never from files in the repo and never on a command line you keep in shell history.
+
+### 8.0 Gates — do not start until
+All items in [section 13](#13-production-readiness-checklist) marked *blocker* are closed or consciously accepted, and the legal/HR sign-off exists in writing.
+
+### 8.1 Preflight
+- Confirm the tenant-isolation migration is already applied in production (earlier program; `5008f2d`, `8f37be9`, `25dc66b`).
+- Confirm production's canonical URL: `NEXT_PUBLIC_SERVER_URL` in Vercel Production is `https://token-tracer-three.vercel.app`.
+- Create a **Neon backup branch** of production and note its name.
+- Know the production **endpoint id** (`ep-…`) and have the owner **direct** (non-pooled) connection string in a file outside the repo.
+- Choose a low-traffic window (the migration briefly locks `users` to add the foreign keys).
+
+### 8.2 Migration (additive: five new tables, five new functions)
+```
+# 1. Dry run — applies inside a transaction, reports, ROLLS BACK. EXPECTED_ENDPOINT is required in every mode.
+EXPECTED_ENDPOINT=<prod-endpoint-id> node --env-file=<owner-env-file> scripts/migrate-mcp-oauth.mjs
+
+# 2. Apply (idempotent — safe to re-run)
+CONFIRM_MCP_MIGRATION=yes EXPECTED_ENDPOINT=<prod-endpoint-id> node --env-file=<owner-env-file> scripts/migrate-mcp-oauth.mjs --apply
+```
+Expect: 5 tables, 5 functions, 4 foreign keys (only to `users` and `oauth_clients`), 3 triggers, no function executable by `PUBLIC`. The runner never prints the connection string and verifies TLS.
+
+### 8.3 Role provisioning
+```
+# Print the SQL that would run (connects to nothing)
+node scripts/setup-mcp-roles.mjs
+
+# Create/refresh the role (password ≥ 24 printable ASCII from the environment, e.g. openssl rand -hex 24)
+MCP_AUTH_PASSWORD=<generated> CONFIRM_MCP_ROLES=yes EXPECTED_ENDPOINT=<prod-endpoint-id> node --env-file=<owner-env-file> scripts/setup-mcp-roles.mjs --apply
+
+# Verify the live role matches grants.json exactly (exit code non-zero on any FAIL)
+MCP_AUTH_DATABASE_URL=<mcp_auth connection string> node scripts/setup-mcp-roles.mjs --verify
+```
+Neon needs the plaintext password in the statement; if an apply fails, rotate the password. Build `MCP_AUTH_DATABASE_URL` as `postgresql://mcp_auth:<password>@<host>/<db>?sslmode=require`. Before go-live decide direct vs pooled host and pool/limit sizing (blockers 2 and 3).
+
+### 8.4 Environment variables (Vercel → Production)
+Add `MCP_AUTH_DATABASE_URL` (sensitive) and `MCP_PUBLIC_BASE_URL=https://token-tracer-three.vercel.app`. Optionally `MCP_ALLOWED_HOSTS`, `MCP_ALLOWED_ORIGINS`. **Leave `MCP_ENABLED` unset.** Vercel applies environment changes on the next deployment.
+
+### 8.5 Deploy with the flag off, then verify
+Push and deploy the MCP commits. With `MCP_ENABLED` unset, verify: `/mcp`, `/.well-known/oauth-*` and every `/oauth/*` route return **404**; normal login, password reset, role/team edits and the nightly cron behave as before (the revoke hooks and the purge now find the tables and function and act on them).
+
+### 8.6 Staged enablement
+1. Set `MCP_ENABLED=true` and redeploy.
+2. Verify: both `.well-known` documents return 200 with the canonical issuer and resource; `POST /mcp` without a token returns 401 with the exact challenge; any other host returns 404.
+3. Register a test connector in Claude using `https://token-tracer-three.vercel.app/mcp` and complete the flow with a **non-production-critical admin account**; confirm consent, token issuance, `/mcp` `initialize` (empty capabilities), then revoke from the app side (change the password) and confirm the connector loses access.
+4. Watch for a day: `[mcp] …` log tags, 503 rates (connection pressure), `audit_log` rows with action `mcp.*`, cron response `mcpPurge` counts.
+
+### 8.7 Day-2 operations
+| Task | How |
+|---|---|
+| Emergency stop | unset `MCP_ENABLED` and redeploy → every MCP route 404 |
+| Block one client | as owner: `UPDATE oauth_clients SET disabled_at = now() WHERE client_id = '<id>'` (its tokens stop working on the next request; re-enable by setting NULL) |
+| Block loopback redirects | `MCP_ALLOW_LOOPBACK_REDIRECTS=false` |
+| Revoke one user | change their password through the app (hooks fire), or as owner: `UPDATE oauth_tokens SET revoked_at = now(), revoked_reason = 'manual' WHERE user_id = '<id>' AND revoked_at IS NULL` |
+| Revoke everything | the same `UPDATE` without the `user_id` condition (all connectors must re-authorize) |
+| Rotate the `mcp_auth` password | rerun the role script `--apply` with a new `MCP_AUTH_PASSWORD`, update `MCP_AUTH_DATABASE_URL`, redeploy |
+| Rotate `SESSION_SECRET` | see [section 7](#7-configuration) for the effects |
+
+### 8.8 Rollback procedures (least to most destructive; do them in this order)
+1. **Switch off** — unset `MCP_ENABLED`, redeploy. Reversible; nothing is lost. If any compromise is suspected, also revoke all tokens (8.7).
+2. **Revoke** — the owner `UPDATE` above. Reversible by re-authorizing.
+3. **Code rollback** — redeploy the previous Vercel deployment or `git revert` the MCP commits ([section 10](#10-implementation-history)). The database objects are ignored by older code. **Revoke tokens first**: older code has no revoke hooks, so password resets would stop ending MCP access.
+4. **Database rollback** — destructive for the five new tables only:
+   ```
+   CONFIRM_MCP_MIGRATION=yes CONFIRM_MCP_ROLLBACK_DATA_LOSS=yes EXPECTED_ENDPOINT=<prod-endpoint-id> \
+     node --env-file=<owner-env-file> scripts/migrate-mcp-oauth.mjs --rollback
+   ```
+   The runner prints the row counts it will destroy and refuses without the data-loss confirmation. All issued tokens, codes and clients are lost (connectors must re-register); `mcp_access_log` is dropped (export it first if needed). **`audit_log` rows with action `mcp.*` are never removed.** Nothing existing references the new objects; no `CASCADE` is used. Remove the app's connection first (step 1) so nothing is connected while tables disappear.
+5. **Role removal** — `CONFIRM_MCP_ROLES=yes EXPECTED_ENDPOINT=<prod-endpoint-id> node --env-file=<owner-env-file> scripts/setup-mcp-roles.mjs --drop`. Order relative to step 4 does not matter.
+6. **Environment cleanup** — remove `MCP_AUTH_DATABASE_URL`, `MCP_PUBLIC_BASE_URL` and the optional variables from Vercel.
+
+Because the revoke helper and the cron purge check the catalog first, the app keeps working at every rollback level, including after step 4. The nightly purge simply reports `skipped`.
+
+---
+
+## 9. Testing
+
+All database tests and the end-to-end harness run **only** against a dedicated Neon test branch, through explicit `TEST_*` variables (never an env file, never `DATABASE_URL`); the shared helper refuses a test URL on the same endpoint as any production variable and replaces those variables with an unreachable placeholder. Database suites run sequentially (`--test-concurrency=1`, per-test timeout 180 s) because `mcp_auth` has a connection limit of 5.
+
+### Results (2026-11-26, test branch)
+| Check | Result |
+|---|---|
+| Unit tests (`npm run test:unit`) | **466 / 466** (257 are MCP/OAuth/revocation/audit/documentation) |
+| Live database suites (13 files, sequential) | **150 / 150**, 0 skipped (42 pre-existing analyst/isolation + 108 MCP/audit) |
+| Real `next build` + `next start` end-to-end harness | **150 / 150** checks, 8 groups |
+| Role verification (`setup-mcp-roles.mjs --verify`) | all checks pass |
+| `tsc --noEmit`, ESLint on every file added or changed for MCP | clean |
+| Leftover test rows on the branch (checked without any cleanup beforehand) | zero |
+
+### Suites
+| Suite | Tests | What it proves |
+|---|---|---|
+| `mcp-foundation` (unit) | 61 | protocol, request validation, transport, flag, Host/Origin; **guards**: only six modules may touch the database, SQL limited to approved tables and never prompt/session/audit tables, env reads limited, no request data or tokens in logs, no tools registered |
+| `mcp-oauth-pure` (unit) | 91 | PKCE (RFC 7636 vector), secrets, redirect rules, scopes, errors, `safeReturnTo` |
+| `mcp-oauth-static` (unit) | 20 | migration SQL and PL/pgSQL parse, exact objects, constraints, triggers, grants, script safety |
+| `mcp-oauth-http` (unit) | 13 | config, canonical host, discovery documents, preflight, header checks |
+| `mcp-oauth-consent` (unit) | 17 | consent token (isolated from sessions), request parsing, eligibility incl. 15-minute rule, `/oauth/reauthenticate`, UI/login static guards |
+| `mcp-bearer` (unit) | 20 | header parsing, exact challenges, check order, no caching, principal isolation (barrier test), no leaks |
+| `mcp-revocation-hooks` (unit) | 10 | every security-state write has a hook (mutation-checked), helper safety |
+| `audit-actor` (unit) | 14 | built-in vs database actors, foreign-key fallback, failures never silent (mutation-checked) |
+| `mcp-docs` (unit) | 11 | this document matches the code: referenced files exist, environment-variable table, permission matrix column by column, lifetimes, per-route rate limits, audit events, script flags, no credentials (mutation-checked) |
+| `mcp-oauth-db` (live) | 23 | triggers fire without caller EXECUTE, one-way columns, audit-function allowlists and `search_path` pinning, constraints, purge, concurrent single-use |
+| `mcp-oauth-data` (live) | 17 | data layer through the real `mcp_auth` pool: registration, exchange, rotation, reuse, bearer lookup, revocation, rate limit |
+| `mcp-oauth-endpoints` (live) | 8 | register / token / revoke handlers end to end |
+| `mcp-oauth-authorize` (live) | 14 | authorize page logic and decision route, eligibility, recent login |
+| `mcp-bearer-db` (live) | 14 | real token states, per-request re-check flips, overlapping requests of different users/teams |
+| `mcp-revocation-db` (live) | 7 | revoke by user/member/team, idempotence, ordering, failure semantics, revival scenario |
+| `mcp-negative-db` (live) | 19 | lifecycle edges, rate limits enforced at real thresholds, cross-tenant concurrency with mid-flight revocation, size/CORS, purge |
+| `audit-actor-db` (live) | 6 | the real `audit_log` table, with a control proving the original failures |
+| pre-existing: analyst-db, analyst-login-db, session-turns-isolation, tenant-isolation-phase2, rollup-concurrency | 42 | regression: analyst and tenant-isolation behaviour unchanged |
+| `scripts/e2e-mcp.mjs` (real server) | 150 | see below |
+
+### End-to-end harness (`npm run test:e2e:mcp`)
+Builds and starts the real app against the test branch and drives it over HTTP. Eight groups: (1) OAuth lifecycle through the real login, TOTP enrolment and consent, refresh rotation, reuse, revoke, code replay; (2) loopback client, malformed requests, stale login, non-admin; (3) Host/Origin/CSRF/CORS/security headers on every route; (4) revocation through the real routes — each kills access **and** refresh tokens, no-op edits do not, re-promotion does not revive, deletion cascades, and a missing-table scenario; (5) cron purge incl. failure handling; (6) rate limits over HTTP; (7) built-in `team`/`superadmin` logins unchanged and never able to authorize MCP; (8) audit trail for built-in and database actors, with a check that no `[audit-log-error]` appears anywhere in the server log. It reads only explicit `TEST_*` variables, refuses a production endpoint, gives the server it launches test-only secrets and credentials, and removes every row it creates (restoring anything it temporarily renamed).
+
+How to run: `npm run test:unit` · `npm run test:db` (needs the `TEST_*` variables, see `tests/README.md`) · `npm run test:e2e:mcp`.
+
+### Regression of existing functionality
+No analyst, NL2SQL, chat, research or prompt file changed anywhere in the MCP program (checked against the tenant-isolation baseline `25dc66b`). Existing files touched: the account/admin routes listed in [section 6](#6-account-lifecycle-revocation-audit-retention), `app/api/auth/login/route.ts` and `app/page.tsx` (returnTo), `lib/team/stats.ts`, `lib/team/audit.ts` and the cron route. The five pre-existing database suites pass on the test branch.
+
+### Not covered (by design)
+- No tools exist, so there is no tenant **data** access to test for cross-tenant leakage. What is proven is identity isolation (the principal per request, no cross-contamination, revocation) and that `mcp_auth` has no privilege on prompt, session, audit or member data.
+- No `/mcp` rate limit exists yet (Phase 5).
+- Nothing was tested against a real Claude client (Phase 6) or over the pooled endpoint.
+
+---
+
+## 10. Implementation history
+
+Prerequisite (earlier program): tenant-isolation remediation — `5008f2d` migration and diagnostics, `8f37be9` enforcement and transactional rollups, `25dc66b` regression tests; the production migration was applied and verified before MCP work began.
+
+| Phase / step | Scope | Commit(s) |
+|---|---|---|
+| 0 | Read-only audit (no code) | — |
+| 1 | Stateless MCP foundation, flag, Host/Origin guards | `40e3ce6` |
+| 2 · steps 1–3 | OAuth building blocks (PKCE, secrets, redirect rules, scopes, errors, `safeReturnTo`); migration + rollback; `mcp_auth` role, grants and runner scripts — written, security-reviewed twice (HIGH, MEDIUM and LOW findings fixed, then re-reviewed), static-tested | `e224cf1` |
+| 2 · step 4 | Live schema/role/trigger/audit-function tests on a fresh test branch (R1 closed); data-access layer on the dedicated pool | `41a214c`, `67cd291`, `7521d68` |
+| 2 · step 5 | Discovery, DCR, token, revoke endpoints; canonical-host and request-shape rules; verified on a real build | `a416ca0` |
+| 2 · step 6 | Consent page, decision route, login `returnTo`; **R8** 15-minute recent-login rule and `/oauth/reauthenticate` | `14b70df`, `d56b851` |
+| 2 · step 7 | Bearer authentication on `/mcp`; review fixes: one Host policy (404), request-isolation tests | `62be031`, `cf709a6` |
+| 2 · step 8 | Revoke hooks on every security-state change; nightly purge | `4c6884e` |
+| 2 · step 9 | End-to-end harness and negative suite; quiet missing-migration path | `fb02c62` |
+| 2 · step 9 follow-up | Audit rows for built-in accounts and deleted users | `8b8421e` |
+| 2 · step 10 | This consolidated documentation and its drift guard test | this commit |
+
+Findings that changed the design along the way: the audit function replaced direct `audit_log` grants (H1); one-way tamper triggers replaced writable columns (H2); the `search_path` bug found only by the first live role verification; the SDK handler is shared (per-request construction logged a warning each time); per-request principal via `AsyncLocalStorage`; the revoke helper must not rely on a missing-table error (it would trigger the shared layer's schema pass); the audit actor rule.
+
+---
+
+## 11. Key decisions
+- **Authorization server:** DCR plus static clients; CIMD advertised false; PKCE S256 only; public clients only.
+- **Redirects:** Claude hosted callbacks, plus loopback for Claude Code with a consent warning (port ignored at registration match, exact at exchange).
+- **Lifetimes:** access 30 min; refresh 14 days idle / 60 days absolute; code 60 s; consent token 5 min; login recency 15 min.
+- **Refresh:** strict reuse detection, no grace period.
+- **Who may connect:** database admins with a team only; `superadmin` and the built-in accounts are excluded; ineligible = invalid token (401), not 403.
+- **Scopes:** `mcp:read` only; `offline_access` accepted and never stored.
+- **Audit:** OAuth security events → `audit_log` only through `mcp_audit_event`; tool-access events → `mcp_access_log` (Phase 4/5).
+- **Roles:** `mcp_auth` now; `mcp_reader` in Phase 4. The `ANALYST_DATABASE_URL` vs dedicated-role question is **open**.
+- **Host policy:** empty 404 for any non-canonical host, everywhere.
+- **No database trigger on `users`** for revocation (owner decision): route hooks plus a guard test instead.
+- **Consent wording:** technically approved 2026-11-24; legal/HR sign-off outstanding.
+
+---
+
+## 12. Risk register and open items
+
+### Closed during the program
+R1 (trigger firing and `SECURITY DEFINER` privileges — proven live) · R5 (pooled `SET` defaults — every transaction applies local limits) · R8 (re-authentication at consent — 15-minute rule) · inconsistent Host answers · hidden schema pass in the revoke helper · lost audit rows for built-in accounts.
+
+### Unresolved — must be decided or accepted before production
+| ID | Risk / open item | Impact | Current mitigation | Required before production |
+|---|---|---|---|---|
+| **R2** | A compromised `mcp_auth` credential can record a *valid* `mcp.*` audit event attributed to any existing user, with free-form metadata inside the function's bounds | misleading audit rows (not data access) | allowlisted events, `mcp.` prefix, bounded metadata, actor must exist | rate-limit the function, or derive the actor from the token row instead of accepting it |
+| **R7** | Consent token is not single-use: within 5 minutes the same logged-in admin can obtain two codes for the same client/redirect/PKCE challenge | none without the verifier | 5-minute life, bound to user and session | accept (documented) or add a one-time marker |
+| **R9** | `/oauth/authorize`, `/token`, `/register` each cost a database round trip; limits are per hashed IP, pool is small | DoS / pool exhaustion → 503 (fails closed) | per-IP, per-client and global limits, size caps, cheap checks first | platform rate limiting (Vercel Firewall) for `/oauth/*` |
+| **R10** | Dynamic clients can claim any name | phishing-style consent prompts | page says it is unverified and shows the real destination | accept, or restrict registration |
+| **CS** | `mcp_auth` limit 5 vs pool 3 per instance; several serverless instances can exhaust it (found when parallel test files hit `53300`) | `/mcp` and `/oauth/*` answer 503 under load | fails closed | pooled endpoint, per-instance pool of 1, limit sized from measured concurrency |
+| **PB** | All tests used the direct endpoint; behaviour of `set_config(…, true)`, prepared statements and role limits over PgBouncer is unproven | possible production-only failures | — | run the live suites against the pooled `mcp_auth` URL |
+| **LH** | Legal/HR approval of the consent wording (employee notice, monitoring disclosure, data-protection basis) | compliance | text matches the intended access model | written sign-off; text lives in `app/oauth/authorize/consent-form.tsx` |
+| **CV** | Claude's actual registration payload, revocation calls, `resource` and `iss` handling are unverified (design used researched, partly unverified behaviour) | connector may not complete | standards-compliant implementation | Phase 6 test with a real client |
+| **VE** | Production `NEXT_PUBLIC_SERVER_URL` / `MCP_PUBLIC_BASE_URL` not yet checked against the canonical domain | wrong audience or issuer | `MCP_PUBLIC_BASE_URL` is validated and independent | verify in Vercel before enabling |
+| **D4** | `mcp_reader` vs `ANALYST_DATABASE_URL` for tool data (Phase 4) | design | none (no tools) | decide before Phase 4 |
+| **R3** | `mcp_access_log` has no event allowlist | free-form event text in an append-only table | no prompt text, grants limit columns | add a `CHECK` when Phase 4 fixes the event set |
+| **R6** | Neon needs the role password in plaintext in the `CREATE/ALTER ROLE` statement | exposure if logged | scripts never print it; TLS | rotate the password if an apply fails |
+| **NR** | No `/mcp` rate limit yet | cost of a flood with well-formed tokens | malformed requests cost no database work | Phase 5 |
+| **TM** | An admin's MCP team is `users.team_id`; removing them from a `team_members` row alone does not change it | none new (tokens are revoked on removal) | revoke hook | none; documented existing semantics |
+| **OT** | Optional database trigger for revocation not added | a future write path could skip the hook | route hooks + guard test | owner may reconsider |
+| **SL** | One run of the negative suite hung ~18 minutes and never recurred in four reruns; cause unknown | CI flake | `--test-timeout` on `test:db` | watch for recurrence |
+| **AH** | Audit rows built-in accounts should have written before 2026-11-26 do not exist | audit history gap | fixed going forward | none (unrecoverable) |
+| **DL** | The shared database layer logs error code, ≤ 200 chars of message and SQL text (never parameters) | server-side error text in logs | by design, existing | none |
+
+### Related, outside MCP scope (noticed along the way — not addressed here)
+- The git remote `company` embeds a credential in its URL (not rotated) — rotate it and re-add the remote without the secret.
+- `serviceAccountKey.json` and `db_dump.txt` exist locally (untracked, git-ignored) — keep them out of the repository and consider deleting `db_dump.txt`.
+- Node version is not pinned (`engines`); two git remotes exist — confirm which one Vercel deploys from.
+- 11 legacy reprompt rows have no owner backfill (needs approval); delete auditing is deferred; the research rollup on the new code has not been observed in production (cron `0 2 * * *`).
+
+---
+
+## 13. Production-readiness checklist
+Items marked **blocker** must be closed or explicitly accepted by the owner. Nothing here has been done.
+
+- [ ] **blocker** Legal/HR written approval of the consent wording (LH)
+- [ ] **blocker** Connection sizing decided and applied; `mcp_auth` validated over the pooled endpoint (CS, PB)
+- [ ] **blocker** Platform rate limiting configured for `/oauth/*` (R9)
+- [ ] **blocker** R2 mitigated or accepted in writing
+- [ ] **blocker** Production `NEXT_PUBLIC_SERVER_URL` / `MCP_PUBLIC_BASE_URL` verified (VE)
+- [ ] R7, R10 accepted (or mitigated)
+- [ ] Neon backup branch of production created; maintenance window chosen
+- [ ] Migration dry run reviewed, then applied with explicit approval (8.2)
+- [ ] Role provisioned and `--verify` clean (8.3)
+- [ ] Environment variables added with `MCP_ENABLED` unset (8.4)
+- [ ] Deployed with the flag off; 404s and unchanged behaviour verified (8.5)
+- [ ] Staged enablement and a real-client check (8.6; Phase 6 findings recorded) (CV)
+- [ ] Rollback procedure rehearsed on the test branch
+- [ ] Monitoring/alerting for `[mcp]` log tags and 503 rates in place
+
+## 14. Cleanup after sign-off
+The test branch holds a **copy of production data** and test credentials. After review:
+- Delete the Neon test branch (or let it expire) — it contains `mcp_auth` and `analyst_login` roles with test-only passwords.
+- Delete the local credential files created for testing (outside the repo) and remove `TEST_DATABASE_URL` / `TEST_DATABASE_EXPECTED_ENDPOINT` from `.env.local`.
+- Delete the older `tenant-isolation-dry-run` branch if it still exists.
+
+## 15. Later phases
+| Phase | Scope |
+|---|---|
+| 3 | Data-level tenant authorization — scope every query to the principal's team (identity half already done) |
+| 4 | Read-only tools (list team developers, developer activity, developer sessions, session details, prompt search, prompt batch); max 7-day window, cursor pagination, masking of sensitive values, **no** arbitrary SQL and **no** write tools; the `mcp_reader` role; `mcp_access_log` event set (R3) |
+| 5 | Access logging for tool calls and `/mcp` rate limiting (NR) |
+| 6 | Integration and end-to-end test with a real Claude client (CV) |
+| 7 | Production rollout using [section 8](#8-operations-runbook-documented-not-executed) |
