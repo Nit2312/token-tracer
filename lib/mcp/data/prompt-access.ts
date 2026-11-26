@@ -9,11 +9,17 @@
  * No text-bearing type exists in P3-1: this module only decides the mode.
  */
 export const PROMPT_TEXT_POLICY_VERSION = 1 as const;
+/** Wording version 1 overstates what masking does and is NOT acceptable for text access (decision 6, 2026-11-26). Corrected wording is version 2 or later. */
+export const CONSENT_WORDING_MIN_VERSION = 2 as const;
 
 export interface PromptTextApproval {
   /** Reference to the written privacy/legal approval (ticket, document id). */
   readonly reference: string;
-  readonly approvedBy: string;
+  /** Two DIFFERENT named approvers: one for privacy, one for legal. One person cannot grant both. */
+  readonly privacyApprovedBy: string;
+  readonly legalApprovedBy: string;
+  /** Version of the (corrected) consent wording shown to developers; must be at least CONSENT_WORDING_MIN_VERSION. */
+  readonly consentWordingVersion: number;
   /** ISO date (YYYY-MM-DD) the approval was given. */
   readonly approvedOn: string;
   /** The approval applies to this version of the policy; a change to what is exposed needs a new approval. */
@@ -35,7 +41,9 @@ const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim().
 export function isValidApproval(a: unknown, now: Date = new Date()): a is PromptTextApproval {
   if (a === null || typeof a !== 'object') return false;
   const x = a as Record<string, unknown>;
-  if (!nonEmpty(x.reference) || !nonEmpty(x.approvedBy)) return false;
+  if (!nonEmpty(x.reference) || !nonEmpty(x.privacyApprovedBy) || !nonEmpty(x.legalApprovedBy)) return false;
+  if ((x.privacyApprovedBy as string).trim().toLowerCase() === (x.legalApprovedBy as string).trim().toLowerCase()) return false;
+  if (!Number.isInteger(x.consentWordingVersion) || (x.consentWordingVersion as number) < CONSENT_WORDING_MIN_VERSION) return false;
   if (typeof x.approvedOn !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(x.approvedOn)) return false;
   const when = Date.parse(`${x.approvedOn}T00:00:00Z`);
   if (!Number.isFinite(when) || new Date(when).toISOString().slice(0, 10) !== x.approvedOn || when > now.getTime()) return false;

@@ -12,7 +12,7 @@ import { inspect } from 'node:util';
 import path from 'node:path';
 import { CLIENT_ERROR_CODES, DATA_ERROR_MESSAGES, DataError, isDataError, toDataError, type DataErrorCode } from '../lib/mcp/data/errors';
 import {
-  BATCH_MAX, ENVELOPE_RESERVE_BYTES, FUTURE_SKEW_MS, MAX_WINDOW_DAYS, MAX_WINDOW_MS, PAGE_SIZES, PROVISIONAL_LIMITS, RESPONSE_BYTE_BUDGET, SNIPPET_MAX_CHARS,
+  BATCH_MAX, ENVELOPE_RESERVE_BYTES, FUTURE_SKEW_MS, MAX_LOOKBACK_DAYS, MAX_WINDOW_DAYS, SOURCE_RETENTION_DAYS, lookbackMs, MAX_WINDOW_MS, PAGE_SIZES, PROVISIONAL_LIMITS, RESPONSE_BYTE_BUDGET, SNIPPET_MAX_CHARS,
   STRING_LIMITS, TEXT_BATCH_MAX, jsonBytes, packWithinBudget,
 } from '../lib/mcp/data/limits';
 import { parseInstant, resolveWindow } from '../lib/mcp/data/time-window';
@@ -72,27 +72,27 @@ describe('the 7-day window is fixed', () => {
     const seven: 7 = MAX_WINDOW_DAYS; assert.equal(seven, 7); // compile-time: the type is the literal 7
     assert.equal(MAX_WINDOW_MS, 7 * 86_400_000);
     for (const [k, v] of [['MCP_MAX_WINDOW_DAYS', '30'], ['MCP_WINDOW_DAYS', '30'], ['MAX_WINDOW_DAYS', '30']]) process.env[k] = v;
-    try { assert.equal(code(() => resolveWindow({ from: '2026-11-01', to: '2026-11-20' }, NOW)), 'window_too_large'); } finally { for (const k of ['MCP_MAX_WINDOW_DAYS', 'MCP_WINDOW_DAYS', 'MAX_WINDOW_DAYS']) delete process.env[k]; }
+    try { assert.equal(code(() => resolveWindow({ from: '2026-11-01', to: '2026-11-20' }, 'sessions', NOW)), 'window_too_large'); } finally { for (const k of ['MCP_MAX_WINDOW_DAYS', 'MCP_WINDOW_DAYS', 'MAX_WINDOW_DAYS']) delete process.env[k]; }
     for (const f of ['limits.ts', 'time-window.ts']) assert.doesNotMatch(fs.readFileSync(path.join(process.cwd(), 'lib/mcp/data', f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1'), /process\.env|\benv\./, f);
   });
   it('accepts exactly 7 days and rejects 7 days + 1 ms, whatever the representation', () => {
     const to = '2026-11-26T12:00:00Z';
-    assert.deepEqual(resolveWindow({ from: '2026-11-19T12:00:00Z', to }, NOW).to.toISOString(), '2026-11-26T12:00:00.000Z');
-    assert.equal(code(() => resolveWindow({ from: '2026-11-19T11:59:59.999Z', to }, NOW)), 'window_too_large');
-    assert.equal(code(() => resolveWindow({ from: '2026-11-19T07:00:00-05:00', to: '2026-11-26T12:00:00Z' }, NOW)), 'no-error'); // same instant as 12:00Z
-    assert.equal(code(() => resolveWindow({ from: '2026-11-18', to: '2026-11-26' }, NOW)), 'window_too_large'); // 8 days by date
-    assert.equal(code(() => resolveWindow({ from: '2026-11-19', to: '2026-11-26' }, NOW)), 'no-error'); // exactly 7 days by date
-    assert.equal(code(() => resolveWindow({ from: '2000-01-01', to: '2026-11-26' }, NOW)), 'window_too_large');
+    assert.deepEqual(resolveWindow({ from: '2026-11-19T12:00:00Z', to }, 'sessions', NOW).to.toISOString(), '2026-11-26T12:00:00.000Z');
+    assert.equal(code(() => resolveWindow({ from: '2026-11-19T11:59:59.999Z', to }, 'sessions', NOW)), 'window_too_large');
+    assert.equal(code(() => resolveWindow({ from: '2026-11-19T07:00:00-05:00', to: '2026-11-26T12:00:00Z' }, 'sessions', NOW)), 'no-error'); // same instant as 12:00Z
+    assert.equal(code(() => resolveWindow({ from: '2026-11-18', to: '2026-11-26' }, 'sessions', NOW)), 'window_too_large'); // 8 days by date
+    assert.equal(code(() => resolveWindow({ from: '2026-11-19', to: '2026-11-26' }, 'sessions', NOW)), 'no-error'); // exactly 7 days by date
+    assert.equal(code(() => resolveWindow({ from: '2000-01-01', to: '2026-11-26' }, 'sessions', NOW)), 'window_too_large');
   });
   it('defaults: omitted to = now, omitted from = the provisional default window before it; bounds are validated', () => {
-    const w = resolveWindow(undefined, NOW);
+    const w = resolveWindow(undefined, 'sessions', NOW);
     assert.equal(w.to.getTime(), NOW.getTime()); assert.equal(w.to.getTime() - w.from.getTime(), PROVISIONAL_LIMITS.defaultWindowMs.value);
-    assert.equal(resolveWindow({ to: '2026-11-25T00:00:00Z' }, NOW).from.toISOString(), '2026-11-24T00:00:00.000Z');
-    assert.equal(code(() => resolveWindow({ from: '2026-11-20' }, NOW)), 'no-error'); // to defaults to now (6.5 days)
-    assert.equal(code(() => resolveWindow({ from: '2026-11-26T12:00:00Z', to: '2026-11-26T12:00:00Z' }, NOW)), 'invalid_argument'); // empty
-    assert.equal(code(() => resolveWindow({ from: '2026-11-26T13:00:00Z', to: '2026-11-26T12:00:00Z' }, NOW)), 'invalid_argument'); // reversed
-    assert.equal(code(() => resolveWindow({ to: new Date(NOW.getTime() + FUTURE_SKEW_MS + 1).toISOString() }, NOW)), 'invalid_argument'); // too far in the future
-    assert.equal(code(() => resolveWindow({ from: '2026-11-26T11:00:00Z', to: new Date(NOW.getTime() + FUTURE_SKEW_MS).toISOString() }, NOW)), 'no-error'); // within skew
+    assert.equal(resolveWindow({ to: '2026-11-25T00:00:00Z' }, 'sessions', NOW).from.toISOString(), '2026-11-24T00:00:00.000Z');
+    assert.equal(code(() => resolveWindow({ from: '2026-11-20' }, 'sessions', NOW)), 'no-error'); // to defaults to now (6.5 days)
+    assert.equal(code(() => resolveWindow({ from: '2026-11-26T12:00:00Z', to: '2026-11-26T12:00:00Z' }, 'sessions', NOW)), 'invalid_argument'); // empty
+    assert.equal(code(() => resolveWindow({ from: '2026-11-26T13:00:00Z', to: '2026-11-26T12:00:00Z' }, 'sessions', NOW)), 'invalid_argument'); // reversed
+    assert.equal(code(() => resolveWindow({ to: new Date(NOW.getTime() + FUTURE_SKEW_MS + 1).toISOString() }, 'sessions', NOW)), 'invalid_argument'); // too far in the future
+    assert.equal(code(() => resolveWindow({ from: '2026-11-26T11:00:00Z', to: new Date(NOW.getTime() + FUTURE_SKEW_MS).toISOString() }, 'sessions', NOW)), 'no-error'); // within skew
     assert.ok(Object.isFrozen(w));
   });
   it('rejects ambiguous or malformed instants and never echoes them', () => {
@@ -105,6 +105,46 @@ describe('the 7-day window is fixed', () => {
     assert.ok(!message(() => parseInstant(`2026-11-26${marker}`)).includes(marker));
     assert.equal(parseInstant('2026-11-26'), Date.UTC(2026, 10, 26)); assert.equal(parseInstant('2026-11-26T12:00Z'), Date.UTC(2026, 10, 26, 12));
     assert.equal(parseInstant('2026-11-26T12:00:00.5Z'), Date.UTC(2026, 10, 26, 12, 0, 0, 500));
+  });
+});
+
+describe('lookback: how far back a window may start', () => {
+  const day = 86_400_000;
+  const iso = (ms: number) => new Date(ms).toISOString();
+  it('is a fixed 14-day literal, never longer than any source\'s retention, and not configurable', () => {
+    const fourteen: 14 = MAX_LOOKBACK_DAYS; assert.equal(fourteen, 14);
+    assert.deepEqual({ ...SOURCE_RETENTION_DAYS }, { activity: 14, sessions: 14, prompts: 7 });
+    for (const src of ['activity', 'sessions', 'prompts'] as const) assert.ok(lookbackMs(src) <= MAX_LOOKBACK_DAYS * day && lookbackMs(src) <= SOURCE_RETENTION_DAYS[src] * day, src);
+    assert.ok(MAX_LOOKBACK_DAYS >= MAX_WINDOW_DAYS, 'the 7-day span must be able to fit');
+    process.env.MCP_MAX_LOOKBACK_DAYS = '90';
+    try { assert.equal(code(() => resolveWindow({ from: iso(NOW.getTime() - 15 * day), to: iso(NOW.getTime() - 9 * day) }, 'sessions', NOW)), 'window_out_of_range'); } finally { delete process.env.MCP_MAX_LOOKBACK_DAYS; }
+    assert.doesNotMatch(fs.readFileSync(path.join(process.cwd(), 'lib/mcp/data/limits.ts'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1'), /process\.env|\benv\./);
+  });
+  it('sessions and activity: a window starting exactly 14 days back is allowed, 1 ms earlier is not', () => {
+    for (const src of ['sessions', 'activity'] as const) {
+      const edge = NOW.getTime() - 14 * day;
+      assert.equal(code(() => resolveWindow({ from: iso(edge), to: iso(edge + 7 * day) }, src, NOW)), 'no-error', src);
+      assert.equal(code(() => resolveWindow({ from: iso(edge - 1), to: iso(edge + 7 * day - 1) }, src, NOW)), 'window_out_of_range', src);
+    }
+  });
+  it('prompts: the shorter 7-day turn retention applies (14 days would have been allowed for sessions)', () => {
+    const edge = NOW.getTime() - 7 * day;
+    assert.equal(code(() => resolveWindow({ from: iso(edge), to: iso(NOW.getTime()) }, 'prompts', NOW)), 'no-error');
+    assert.equal(code(() => resolveWindow({ from: iso(edge - 1), to: iso(edge + 6 * day) }, 'prompts', NOW)), 'window_out_of_range');
+    assert.equal(code(() => resolveWindow({ from: iso(edge - 2 * day), to: iso(edge + 4 * day) }, 'prompts', NOW)), 'window_out_of_range');
+    assert.equal(code(() => resolveWindow({ from: iso(edge - 2 * day), to: iso(edge + 4 * day) }, 'sessions', NOW)), 'no-error');
+  });
+  it('the request parsers apply the right source: a prompt search cannot reach 10 days back but a session list can', () => {
+    const q = { from: iso(NOW.getTime() - 10 * day), to: iso(NOW.getTime() - 4 * day) };
+    assert.equal(code(() => parsePromptMetadataSearchRequest(q, NOW)), 'window_out_of_range');
+    assert.equal(code(() => parseListSessionsRequest(q, NOW)), 'no-error');
+    assert.equal(code(() => parseDeveloperActivityRequest({ developerId: uuid(), ...q }, NOW)), 'no-error');
+    assert.equal(code(() => parseListSessionsRequest({ from: iso(NOW.getTime() - 20 * day), to: iso(NOW.getTime() - 14 * day) }, NOW)), 'window_out_of_range');
+  });
+  it('the 7-day span still applies on top of the lookback; the error codes stay distinct and fixed-text', () => {
+    assert.equal(code(() => resolveWindow({ from: iso(NOW.getTime() - 13 * day), to: iso(NOW.getTime() - 5 * day) }, 'sessions', NOW)), 'window_too_large');
+    assert.notEqual(DATA_ERROR_MESSAGES.window_out_of_range, DATA_ERROR_MESSAGES.window_too_large);
+    assert.ok(!message(() => resolveWindow({ from: '2020-01-01', to: '2020-01-02' }, 'sessions', NOW)).includes('2020'));
   });
 });
 
@@ -156,7 +196,7 @@ describe('provisional limits are justified by arithmetic recomputed here', () =>
 });
 
 describe('prompt text cannot be enabled by the flag alone', () => {
-  const approval: PromptTextApproval = { reference: 'PRIV-2027-001', approvedBy: 'Data Protection Officer', approvedOn: '2026-12-01', policyVersion: PROMPT_TEXT_POLICY_VERSION, maskingBestEffortAcknowledged: true };
+  const approval: PromptTextApproval = { reference: 'PRIV-2027-001', privacyApprovedBy: 'Data Protection Officer', legalApprovedBy: 'General Counsel', consentWordingVersion: 2, approvedOn: '2026-12-01', policyVersion: PROMPT_TEXT_POLICY_VERSION, maskingBestEffortAcknowledged: true };
   const later = new Date('2027-01-15T00:00:00Z');
   it('defaults to metadata with no configuration at all', () => {
     assert.deepEqual(resolvePromptAccess({}), { mode: 'metadata' });
@@ -182,10 +222,11 @@ describe('prompt text cannot be enabled by the flag alone', () => {
   it('every defect in an approval record keeps the mode at metadata', () => {
     const on = { MCP_PROMPT_TEXT_ENABLED: 'true' };
     const bad: Array<[string, unknown]> = [
-      ['missing reference', { ...approval, reference: '' }], ['short reference', { ...approval, reference: 'x' }], ['missing approver', { ...approval, approvedBy: ' ' }],
+      ['missing reference', { ...approval, reference: '' }], ['short reference', { ...approval, reference: 'x' }], ['missing privacy approver', { ...approval, privacyApprovedBy: ' ' }], ['missing legal approver', { ...approval, legalApprovedBy: '' }],
+      ['one person for both roles', { ...approval, legalApprovedBy: ' data protection OFFICER ' }], ['old consent wording', { ...approval, consentWordingVersion: 1 }], ['no consent wording', { ...approval, consentWordingVersion: undefined }], ['fractional wording', { ...approval, consentWordingVersion: 2.5 }],
       ['future date', { ...approval, approvedOn: '2027-12-31' }], ['malformed date', { ...approval, approvedOn: '2026-13-40' }], ['non-ISO date', { ...approval, approvedOn: '01/12/2026' }],
       ['old policy version', { ...approval, policyVersion: 0 }], ['newer policy version', { ...approval, policyVersion: 2 }], ['acknowledgement false', { ...approval, maskingBestEffortAcknowledged: false }],
-      ['acknowledgement missing', { reference: approval.reference, approvedBy: approval.approvedBy, approvedOn: approval.approvedOn, policyVersion: approval.policyVersion }],
+      ['acknowledgement missing', { reference: approval.reference, privacyApprovedBy: approval.privacyApprovedBy, legalApprovedBy: approval.legalApprovedBy, consentWordingVersion: 2, approvedOn: approval.approvedOn, policyVersion: approval.policyVersion }],
       ['a string', 'approved'], ['a number', 1], ['an array', [approval]], ['true', true],
     ];
     for (const [name, a] of bad) { assert.equal(isValidApproval(a, later), false, name); assert.equal(resolvePromptAccess(on, a as PromptTextApproval, later).mode, 'metadata', name); }
@@ -430,7 +471,7 @@ describe('opaque references and cursors', () => {
 
 describe('error taxonomy', () => {
   it('every code has one fixed message; there is no way to attach detail', () => {
-    assert.deepEqual(Object.keys(DATA_ERROR_MESSAGES).sort(), ['cursor_invalid', 'internal', 'invalid_argument', 'limit_exceeded', 'not_found', 'text_not_available', 'unavailable', 'window_too_large']);
+    assert.deepEqual(Object.keys(DATA_ERROR_MESSAGES).sort(), ['cursor_invalid', 'internal', 'invalid_argument', 'limit_exceeded', 'not_found', 'text_not_available', 'unavailable', 'window_out_of_range', 'window_too_large']);
     for (const [c, m] of Object.entries(DATA_ERROR_MESSAGES)) { assert.equal(new DataError(c as DataErrorCode).message, m); assert.ok(m.length > 3 && !/[\n\r]/.test(m)); }
     assert.equal(DataError.length, 1, 'the constructor takes the code only');
     assert.ok(Object.isFrozen(DATA_ERROR_MESSAGES));
@@ -441,7 +482,7 @@ describe('error taxonomy', () => {
     const own = new DataError('cursor_invalid'); assert.equal(toDataError(own), own);
   });
   it('client errors are separated from service errors', () => {
-    for (const c of ['invalid_argument', 'window_too_large', 'limit_exceeded', 'cursor_invalid', 'not_found', 'text_not_available'] as const) assert.ok(CLIENT_ERROR_CODES.has(c), c);
+    for (const c of ['invalid_argument', 'window_too_large', 'window_out_of_range', 'limit_exceeded', 'cursor_invalid', 'not_found', 'text_not_available'] as const) assert.ok(CLIENT_ERROR_CODES.has(c), c);
     for (const c of ['unavailable', 'internal'] as const) assert.ok(!CLIENT_ERROR_CODES.has(c), c);
   });
 });
@@ -475,8 +516,8 @@ describe('the contracts are free of I/O and stay inside the guard rails', () => 
   const dir = path.join(process.cwd(), 'lib/mcp/data');
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.ts'));
   const code_ = (f: string) => fs.readFileSync(path.join(dir, f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
-  it('has exactly the P3-1 modules', () => {
-    assert.deepEqual(files.sort(), ['cursor.ts', 'errors.ts', 'limits.ts', 'output.ts', 'prompt-access.ts', 'refs.ts', 'requests.ts', 'scope.ts', 'sealed.ts', 'time-window.ts']);
+  it('has exactly the P3-1 and P3-2 modules', () => {
+    assert.deepEqual(files.sort(), ['cursor.ts', 'errors.ts', 'limits.ts', 'masking.ts', 'output.ts', 'prompt-access.ts', 'refs.ts', 'requests.ts', 'scope.ts', 'sealed.ts', 'time-window.ts']);
   });
   it('imports only node:crypto and its own modules: no database driver, no application code, no network, no filesystem', () => {
     for (const f of files) for (const m of code_(f).matchAll(/from\s+['"]([^'"]+)['"]/g)) assert.ok(m[1] === 'node:crypto' || m[1].startsWith('./'), `${f} imports ${m[1]}`);

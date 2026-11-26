@@ -587,7 +587,7 @@ Each step is a small local commit, tested (`tsc`, ESLint, unit; live tests from 
 |---|---|---|---|
 | **P3-0** | Decisions and documentation (this section; phase boundary corrected) | decisions recorded | **done 2026-11-26** |
 | P3-1 | Contracts, DB-free: types, limits, scope and cursor handling, error taxonomy, excluded-column policy, guards | contracts and limits | **done 2026-11-26** (16.8) |
-| P3-2 | Masking engine with its corpus and performance tests | **privacy review** | planned |
+| P3-2 | Masking engine with its corpus and performance tests | **privacy review** | **built 2026-11-26, awaiting privacy review** (16.9) |
 | P3-3 | SQL **written, not applied**: migration, rollback, grants, role-script generalisation, static SQL checks | **security review of the SQL** | planned |
 | P3-4 | Apply on the **fresh test branch** (decision 7), provision the roles, `--verify`, live cross-tenant isolation fixture | results shown before continuing | planned |
 | P3-5 | Reader pool and services, token hash in the principal, live tests | integration | planned |
@@ -623,5 +623,16 @@ Code: `lib/mcp/data/` (ten modules, no I/O, imports only `node:crypto` and sibli
 | Response budget | 24 KiB | below Claude Code's 10,000-token warning at 3 B/token (the default cap is 25,000) |
 | Default window / cursor TTL | 24 h / 15 min | judgement, finalise in P3-6 |
 
-**Unresolved:** approve the per-list page sizes and batch; snippet cap and text batch; budget; whether to add a lookback cap; the approval-record mechanism; consent wording still overstates masking (needs revision before any text); default window and cursor TTL.
+**Decisions (2026-11-26, P3-1 review):** per-list page sizes (developers 50, sessions and prompts 25) and batch 20 approved; text limits (1,000 characters, batch 10) approved provisionally; response budget 24 KiB approved and enforced on serialized UTF-8 bytes; default window 24 h and cursor lifetime 15 min approved; **lookback cap 14 days** added (`MAX_LOOKBACK_DAYS`, a literal) on top of the fixed 7-day span, and each source's shorter retention is enforced too (prompts 7 days, sessions and daily activity 14 days; `window_out_of_range` error). Text access needs a **controlled approval record** (two different approvers, privacy and legal; consent wording version 2 or later; best-effort masking acknowledged) in addition to the flag; neither alone grants text. The consent wording must be corrected before text is enabled (it currently overstates masking).
+
+### 16.9 P3-2 masking engine (built, DB-free, awaiting privacy review)
+Code: `lib/mcp/data/masking.ts`; tests: `tests/mcp-masking.test.ts`. It is connected to nothing: no tool, query, route or database access reads prompt text, and a test fails if any module imports it.
+
+**Masking is best-effort and is never described as a guarantee.** It lowers the chance that a secret or personal data survives into a snippet; the module lists its known gaps (`KNOWN_LIMITATIONS`) and tests prove those gaps are real (personal names, project names, split or encoded secrets and unlisted formats are not caught).
+
+Pipeline: bound the input (16,384 characters, cut at a token boundary) → normalise (NFKC, remove invisible, direction-control and Unicode tag characters, remove control characters, decode percent-encoded runs) → redact by family (private keys, vendor tokens including this server's own `tt_` tokens, JWTs, URL credentials, authorization and cookie headers, secret-looking query parameters, keyed secrets in 20+ languages and scripts, e-mail, payment cards by Luhn, IBAN by mod 97, SSN-style numbers, phone numbers, IPv4/IPv6, home-directory user names, long high-entropy strings) → **verify** (if a high-confidence secret still matches, the whole text is withheld) → cut to the character limit on a code-point boundary, never inside a placeholder. Masking happens before the cut, so a secret cannot be half-cut into something no pattern recognises.
+
+Tested: a positive corpus per family; multilingual and mixed-script inputs; evasions (full-width forms, zero-width, bidi and tag characters, percent-encoding, case, quoting, fences); false positives that must be kept; idempotence; cut-boundary and surrogate safety; adversarial inputs for time (every pattern is linear; each case runs in well under the test bound) and randomized fuzzing; mutation checks (removing normalisation, the Luhn check, percent-decoding, invisible-character removal, a keyword set, the pre-cut order or the verification pass each makes a test fail).
+
+**For the privacy review:** over-masking is deliberate (hashes, long digit runs); home-directory user names are replaced by `[USER]` but other path parts are kept (session file paths themselves are never exposed); the consent wording is a separate item and must be corrected before text is enabled; whether snippets may be shown at all remains decision 4.
 

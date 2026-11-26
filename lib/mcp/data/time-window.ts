@@ -3,7 +3,7 @@
  * the maximum is a literal in limits.ts, not a setting. Instants must be unambiguous: a date (UTC midnight) or a date-time WITH an offset.
  */
 import { dataError } from './errors';
-import { DEFAULT_WINDOW_MS, FUTURE_SKEW_MS, MAX_WINDOW_MS } from './limits';
+import { DEFAULT_WINDOW_MS, FUTURE_SKEW_MS, MAX_WINDOW_MS, lookbackMs, type WindowSource } from './limits';
 
 export interface TimeWindow { readonly from: Date; readonly to: Date }
 
@@ -41,14 +41,16 @@ export function parseInstant(value: unknown): number {
 
 /**
  * Resolves a caller's optional `from` / `to`. Omitted `to` = now; omitted `from` = `to` minus the default window.
- * Rejects: malformed instants, from >= to, a `to` further in the future than the skew allowance, and any window longer than 7 days (`window_too_large`).
+ * `source` selects the retention the start is checked against (prompts 7 days, others 14). Rejects: malformed instants, from >= to, a `to` further in the future than the skew allowance, and any window longer than 7 days (`window_too_large`).
  */
-export function resolveWindow(input: { from?: unknown; to?: unknown } | undefined, now: Date = new Date()): TimeWindow {
+export function resolveWindow(input: { from?: unknown; to?: unknown } | undefined, source: WindowSource, now: Date = new Date()): TimeWindow {
   const nowMs = now.getTime();
   const toMs = input?.to === undefined ? nowMs : parseInstant(input.to);
   const fromMs = input?.from === undefined ? toMs - DEFAULT_WINDOW_MS : parseInstant(input.from);
   if (fromMs >= toMs) throw dataError('invalid_argument');
   if (toMs > nowMs + FUTURE_SKEW_MS) throw dataError('invalid_argument');
   if (toMs - fromMs > MAX_WINDOW_MS) throw dataError('window_too_large');
+  // lookback: the start may not be older than min(14 days, the source's retention) before now
+  if (fromMs < nowMs - lookbackMs(source)) throw dataError('window_out_of_range');
   return Object.freeze({ from: new Date(fromMs), to: new Date(toMs) });
 }

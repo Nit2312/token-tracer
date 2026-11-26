@@ -7,6 +7,15 @@
  */
 export const MAX_WINDOW_DAYS = 7 as const;
 export const MAX_WINDOW_MS: number = MAX_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+/**
+ * LOOKBACK: how far back from now a window may START (decision 2026-11-26): at most 14 days, aligned with session retention, and never
+ * further than the shorter retention of the data source being read. Fixed literals, like the window span. Retention facts come from the
+ * nightly cron (app/api/internal/rollup/route.ts): turns 7 days, sessions 14 days (daily rollups keep history, but the contract caps it at 14).
+ */
+export const MAX_LOOKBACK_DAYS = 14 as const;
+export const SOURCE_RETENTION_DAYS = Object.freeze({ activity: 14, sessions: 14, prompts: 7 } as const);
+export type WindowSource = keyof typeof SOURCE_RETENTION_DAYS;
+export const lookbackMs = (source: WindowSource): number => Math.min(MAX_LOOKBACK_DAYS, SOURCE_RETENTION_DAYS[source]) * 24 * 60 * 60 * 1000;
 /** A window may end slightly in the future (client clock skew), never more. */
 export const FUTURE_SKEW_MS = 5 * 60 * 1000;
 

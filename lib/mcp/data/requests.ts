@@ -60,7 +60,7 @@ export function parseListDevelopersRequest(input: unknown): ListDevelopersReques
 export interface DeveloperActivityRequest { readonly developerId: string; readonly window: TimeWindow }
 export function parseDeveloperActivityRequest(input: unknown, now: Date = new Date()): DeveloperActivityRequest {
   const o = strictObject(input, ['developerId', 'from', 'to']);
-  return { developerId: uuid(own(o, 'developerId')), window: resolveWindow({ from: own(o, 'from'), to: own(o, 'to') }, now) };
+  return { developerId: uuid(own(o, 'developerId')), window: resolveWindow({ from: own(o, 'from'), to: own(o, 'to') }, 'activity', now) };
 }
 
 export interface ListSessionsRequest {
@@ -70,7 +70,7 @@ export interface ListSessionsRequest {
 export function parseListSessionsRequest(input: unknown, now: Date = new Date()): ListSessionsRequest {
   const o = strictObject(input, ['developerId', 'from', 'to', 'tool', 'model', 'limit', 'cursor']);
   return {
-    developerId: uuidOrNull(own(o, 'developerId')), window: resolveWindow({ from: own(o, 'from'), to: own(o, 'to') }, now),
+    developerId: uuidOrNull(own(o, 'developerId')), window: resolveWindow({ from: own(o, 'from'), to: own(o, 'to') }, 'sessions', now),
     tool: ident(own(o, 'tool')), model: ident(own(o, 'model')), limit: limit(own(o, 'limit'), 'sessions'), cursor: cursor(own(o, 'cursor')),
   };
 }
@@ -104,7 +104,7 @@ export function parsePromptMetadataSearchRequest(input: unknown, now: Date = new
   const minChars = optChars(own(o, 'minChars')), maxChars = optChars(own(o, 'maxChars'));
   if (minChars !== null && maxChars !== null && minChars > maxChars) throw dataError('invalid_argument');
   return {
-    window: resolveWindow({ from: own(o, 'from'), to: own(o, 'to') }, now),
+    window: resolveWindow({ from: own(o, 'from'), to: own(o, 'to') }, 'prompts', now),
     filters: {
       developerId: uuidOrNull(own(o, 'developerId')), intents, hasCodeBlock: optBool(own(o, 'hasCodeBlock')), hasFilePath: optBool(own(o, 'hasFilePath')),
       hasTraceback: optBool(own(o, 'hasTraceback')), minChars, maxChars, tool: ident(own(o, 'tool')), model: ident(own(o, 'model')),

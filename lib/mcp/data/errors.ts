@@ -9,6 +9,7 @@
 export type DataErrorCode =
   | 'invalid_argument'   // malformed or unknown request field (including any attempt to send a text query)
   | 'window_too_large'   // the time window is longer than the fixed 7-day maximum
+  | 'window_out_of_range' // the window starts before the lookback limit (14 days, or the shorter retention of the source)
   | 'limit_exceeded'     // a requested page or batch size is above the maximum
   | 'cursor_invalid'     // tampered, expired, wrong principal, wrong query
   | 'not_found'          // missing, other team's, or an undecodable reference — indistinguishable by design
@@ -19,6 +20,7 @@ export type DataErrorCode =
 export const DATA_ERROR_MESSAGES: Readonly<Record<DataErrorCode, string>> = Object.freeze({
   invalid_argument: 'The request is not valid.',
   window_too_large: 'The time window is longer than the 7-day maximum.',
+  window_out_of_range: 'The time window starts earlier than the data that is available.',
   limit_exceeded: 'A requested size is above the allowed maximum.',
   cursor_invalid: 'The page cursor is invalid or has expired.',
   not_found: 'Not found.',
@@ -28,7 +30,7 @@ export const DATA_ERROR_MESSAGES: Readonly<Record<DataErrorCode, string>> = Obje
 });
 
 /** Codes that describe a problem with the caller's request (as opposed to the service). */
-export const CLIENT_ERROR_CODES: ReadonlySet<DataErrorCode> = new Set<DataErrorCode>(['invalid_argument', 'window_too_large', 'limit_exceeded', 'cursor_invalid', 'not_found', 'text_not_available']);
+export const CLIENT_ERROR_CODES: ReadonlySet<DataErrorCode> = new Set<DataErrorCode>(['invalid_argument', 'window_too_large', 'window_out_of_range', 'limit_exceeded', 'cursor_invalid', 'not_found', 'text_not_available']);
 
 export class DataError extends Error {
   readonly code: DataErrorCode;
