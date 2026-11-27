@@ -25,6 +25,7 @@ Last updated: 2026-11-26. This is the single reference for the whole program (Ph
 | 3 | Tenant-isolated data-access layer: `mcp_reader` role, identity-bound SQL functions, dedicated reader pool, authenticated principal with unforgeable `tokenHash`, typed metadata-only services, AES-256-GCM sealed references & signed cursors, strict budget packing (24 KiB), adversarial fuzzing, concurrency and revocation hardening (P3-0 through P3-9) | done |
 | 4 (4.1–4.3) | Read-only tool implementation: strict JSON Schema definitions, tool execution handlers, and MCP content block formatting with 24 KiB budget enforcement for the six metadata-only services | done |
 | 4.4 | Controlled tool registration & protocol validation: registered all 6 tools in `createTokenTracerMcpServer`, validated JSON-RPC protocol requests (`initialize`, `tools/list`, `tools/call`), tenant isolation, and parameter injection guards | done |
+| 4.5 | Real MCP client integration & end-to-end validation: validated complete workflow with real MCP SDK client over Streamable HTTP, OAuth 2.1 (discovery, DCR RFC 7591, PKCE S256, consent, code exchange, refresh rotation, revocation RFC 7009), all six tools, tenant isolation, and lifecycle | done |
 
 ### Not built yet (by design — see [Later phases](#15-later-phases))
 - **No resources or prompts exist.** `/mcp` exposes only the six approved metadata-only tools. No resources, templates, or prompts are registered.
@@ -1057,6 +1058,33 @@ Files: `scripts/migrations/mcp-data.sql` (roles, schema, functions), `scripts/mi
   - Cross-tenant sealed reference in `tools/call` for `session_details` returns unforgeable `not_found` error, preventing cross-tenant existence enumeration.
   - Tampered sealed references fail authentication check cleanly with `not_found`.
   - Zero raw prompt text, snippets, or file paths leaked in responses.
+
+### 17.3 Phase 4.5 implementation (complete, 2026-11-27)
+
+**1. Real MCP Client Integration (`tests/mcp-client-e2e.test.ts`)**
+- Built and validated with an actual MCP client extending `@modelcontextprotocol/server` `Protocol` (protocol version `2025-11-25`, server version `token-tracer 0.1.0`).
+- Implemented `StreamableHttpClientTransport` dispatching full JSON-RPC over Streamable HTTP (supporting JSON responses and SSE streaming).
+- Tested complete client connection lifecycle: connect, protocol initialization, tool listing, tool invocation, disconnect, and clean reconnection.
+
+**2. Full End-to-End OAuth 2.1 Workflow**
+- **Step 1 — Discovery**: Protected resource discovery (`/.well-known/oauth-protected-resource`) and Authorization server discovery (`/.well-known/oauth-authorization-server`) advertising endpoints, scopes (`mcp:read`), and PKCE code challenge methods (`S256`).
+- **Step 2 — Dynamic Client Registration (RFC 7591)**: Registered client via `/oauth/register`, receiving `client_id` and metadata.
+- **Step 3 — PKCE S256 & Consent**: Built PKCE S256 code verifier/challenge pair, verified `/oauth/authorize` landing view, and simulated admin consent submission to `/oauth/decision`, returning authorization code (`tt_ac_...`).
+- **Step 4 — Code Exchange**: Exchanged authorization code with PKCE `code_verifier` via `/oauth/token` for Bearer access token (`tt_at_...`) and refresh token (`tt_rt_...`).
+- **Step 8 — Refresh Rotation & Revocation (RFC 7009)**: Successfully rotated refresh token for a new token pair via `grant_type: refresh_token`, and revoked token via `/oauth/revoke`. Revoked access tokens immediately fail authentication with `401 Unauthorized`.
+
+**3. Tool Invocation & Database Integration**
+- Executed all six metadata-only tools through real MCP client:
+  1. `list_developers`: Returns developer summaries with signed cursor pagination.
+  2. `developer_activity`: Returns per-developer aggregated metrics and trends.
+  3. `list_sessions`: Returns session summaries and active time windows.
+  4. `session_details`: Returns full session turn metadata via sealed session reference.
+  5. `search_prompt_metadata`: Returns filtered prompt metadata pages.
+  6. `prompt_metadata_batch`: Returns batch prompt metadata records via sealed references.
+- Multi-tenant database isolation: verified that queries only return data belonging to the authenticated principal's team (`team-alpha-uuid`). Cross-tenant reference access attempts (`team-beta-uuid`) fail-closed with unforgeable `not_found`.
+- Response size budget: all tool outputs strictly adhere to the 24 KiB payload limit.
+- Privacy boundary: verified that zero raw prompt text, snippets, or file paths are ever exposed on the wire.
+
 
 
 
