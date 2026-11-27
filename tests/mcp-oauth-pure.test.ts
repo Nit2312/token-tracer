@@ -56,6 +56,7 @@ describe('redirect URI rules', () => {
   const ok = [
     'https://claude.ai/api/mcp/auth_callback', 'https://claude.com/api/mcp/auth_callback',
     'http://localhost:54321/callback', 'http://127.0.0.1:8080/callback', 'http://[::1]:3000/callback', 'http://localhost/callback',
+    'http://localhost:9401/oauth/callback', 'http://127.0.0.1:9401/oauth/callback',
   ];
   const bad = [
     'https://claude.ai/api/mcp/auth_callback/', 'https://claude.ai/api/mcp/auth_callback?x=1', 'https://claude.ai/api/mcp/auth_callback#f',
@@ -64,7 +65,7 @@ describe('redirect URI rules', () => {
     'https://*.claude.ai/api/mcp/auth_callback', 'https://claude.ai/api/mcp/auth_callback ', ' https://claude.ai/api/mcp/auth_callback',
     'https://claude.ai\\api/mcp/auth_callback', 'https://claude.ai/api/mcp/auth_callback\n',
     'https://localhost:8080/callback', 'http://localhost.evil.com/callback', 'http://evil.localhost/callback', 'http://127.0.0.2/callback',
-    'http://0.0.0.0/callback', 'http://localhost:8080/other', 'http://localhost:8080/callback/', 'http://localhost:8080/callback?a=b',
+    'http://0.0.0.0/callback', 'http://localhost:8080/other', 'http://localhost:8080/callback/', 'http://localhost:8080/oauth/callback/', 'http://localhost:8080/oauth/other', 'http://localhost:8080/callback?a=b',
     'http://localhost:8080/callback#a', 'http://u:p@localhost:8080/callback', 'http://localhost:0/callback', 'http://localhost:080/callback',
     'http://localhost:99999/callback', 'HTTP://localhost:8080/callback', 'http://[::ffff:127.0.0.1]:80/callback', 'http://2130706433/callback',
     'myapp://callback', 'javascript:alert(1)', 'data:text/html,x', 'file:///callback', '', '/callback', '//claude.ai/callback',

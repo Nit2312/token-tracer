@@ -30,6 +30,7 @@ import {
   handleProtectedResourceMetadata,
 } from '../lib/mcp/oauth/endpoints';
 import { prepareAuthorize } from '../lib/mcp/oauth/authorize';
+import { verifyConsent } from '../lib/mcp/oauth/consent';
 import type { OAuthConfig } from '../lib/mcp/oauth/config';
 import type { McpPool } from '../lib/mcp/db';
 import type { SessionPayload } from '../lib/session-token';
@@ -153,10 +154,11 @@ function createMockPool(): McpPool {
           }
           if (sql.includes('INSERT INTO oauth_tokens')) {
             const tHash = params?.[0];
-            const kind = params?.[1] as string;
-            const familyId = params?.[2] as string;
-            const cid = params?.[3] as string;
-            const uid = params?.[4] as string;
+            // Real query: VALUES ($1 token_hash, 'access'|'refresh' literal, $2 family_id, $3 client_id, $4 user_id, ...)
+            const kind = sql.includes("'refresh'") ? 'refresh' : 'access';
+            const familyId = params?.[1] as string;
+            const cid = params?.[2] as string;
+            const uid = params?.[3] as string;
             const thHex = tHash instanceof Buffer ? tHash.toString('hex') : String(tHash);
             oauthStore.tokens.set(thHex, {
               tokenHash: thHex,
@@ -466,22 +468,26 @@ button:hover { background: #1d4ed8; }
       const consentToken = formParams.get('consentToken');
       const decision = formParams.get('decision');
 
-      if (decision === 'approve' && consentToken) {
+      // Use the request the user was actually shown (client, redirect URI, PKCE challenge, state) from the signed consent token,
+      // so local clients such as mcp-remote (Claude Desktop) get their own loopback callback instead of a hardcoded hosted one.
+      const claims = decision === 'approve' ? verifyConsent(consentToken, SMOKE_SESSION_SECRET) : null;
+      if (claims) {
         const code = generateSecret('tt_ac_');
         const chHex = sha256(code).toString('hex');
-        
+
         const codeRec: StoredCode = {
           codeHash: chHex,
-          clientId: 'tt_smoke_client',
+          clientId: claims.cid,
           userId: USER_ALPHA,
-          codeChallenge: '',
-          redirectUri: 'https://claude.ai/api/mcp/auth_callback',
+          codeChallenge: claims.cc,
+          redirectUri: claims.ru,
         };
         oauthStore.codes.set(chHex, codeRec);
 
-        const callbackUrl = new URL(codeRec.redirectUri);
+        const callbackUrl = new URL(claims.ru);
         callbackUrl.searchParams.set('code', code);
-        callbackUrl.searchParams.set('state', 'smoke-state');
+        if (claims.st) callbackUrl.searchParams.set('state', claims.st);
+        callbackUrl.searchParams.set('iss', BASE_URL); // RFC 9207, advertised in the server metadata
         webRes = Response.redirect(callbackUrl.toString(), 302);
       } else {
         webRes = new Response('Denied', { status: 400 });

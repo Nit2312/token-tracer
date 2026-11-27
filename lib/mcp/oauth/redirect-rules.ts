@@ -4,7 +4,7 @@
  * Accepted (and nothing else):
  *   • the two exact hosted-Claude callbacks;
  *   • loopback callbacks (RFC 8252 §7.3) for local clients such as Claude Code: http, host localhost | 127.0.0.1 | [::1],
- *     any port, path exactly /callback, no query/fragment/userinfo.
+ *     any port, path exactly /callback or /oauth/callback (mcp-remote, used by Claude Desktop), no query/fragment/userinfo.
  * Matching at authorization time is EXACT string equality, except for loopback URIs where the PORT is ignored (OAuth 2.1 §2.3.1 /
  * RFC 8252 §7.3; Claude Code uses an ephemeral port and declares http://localhost/callback). Scheme, host and path must still match
  * exactly, so `localhost` never matches `127.0.0.1`.
@@ -15,6 +15,7 @@ export const CLAUDE_HOSTED_CALLBACKS: readonly string[] = [
 ];
 export const MAX_REDIRECT_URIS = 5;
 const MAX_URI_LENGTH = 512;
+const LOOPBACK_PATHS = new Set(['/callback', '/oauth/callback']);
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 export interface RedirectPolicy { allowLoopback: boolean }
@@ -34,7 +35,7 @@ export function classifyRedirectUri(uri: unknown, policy: RedirectPolicy = DEFAU
   if (u.protocol !== 'http:') return null;
   if (u.username || u.password || u.search || u.hash) return null;
   if (!LOOPBACK_HOSTS.has(u.hostname)) return null;
-  if (u.pathname !== '/callback') return null;
+  if (!LOOPBACK_PATHS.has(u.pathname)) return null;
   // Round-trip check: the URI must already be in canonical form (rejects `http://localhost:080/callback`, `HTTP://…`, trailing junk).
   if (u.href !== uri) return null;
   if (u.port !== '') {
