@@ -26,7 +26,8 @@ export async function getDeveloperActivity(
     const res = await client.query(
       `SELECT day, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, api_cost, session_count,
               tool_calls, tool_errors, edits, additions, deletions, changed_lines, files_touched,
-              rework_loops, corrections, abandoned_count
+              rework_loops, corrections, abandoned_count,
+              sessions_started_earlier, tokens_in_sessions_started_earlier, unpriced_sessions
          FROM mcp_data.developer_activity($1, $2, $3, $4, $5)`,
       [tokenHash, req.developerId, req.window.from.toISOString(), req.window.to.toISOString(), teamId]
     );

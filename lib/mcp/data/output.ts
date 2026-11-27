@@ -27,6 +27,9 @@ export interface DailyActivity {
   readonly apiCost: number; readonly sessionCount: number; readonly toolCalls: number; readonly toolErrors: number; readonly edits: number;
   readonly additions: number; readonly deletions: number; readonly changedLines: number; readonly filesTouched: number; readonly reworkLoops: number;
   readonly corrections: number; readonly abandonedCount: number;
+  /** How far this day's total can be read as "that day's usage" (null when the day came from the nightly rollup, where it is no longer known):
+   *  sessions counted on this day that began on an earlier day, all tokens of those sessions, and sessions without a price (cost counted as 0). */
+  readonly sessionsStartedEarlier: number | null; readonly tokensInSessionsStartedEarlier: number | null; readonly unpricedSessions: number | null;
 }
 
 export interface SessionSummary {
@@ -53,6 +56,7 @@ export const OUTPUT_KEYS: ReadonlySet<string> = new Set([
   'items', 'nextCursor', 'truncated',
   'developerId', 'displayName', 'role',
   'teamId', 'name', 'memberCount', // list_teams
+  'sessionsStartedEarlier', 'tokensInSessionsStartedEarlier', 'unpricedSessions', // developer_activity: how far a day's total can be trusted
   'day', 'tokensIn', 'tokensOut', 'cacheReadTokens', 'cacheWriteTokens', 'apiCost', 'sessionCount', 'toolCalls', 'toolErrors', 'edits', 'additions',
   'deletions', 'changedLines', 'filesTouched', 'reworkLoops', 'corrections', 'abandonedCount',
   'sessionRef', 'tool', 'model', 'startedAt', 'endedAt', 'priced', 'abandoned', 'toolUsage', 'toolName', 'callCount',
@@ -115,6 +119,8 @@ export function toDailyActivity(row: unknown): DailyActivity {
     apiCost: money(r.api_cost), sessionCount: count(r.session_count), toolCalls: count(r.tool_calls), toolErrors: count(r.tool_errors), edits: count(r.edits),
     additions: count(r.additions), deletions: count(r.deletions), changedLines: count(r.changed_lines), filesTouched: count(r.files_touched),
     reworkLoops: count(r.rework_loops), corrections: count(r.corrections), abandonedCount: count(r.abandoned_count),
+    sessionsStartedEarlier: countOrNull(r.sessions_started_earlier), tokensInSessionsStartedEarlier: countOrNull(r.tokens_in_sessions_started_earlier),
+    unpricedSessions: countOrNull(r.unpriced_sessions),
   };
 }
 

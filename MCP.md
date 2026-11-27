@@ -275,6 +275,14 @@ An admin saved as **All teams** (no team) can use MCP across teams, but only if 
 - **Choosing a team:** `list_teams` returns every team for an All-teams admin and only their own for a team admin. Every other tool takes an optional `teamId`. An All-teams admin must pass it (`team_required` otherwise); a team admin may only name their own team (anything else is `invalid_argument`). The chosen team is validated in the database and becomes part of every cursor and reference, so none can be replayed against another team.
 - **Upgrade path for an existing database:** apply `mcp-oauth.sql` again (idempotent, adds the table), roll back the data plane (`mcp-data.rollback.sql`), then apply `mcp-data.sql` and `mcp-data.grants.sql`, and re-run `setup-mcp-roles.mjs --role=mcp_auth --apply` for the new `SELECT` on the table.
 
+### What the numbers mean (read before quoting them)
+
+- **Days are UTC.** A day ends at 00:00 UTC (05:30 IST).
+- **`developer_activity` is live.** It is computed from `sync_sessions` on every call, so today (partial until it ends) and any day the nightly rollup has not reached are included. The rollup (`daily_member_usage`, rebuilt by the cron at 02:00 UTC) is only a fallback for a day whose raw sessions have been pruned; it can be up to a day behind and is never preferred over live rows.
+- **A session counts in full on the UTC day it ended** (its end, else its start, else its sync time). This is the same rule as the rollup and the dashboard. The stored totals are cumulative per session, so they cannot be split across the days a session ran; a session that ran for days adds its whole total to its last day. Per-turn token columns cover only a fraction of a session's tokens (about 12% when measured on production), so they cannot be used to split it either.
+- **So each day says how far to trust it:** `sessionsStartedEarlier` and `tokensInSessionsStartedEarlier` give the sessions counted on that day that began on an earlier day and all their tokens (on production, 98% of one day's tokens came from such sessions); `unpricedSessions` counts sessions without a price, whose cost is counted as 0. All three are `null` for a day served from the rollup. The tool descriptions tell the assistant to caveat a day when these are large.
+- `list_sessions` and `session_details` report each session's whole-life totals together with `startedAt`/`endedAt`; the descriptions say so.
+
 ## 6. Account lifecycle: revocation, audit, retention
 
 **Why revoke even though `/mcp` re-reads the user:** a re-read only blocks a token *while* the account is ineligible. An admin who is demoted and later re-promoted, or moved to another team, would otherwise get an old token back with access never consented to for that team; a password or MFA reset has no re-read at all. So every change to an account's security state revokes that account's tokens (live test: without the hook the token revives after re-promotion; with it, it stays dead).

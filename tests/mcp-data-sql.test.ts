@@ -218,7 +218,10 @@ describe('function hygiene (SECURITY DEFINER safety)', () => {
     for (const s of [MIG, GRANT, ROLL, AUDIT]) { assert.doesNotMatch(noStr(noGrantWord(s)), /\bEXECUTE\b/i); assert.doesNotMatch(noStr(s), /\bformat\s*\(|\bquote_ident|\bquote_literal/i); }
   });
   it('every table reference is schema-qualified (public. or mcp_data.), so nothing resolves through a search path', () => {
-    for (const f of FNS) for (const m of f.body.matchAll(/\b(?:FROM|JOIN)\s+(?:LATERAL\s+)?([A-Za-z_(][\w.]*)/g)) if (!m[1].startsWith('(')) assert.match(m[1], /^(public|mcp_data|pg_catalog)\./, `${f.name}: ${m[0]}`);
+    for (const f of FNS) {
+      const ctes = new Set([...f.body.matchAll(/(?:\bWITH|,)\s+([a-z_]\w*)\s+AS\s*\(/gi)].map((m) => m[1])); // names this very query defines (WITH x AS (...)): not tables
+      for (const m of f.body.matchAll(/\b(?:FROM|JOIN)\s+(?:LATERAL\s+)?([A-Za-z_(][\w.]*)/g)) if (!m[1].startsWith('(') && !ctes.has(m[1])) assert.match(m[1], /^(public|mcp_data|pg_catalog)\./, `${f.name}: ${m[0]}`);
+    }
   });
   it('no write, no temp table, no sequence, no extension function, no pg_sleep inside any function body', () => {
     for (const f of FNS) assert.doesNotMatch(f.body, /\b(INSERT|UPDATE|DELETE|TRUNCATE|CREATE|ALTER|DROP|COPY|LOCK|NOTIFY|LISTEN|SET\s+LOCAL|set_config|nextval|pg_sleep|dblink|lo_\w+|pg_read_\w+)\b/i, f.name);
@@ -261,12 +264,12 @@ describe('tenant isolation is derived in the database from the token hash', () =
   it('every query on a team-scoped table carries the team predicate, and sessions/prompts also require CURRENT team membership', () => {
     for (const f of FNS) {
       const b = f.body.replace(/\s+/g, ' ');
-      if (b.includes('public.sync_sessions')) assert.match(b, /s\.team_id = p_team/, f.name);
+      if (b.includes('public.sync_sessions')) assert.match(b, f.name === 'mcp_data.developer_activity' ? /s\.team_id = v_team AND s\.member_id = p_member/ : /s\.team_id = p_team/, f.name);
       if (b.includes('public.session_turns')) { assert.match(b, /st\.org_id = p_team::text/, f.name); assert.match(b, /ss\.team_id = p_team/, f.name); assert.match(b, /ss\.session_id = st\.session_id AND st\.org_id = ss\.team_id::text AND st\.user_id = ss\.member_id::text AND st\.tool = ss\.source/, `${f.name}: the full 4-key identity`); }
       if (b.includes('public.daily_member_usage')) assert.match(b, /d\.team_id = v_team AND d\.member_id = p_member/, f.name);
       if (f.name === 'mcp_data.list_teams') assert.match(b, /WHERE v_team IS NULL OR t\.id = v_team/, 'list_teams: an All-teams admin sees every team, a team admin only theirs');
       else if (b.includes('public.team_members')) assert.match(b, /tm\.team_id = (v_team|p_team)/, f.name);
-      if (/public\.(sync_sessions|session_turns)/.test(b)) assert.match(b, /EXISTS \(SELECT 1 FROM public\.team_members tm WHERE tm\.team_id = p_team AND tm\.member_id = (s|ss)\.member_id\)/, `${f.name}: current membership`);
+      if (/public\.(sync_sessions|session_turns)/.test(b)) assert.match(b, f.name === 'mcp_data.developer_activity' ? /EXISTS \(SELECT 1 FROM public\.team_members tm WHERE tm\.team_id = v_team AND tm\.member_id = p_member\)/ : /EXISTS \(SELECT 1 FROM public\.team_members tm WHERE tm\.team_id = p_team AND tm\.member_id = (s|ss)\.member_id\)/, `${f.name}: current membership`);
     }
   });
   it('the internal row functions take a team id, but they are not callable by the reader and are only called with the derived team', () => {
