@@ -27,6 +27,7 @@ Last updated: 2026-11-26. This is the single reference for the whole program (Ph
 | 4.4 | Controlled tool registration & protocol validation: registered all 6 tools in `createTokenTracerMcpServer`, validated JSON-RPC protocol requests (`initialize`, `tools/list`, `tools/call`), tenant isolation, and parameter injection guards | done |
 | 4.5 | Real MCP client integration & end-to-end validation: validated complete workflow with real MCP SDK client over Streamable HTTP, OAuth 2.1 (discovery, DCR RFC 7591, PKCE S256, consent, code exchange, refresh rotation, revocation RFC 7009), all six tools, tenant isolation, and lifecycle | done |
 | 4.6 | External MCP client compatibility & interoperability validation: verified out-of-process client communication over real TCP loopback sockets (RFC 7591, RFC 7636 PKCE S256, Streamable HTTP SSE/JSON, RFC 7009 revocation), all 6 metadata tools, zero parameter smuggling, cross-tenant isolation, and assessed Claude Desktop/Code local availability | done |
+| 4.7 | Actual Claude Desktop integration preparation & manual smoke test framework: created isolated local smoke server (`scripts/run-mcp-smoke-server.ts`), comprehensive verification guide & manual test checklist (`docs/claude-desktop-smoke-test.md`), zero production access | done |
 
 ### Not built yet (by design — see [Later phases](#15-later-phases))
 - **No resources or prompts exist.** `/mcp` exposes only the six approved metadata-only tools. No resources, templates, or prompts are registered.
@@ -1117,6 +1118,29 @@ Files: `scripts/migrations/mcp-data.sql` (roles, schema, functions), `scripts/mi
 - **Multi-Tenant Boundary**: Cross-tenant sealed reference attempts return unforgeable `not_found` error.
 - **Parameter Smuggling**: Additional undeclared arguments rejected by JSON Schema validator (`additionalProperties: false`).
 - **Response Size & Privacy**: All responses strictly under 24 KiB budget. Zero raw prompt text, snippets, or file paths exposed.
+
+### 17.5 Phase 4.7 implementation (complete, 2026-11-27)
+
+**1. Local Smoke Server Infrastructure (`scripts/run-mcp-smoke-server.ts`)**
+- Built an isolated local server runner capable of servicing real Claude Desktop connections over loopback TCP without connecting to or requiring production credentials.
+- Configured dynamic in-memory store for OAuth 2.1 registration (`/oauth/register`), interactive HTML browser consent page (`/oauth/authorize` & `/oauth/decision`), token exchange/refresh/revocation (`/oauth/token`, `/oauth/revoke`), and `/mcp` Streamable HTTP handling.
+- Mocked all 6 approved database data functions returning realistic multi-tenant fixture data (Alice & Bob for Team Alpha, isolated from Team Beta).
+
+**2. Manual Smoke Test Guide & Verification Runbook (`docs/claude-desktop-smoke-test.md`)**
+- Step-by-step procedures to configure Claude Desktop Connectors (`http://127.0.0.1:3000/mcp`).
+- Detailed expected outcomes and explicit prompt templates for discovering and executing all six tools:
+  1. `list_developers`: Keysets and summaries.
+  2. `developer_activity`: 7-day metric breakdowns.
+  3. `list_sessions`: Session listings with opaque sealed references.
+  4. `session_details`: Sealed session reference expansion and tool usage breakdown.
+  5. `search_prompt_metadata`: Structured metadata search without text leakage.
+  6. `prompt_metadata_batch`: Batch handle processing.
+- Security and adversarial test verification steps:
+  - Cross-tenant reference rejection (`not_found`).
+  - Zero client identity injection (principal locked to token hash).
+  - Immediate token revocation invalidation (`401 Unauthorized`).
+- Full troubleshooting matrix for port/host mismatches, redirect URI classifications, and parameter constraints.
+
 
 
 
