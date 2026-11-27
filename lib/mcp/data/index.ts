@@ -13,6 +13,7 @@ export * from './cursor';
 export * from './refs';
 export * from './time-window';
 export * from './developers';
+export * from './teams';
 export * from './activity';
 export * from './sessions';
 export * from './prompts';

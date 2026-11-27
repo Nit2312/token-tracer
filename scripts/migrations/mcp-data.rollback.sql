@@ -2,7 +2,7 @@
 -- Run as the SAME login role that ran the migration (or a superuser), in ONE explicit transaction: BEGIN; \i mcp-data.rollback.sql; COMMIT;
 --
 -- WHAT IT REMOVES, AND NOTHING ELSE
---  * the 13 functions and the schema mcp_data (each named explicitly, no CASCADE), and what mcp_reader / mcp_data_owner were granted on them;
+--  * the 14 functions and the schema mcp_data (each named explicitly, no CASCADE), and what mcp_reader / mcp_data_owner were granted on them;
 --  * the ten column grants and the schema USAGE given to mcp_data_owner (each REVOKE names the exact table and columns from grants.json);
 --  * the five role settings given to mcp_reader (each RESET names the setting);
 --  * the role mcp_data_owner, ONLY if it carries the marker comment written by mcp-data.sql (i.e. this migration created it).
@@ -21,7 +21,7 @@
 --   S1 role only (migration aborted)     -> marked role dropped
 --   S2 role + empty schema               -> schema and marked role dropped
 --   S3 some functions present            -> those functions, schema, marked role dropped
---   S4 migration complete                -> as S3 with all 13 functions
+--   S4 migration complete                -> as S3 with all 14 functions
 --   S5 migration + grants                -> S4 plus the column grants, schema/function grants and reader settings revoked first
 --   R  mcp_reader missing                -> reader steps skipped
 --   A  owner role adopted (unmarked)     -> everything above except DROP ROLE; the role is left in place and a NOTICE says so
@@ -52,7 +52,7 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.relnamespace = v_schema) THEN RAISE EXCEPTION 'schema mcp_data holds a relation this migration did not create; refusing'; END IF;
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND p.proname NOT IN (
          '_safe_ident','_norm_intent','_iso_utc','_check_window','_resolve_scope','_session_rows','_prompt_rows',
-         'list_developers','developer_activity','list_sessions','session_details','search_prompt_metadata','prompt_metadata_batch')) THEN
+         'list_developers','developer_activity','list_sessions','session_details','search_prompt_metadata','prompt_metadata_batch','list_teams')) THEN
       RAISE EXCEPTION 'schema mcp_data holds a function this migration did not create; refusing';
     END IF;
   END IF;
@@ -82,13 +82,14 @@ BEGIN
     IF to_regclass('public.oauth_tokens') IS NOT NULL THEN REVOKE SELECT (token_hash, kind, scope, user_id, client_id, revoked_at, expires_at, absolute_expires_at) ON public.oauth_tokens FROM mcp_data_owner; END IF;
     IF to_regclass('public.oauth_clients') IS NOT NULL THEN REVOKE SELECT (client_id, disabled_at) ON public.oauth_clients FROM mcp_data_owner; END IF;
     IF to_regclass('public.users') IS NOT NULL THEN REVOKE SELECT (id, team_id, role, active) ON public.users FROM mcp_data_owner; END IF;
-    IF to_regclass('public.teams') IS NOT NULL THEN REVOKE SELECT (id) ON public.teams FROM mcp_data_owner; END IF;
+    IF to_regclass('public.teams') IS NOT NULL THEN REVOKE SELECT (id, name) ON public.teams FROM mcp_data_owner; END IF;
     IF to_regclass('public.members') IS NOT NULL THEN REVOKE SELECT (id, display_name) ON public.members FROM mcp_data_owner; END IF;
     IF to_regclass('public.team_members') IS NOT NULL THEN REVOKE SELECT (team_id, member_id, role) ON public.team_members FROM mcp_data_owner; END IF;
     IF to_regclass('public.sync_sessions') IS NOT NULL THEN REVOKE SELECT (id, team_id, member_id, source, session_id, model, started_at, ended_at, synced_at, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, api_cost, priced, edits, additions, deletions, changed_lines, files_touched, tool_calls, tool_errors, rework_loops, corrections, abandoned) ON public.sync_sessions FROM mcp_data_owner; END IF;
     IF to_regclass('public.sync_session_tools') IS NOT NULL THEN REVOKE SELECT (sync_session_id, tool_name, call_count) ON public.sync_session_tools FROM mcp_data_owner; END IF;
     IF to_regclass('public.session_turns') IS NOT NULL THEN REVOKE SELECT (id, session_id, org_id, user_id, tool, model, turn_index, turn_role, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, prompt_char_len, has_code_block, has_file_path, has_traceback, intent_category, created_at) ON public.session_turns FROM mcp_data_owner; END IF;
     IF to_regclass('public.daily_member_usage') IS NOT NULL THEN REVOKE SELECT (day, team_id, member_id, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, api_cost, edits, additions, deletions, changed_lines, files_touched, tool_calls, tool_errors, rework_loops, corrections, abandoned_count, session_count) ON public.daily_member_usage FROM mcp_data_owner; END IF;
+    IF to_regclass('public.mcp_all_teams_admins') IS NOT NULL THEN REVOKE SELECT (user_id) ON public.mcp_all_teams_admins FROM mcp_data_owner; END IF;
     REVOKE USAGE ON SCHEMA public FROM mcp_data_owner;
   ELSE
     RAISE NOTICE 'role mcp_data_owner does not exist: no column grants to revoke';
@@ -117,6 +118,16 @@ BEGIN
       REVOKE ALL ON ALL FUNCTIONS IN SCHEMA mcp_data FROM mcp_reader;
       REVOKE ALL ON SCHEMA mcp_data FROM mcp_reader;
     END IF;
+    -- Current signatures (each public function takes an optional trailing team uuid), then the earlier ones, so a database that still has the
+    -- first version of this migration rolls back too.
+    DROP FUNCTION IF EXISTS mcp_data.list_teams(bytea);
+    DROP FUNCTION IF EXISTS mcp_data.list_developers(bytea, integer, uuid, uuid);
+    DROP FUNCTION IF EXISTS mcp_data.developer_activity(bytea, uuid, timestamptz, timestamptz, uuid);
+    DROP FUNCTION IF EXISTS mcp_data.list_sessions(bytea, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid, uuid);
+    DROP FUNCTION IF EXISTS mcp_data.session_details(bytea, uuid, uuid);
+    DROP FUNCTION IF EXISTS mcp_data.search_prompt_metadata(bytea, uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint, uuid);
+    DROP FUNCTION IF EXISTS mcp_data.prompt_metadata_batch(bytea, bigint[], uuid);
+    DROP FUNCTION IF EXISTS mcp_data._resolve_scope(bytea, uuid, boolean);
     DROP FUNCTION IF EXISTS mcp_data.list_developers(bytea, integer, uuid);
     DROP FUNCTION IF EXISTS mcp_data.developer_activity(bytea, uuid, timestamptz, timestamptz);
     DROP FUNCTION IF EXISTS mcp_data.list_sessions(bytea, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid);

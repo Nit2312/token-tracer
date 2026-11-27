@@ -907,12 +907,13 @@ describe('Phase 4.5: Real MCP Client & OAuth 2.1 E2E Integration', () => {
 
     // Tool Discovery
     const toolList = await client.listTools();
-    assert.equal(toolList.tools.length, 6);
+    assert.equal(toolList.tools.length, 7);
     const toolNames = toolList.tools.map((t) => t.name).sort();
     assert.deepEqual(toolNames, [
       'developer_activity',
       'list_developers',
       'list_sessions',
+      'list_teams',
       'prompt_metadata_batch',
       'search_prompt_metadata',
       'session_details',
@@ -1285,6 +1286,6 @@ describe('Phase 4.5: Real MCP Client & OAuth 2.1 E2E Integration', () => {
     assert.equal(init2.serverInfo.name, 'token-tracer');
 
     const tools2 = await client2.listTools();
-    assert.equal(tools2.tools.length, 6);
+    assert.equal(tools2.tools.length, 7);
   });
 });

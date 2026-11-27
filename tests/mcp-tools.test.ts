@@ -43,13 +43,14 @@ const TEST_PRINCIPAL = {
 const CTX = makeToolContext(TEST_PRINCIPAL);
 
 describe('Phase 4.1: Tool Definitions and JSON Schemas', () => {
-  it('defines exactly the six approved tools', () => {
-    assert.equal(TOOL_DEFINITIONS.length, 6);
+  it('defines exactly the seven approved tools (list_teams plus the six data tools)', () => {
+    assert.equal(TOOL_DEFINITIONS.length, 7);
     const names = TOOL_DEFINITIONS.map((t) => t.name).sort();
     assert.deepEqual(names, [
       'developer_activity',
       'list_developers',
       'list_sessions',
+      'list_teams',
       'prompt_metadata_batch',
       'search_prompt_metadata',
       'session_details',
@@ -393,7 +394,7 @@ describe('Phase 4.2: Tool Handler Execution and Context Binding', () => {
   });
 
   it('TOOL_EXECUTORS registry exposes all 6 executors by tool name', () => {
-    assert.equal(Object.keys(TOOL_EXECUTORS).length, 6);
+    assert.equal(Object.keys(TOOL_EXECUTORS).length, 7);
     assert.equal(typeof TOOL_EXECUTORS.list_developers, 'function');
     assert.equal(typeof TOOL_EXECUTORS.developer_activity, 'function');
     assert.equal(typeof TOOL_EXECUTORS.list_sessions, 'function');

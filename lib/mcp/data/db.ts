@@ -95,6 +95,7 @@ export function translatePgError(e: unknown): DataError {
     if (msg.includes('window_too_large')) return dataError('window_too_large');
     if (msg.includes('window_out_of_range')) return dataError('window_out_of_range');
     if (msg.includes('not_found')) return dataError('not_found');
+    if (msg.includes('team_required')) return dataError('team_required');
     return dataError('invalid_argument');
   }
   if (code === '57014' || code === '42501' || code === '08006' || code === '08001') {

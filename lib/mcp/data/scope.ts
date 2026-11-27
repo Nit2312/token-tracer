@@ -31,16 +31,29 @@ export function assertScope(value: unknown): asserts value is DataScope {
   if (typeof value !== 'object' || value === null || !HASHES.has(value)) throw dataError('internal');
 }
 
-export function scopeFromPrincipal(principal: { tokenHash: Uint8Array; userId: string; teamId: string }): DataScope {
-  return createDataScope({
-    tokenHash: principal.tokenHash,
-    userId: principal.userId,
-    teamId: principal.teamId,
-  });
+/**
+ * The scope of ONE request. A team admin always acts on their own team: naming a different one is refused (`invalid_argument`).
+ * An "All teams" admin (principal.teamId === null) must name the team (`team_required` when missing); the database re-checks that the caller
+ * really is an All-teams admin and that the team exists. The resulting scope always carries a concrete team, which is what cursors and
+ * references are bound to, so a cursor or reference from one team can never be replayed against another.
+ */
+export function scopeFromPrincipal(
+  principal: { tokenHash: Uint8Array; userId: string; teamId: string | null },
+  requestedTeamId?: string | null,
+): DataScope {
+  let teamId: string;
+  if (principal.teamId !== null) {
+    if (requestedTeamId != null && requestedTeamId.toLowerCase() !== principal.teamId.toLowerCase()) throw dataError('invalid_argument');
+    teamId = principal.teamId;
+  } else {
+    if (requestedTeamId == null) throw dataError('team_required');
+    teamId = requestedTeamId;
+  }
+  return createDataScope({ tokenHash: principal.tokenHash, userId: principal.userId, teamId });
 }
 
 /** The ONLY authority passed to the database for a data call. Returns a fresh copy each time. */
-export function scopeDbArgs(scope: DataScope): { tokenHash: Buffer } {
+export function scopeDbArgs(scope: DataScope): { tokenHash: Buffer; teamId: string } {
   assertScope(scope);
-  return { tokenHash: Buffer.from(HASHES.get(scope)!) };
+  return { tokenHash: Buffer.from(HASHES.get(scope)!), teamId: scope.teamId };
 }

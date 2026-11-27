@@ -81,7 +81,7 @@ describe('authorize request parsing', () => {
 describe('eligibility', () => {
   const uid = '11111111-1111-4111-8111-111111111111'; const team = '22222222-2222-4222-8222-222222222222';
   const session = (o: Partial<SessionPayload> = {}): SessionPayload => ({ userId: uid, username: 'a', displayName: 'A', role: 'admin', memberId: null, teamId: team, issuedAt: Date.now() - 1000, mfa: true, ...o });
-  const user = (o: Partial<GrantUser> = {}): GrantUser => ({ id: uid, displayName: 'A', role: 'admin', teamId: team, teamName: 'T', active: true, ...o });
+  const user = (o: Partial<GrantUser> = {}): GrantUser => ({ id: uid, displayName: 'A', role: 'admin', teamId: team, teamName: 'T', active: true, allTeams: false, ...o });
   const why = (s: SessionPayload, u: GrantUser | null) => { const r = evaluateGrantEligibility(s, u); return r.ok ? 'ok' : r.reason; };
   it('only a DB admin with a team, MFA-complete, not impersonating, still active, and consistent with the database qualifies', () => {
     assert.equal(why(session(), user()), 'ok');

@@ -306,10 +306,11 @@ describe('database access from the MCP code is confined to the approved authenti
     'lib/mcp/data/developers.ts',
     'lib/mcp/data/prompts.ts',
     'lib/mcp/data/sessions.ts',
+    'lib/mcp/data/teams.ts',
   ];
   // The request-serving modules: what answers /mcp. They reach the database ONLY through ./bearer.
   const SERVING = ['lib/mcp/handler.ts', 'lib/mcp/server.ts', 'lib/mcp/config.ts', 'lib/mcp/context.ts', 'lib/mcp/bearer.ts', 'app/mcp/route.ts'];
-  const APPROVED_TABLES = ['users', 'teams', 'oauth_clients', 'oauth_authorization_codes', 'oauth_tokens', 'mcp_rate_limits', 'mcp_access_log'];
+  const APPROVED_TABLES = ['users', 'teams', 'oauth_clients', 'oauth_authorization_codes', 'oauth_tokens', 'mcp_rate_limits', 'mcp_access_log', 'mcp_all_teams_admins'];
 
   it('only the approved modules import pg or run queries', () => {
     const touching = all.filter((f) => /from\s+['"]pg['"]|\.query\(|\bnew pg\.|\bPool\b/.test(code(f))).map(rel).sort();

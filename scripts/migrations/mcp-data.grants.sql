@@ -22,7 +22,7 @@
 --
 -- mcp_data_owner  = COLUMN-level SELECT on the columns the functions read. NOT granted: session_turns.prompt_text_sanitized, sync_sessions.label /
 --                   events / agent / payload_hash, daily_member_usage.project, any path column, credentials, audit_log, prompt_embeddings, daily_org_*.
--- mcp_reader      = USAGE on schema mcp_data + EXECUTE on six functions. No privilege on any table.
+-- mcp_reader      = USAGE on schema mcp_data + EXECUTE on seven functions. No privilege on any table.
 -- PUBLIC is NOT revoked globally (see MCP.md 16.10): its grants apply to the roles and are checked, not removed; CONNECT, TEMPORARY, USAGE on public and
 -- EXECUTE on ordinary functions remain residual, as do the PUBLIC-by-default built-ins pg_cancel_backend, pg_terminate_backend (self-scoped: they only
 -- act on the caller's own sessions) and pg_logical_emit_message (can write a WAL message of arbitrary size, even in a read-only transaction; no data access): reported by the audit (6b), not fatal and are reported by mcp-data.audit.sql.
@@ -71,8 +71,8 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.roleid = rd.oid AND (m.member <> v_me OR m.set_option OR m.inherit_option)) THEN RAISE EXCEPTION 'mcp_reader has members besides the migration role''s ADMIN-only link (the implicit link CREATE ROLE gives its creator)'; END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_shdepend d WHERE d.refclassid = 'pg_catalog.pg_authid'::regclass AND d.refobjid = rd.oid AND d.deptype = 'o'
        AND d.dbid IN (0, (SELECT db.oid FROM pg_catalog.pg_database db WHERE db.datname = pg_catalog.current_database()))) THEN RAISE EXCEPTION 'mcp_reader owns objects'; END IF;
-  -- functions: thirteen, owned by the owner, search_path pinned, nothing executable by PUBLIC
-  IF (SELECT count(*) FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema) <> 13 THEN RAISE EXCEPTION 'mcp_data must hold exactly 13 functions'; END IF;
+  -- functions: fourteen, owned by the owner, search_path pinned, nothing executable by PUBLIC
+  IF (SELECT count(*) FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema) <> 14 THEN RAISE EXCEPTION 'mcp_data must hold exactly 14 functions'; END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND p.proowner <> o.oid) THEN RAISE EXCEPTION 'a function in mcp_data is not owned by mcp_data_owner'; END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p, pg_catalog.aclexplode(COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) a WHERE p.pronamespace = v_schema AND a.grantee = 0) THEN RAISE EXCEPTION 'a function in mcp_data is executable by PUBLIC'; END IF;
 END $$;
@@ -103,6 +103,8 @@ BEGIN
       ('users','role'),
       ('users','active'),
       ('teams','id'),
+      ('teams','name'),
+      ('mcp_all_teams_admins','user_id'),
       ('members','id'),
       ('members','display_name'),
       ('team_members','team_id'),
@@ -187,11 +189,11 @@ BEGIN
   WITH fp AS (SELECT d.classid, d.objid FROM pg_catalog.pg_shdepend d WHERE d.refclassid = 'pg_catalog.pg_authid'::regclass AND d.refobjid = rd AND d.deptype = 'a' AND d.dbid IN (0, v_db)),
   judged AS (SELECT fp.classid, COALESCE(
       (fp.classid = 'pg_catalog.pg_namespace'::regclass AND fp.objid = v_schema)
-      OR (fp.classid = 'pg_catalog.pg_proc'::regclass AND EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid = fp.objid AND p.pronamespace = v_schema AND p.proname IN ('list_developers', 'developer_activity', 'list_sessions', 'session_details', 'search_prompt_metadata', 'prompt_metadata_batch')))
+      OR (fp.classid = 'pg_catalog.pg_proc'::regclass AND EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid = fp.objid AND p.pronamespace = v_schema AND p.proname IN ('list_developers', 'developer_activity', 'list_sessions', 'session_details', 'search_prompt_metadata', 'prompt_metadata_batch', 'list_teams')))
       OR (fp.classid = 'pg_catalog.pg_database'::regclass AND fp.objid = v_db), false) AS ok FROM fp)   -- an explicit CONNECT on this database is harmless and allowed
   SELECT count(*) FILTER (WHERE NOT ok), count(*) FILTER (WHERE classid <> 'pg_catalog.pg_database'::regclass) INTO n_bad, n_total FROM judged;
   IF n_bad > 0 THEN RAISE EXCEPTION 'mcp_reader appears in ACL entries outside the expected set (a pre-existing grant); refusing, nothing was changed'; END IF;
-  IF n_total NOT IN (0, 7) THEN RAISE EXCEPTION 'mcp_reader already holds PART of the expected grants (partial baseline); refusing, nothing was changed'; END IF;
+  IF n_total NOT IN (0, 8) THEN RAISE EXCEPTION 'mcp_reader already holds PART of the expected grants (partial baseline); refusing, nothing was changed'; END IF;
   -- (b) ROLE SETTINGS of the reader: none at all (or exactly ours), and never per-database; the owner has none (checked in section 1).
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_db_role_setting s WHERE s.setrole IN (o, rd) AND s.setdatabase <> 0) THEN RAISE EXCEPTION 'a role has per-database settings; refusing'; END IF;
   SELECT COALESCE((SELECT pg_catalog.array_agg(u.c ORDER BY u.c) FROM pg_catalog.pg_db_role_setting s, pg_catalog.unnest(s.setconfig) AS u(c) WHERE s.setrole = rd), ARRAY[]::text[]) INTO v_cfg;
@@ -216,6 +218,8 @@ BEGIN
       ('users','role'),
       ('users','active'),
       ('teams','id'),
+      ('teams','name'),
+      ('mcp_all_teams_admins','user_id'),
       ('members','id'),
       ('members','display_name'),
       ('team_members','team_id'),
@@ -325,13 +329,13 @@ BEGIN
      OR pg_catalog.has_database_privilege('mcp_reader', pg_catalog.current_database(), 'CREATE') THEN
     RAISE EXCEPTION 'mcp_reader can CREATE in a schema or the database; see mcp-data.audit.sql';
   END IF;
-  IF (SELECT count(*) FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND pg_catalog.has_function_privilege('mcp_reader', p.oid, 'EXECUTE')) NOT IN (0, 6) THEN RAISE EXCEPTION 'mcp_reader can already execute some, but not exactly the six, functions in mcp_data (possibly through PUBLIC); refusing'; END IF;
+  IF (SELECT count(*) FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND pg_catalog.has_function_privilege('mcp_reader', p.oid, 'EXECUTE')) NOT IN (0, 7) THEN RAISE EXCEPTION 'mcp_reader can already execute some, but not exactly the seven, functions in mcp_data (possibly through PUBLIC); refusing'; END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace ns ON ns.oid = p.pronamespace
               WHERE ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%'
                 AND pg_catalog.has_function_privilege('mcp_reader', p.oid, 'EXECUTE')
                 AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
-                AND ((ns.nspname = 'mcp_data' AND p.proname NOT IN ('list_developers', 'developer_activity', 'list_sessions', 'session_details', 'search_prompt_metadata', 'prompt_metadata_batch')) OR (ns.nspname <> 'mcp_data' AND p.prosecdef))) THEN
-    RAISE EXCEPTION 'mcp_reader can execute a function beyond the six approved ones, or a SECURITY DEFINER function elsewhere (possibly through PUBLIC); see mcp-data.audit.sql';
+                AND ((ns.nspname = 'mcp_data' AND p.proname NOT IN ('list_developers', 'developer_activity', 'list_sessions', 'session_details', 'search_prompt_metadata', 'prompt_metadata_batch', 'list_teams')) OR (ns.nspname <> 'mcp_data' AND p.prosecdef))) THEN
+    RAISE EXCEPTION 'mcp_reader can execute a function beyond the seven approved ones, or a SECURITY DEFINER function elsewhere (possibly through PUBLIC); see mcp-data.audit.sql';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace = 'pg_catalog'::regnamespace AND pg_catalog.has_function_privilege('mcp_reader', p.oid, 'EXECUTE')
               AND p.proname IN ('pg_read_file','pg_read_binary_file','pg_ls_dir','pg_stat_file','lo_import','lo_export','pg_reload_conf','pg_rotate_logfile','pg_switch_wal','pg_create_restore_point')) THEN
@@ -368,13 +372,14 @@ GRANT USAGE ON SCHEMA public TO mcp_data_owner;
 GRANT SELECT (token_hash, kind, scope, user_id, client_id, revoked_at, expires_at, absolute_expires_at) ON public.oauth_tokens TO mcp_data_owner;
 GRANT SELECT (client_id, disabled_at) ON public.oauth_clients TO mcp_data_owner;
 GRANT SELECT (id, team_id, role, active) ON public.users TO mcp_data_owner;
-GRANT SELECT (id) ON public.teams TO mcp_data_owner;
+GRANT SELECT (id, name) ON public.teams TO mcp_data_owner;
 GRANT SELECT (id, display_name) ON public.members TO mcp_data_owner;
 GRANT SELECT (team_id, member_id, role) ON public.team_members TO mcp_data_owner;
 GRANT SELECT (id, team_id, member_id, source, session_id, model, started_at, ended_at, synced_at, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, api_cost, priced, edits, additions, deletions, changed_lines, files_touched, tool_calls, tool_errors, rework_loops, corrections, abandoned) ON public.sync_sessions TO mcp_data_owner;
 GRANT SELECT (sync_session_id, tool_name, call_count) ON public.sync_session_tools TO mcp_data_owner;
 GRANT SELECT (id, session_id, org_id, user_id, tool, model, turn_index, turn_role, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, prompt_char_len, has_code_block, has_file_path, has_traceback, intent_category, created_at) ON public.session_turns TO mcp_data_owner;
 GRANT SELECT (day, team_id, member_id, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, api_cost, edits, additions, deletions, changed_lines, files_touched, tool_calls, tool_errors, rework_loops, corrections, abandoned_count, session_count) ON public.daily_member_usage TO mcp_data_owner;
+GRANT SELECT (user_id) ON public.mcp_all_teams_admins TO mcp_data_owner;
 
 -- ── 5. AS mcp_data_owner: the schema and function privileges are granted BY the owner (additive) ──
 SET LOCAL ROLE mcp_data_owner;
@@ -383,12 +388,13 @@ BEGIN
   IF current_user <> 'mcp_data_owner' OR session_user = 'mcp_data_owner' THEN RAISE EXCEPTION 'SET LOCAL ROLE did not take effect; refusing to grant as the wrong role'; END IF;
 END $$;
 GRANT USAGE ON SCHEMA mcp_data TO mcp_reader;
-GRANT EXECUTE ON FUNCTION mcp_data.list_developers(bytea, integer, uuid) TO mcp_reader;
-GRANT EXECUTE ON FUNCTION mcp_data.developer_activity(bytea, uuid, timestamptz, timestamptz) TO mcp_reader;
-GRANT EXECUTE ON FUNCTION mcp_data.list_sessions(bytea, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid) TO mcp_reader;
-GRANT EXECUTE ON FUNCTION mcp_data.session_details(bytea, uuid) TO mcp_reader;
-GRANT EXECUTE ON FUNCTION mcp_data.search_prompt_metadata(bytea, uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint) TO mcp_reader;
-GRANT EXECUTE ON FUNCTION mcp_data.prompt_metadata_batch(bytea, bigint[]) TO mcp_reader;
+GRANT EXECUTE ON FUNCTION mcp_data.list_developers(bytea, integer, uuid, uuid) TO mcp_reader;
+GRANT EXECUTE ON FUNCTION mcp_data.developer_activity(bytea, uuid, timestamptz, timestamptz, uuid) TO mcp_reader;
+GRANT EXECUTE ON FUNCTION mcp_data.list_sessions(bytea, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid, uuid) TO mcp_reader;
+GRANT EXECUTE ON FUNCTION mcp_data.session_details(bytea, uuid, uuid) TO mcp_reader;
+GRANT EXECUTE ON FUNCTION mcp_data.search_prompt_metadata(bytea, uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint, uuid) TO mcp_reader;
+GRANT EXECUTE ON FUNCTION mcp_data.prompt_metadata_batch(bytea, bigint[], uuid) TO mcp_reader;
+GRANT EXECUTE ON FUNCTION mcp_data.list_teams(bytea) TO mcp_reader;
 RESET ROLE;
 
 -- ── 5b. The reader's role settings (no secret; the connection limit belongs to the role script and was validated above). search_path is a LIST: each schema is its own quoted element. ──
@@ -439,6 +445,8 @@ BEGIN
       ('users','role'),
       ('users','active'),
       ('teams','id'),
+      ('teams','name'),
+      ('mcp_all_teams_admins','user_id'),
       ('members','id'),
       ('members','display_name'),
       ('team_members','team_id'),
@@ -523,11 +531,11 @@ BEGIN
   WITH fp AS (SELECT d.classid, d.objid FROM pg_catalog.pg_shdepend d WHERE d.refclassid = 'pg_catalog.pg_authid'::regclass AND d.refobjid = rd AND d.deptype = 'a' AND d.dbid IN (0, v_db)),
   judged AS (SELECT fp.classid, COALESCE(
       (fp.classid = 'pg_catalog.pg_namespace'::regclass AND fp.objid = v_schema)
-      OR (fp.classid = 'pg_catalog.pg_proc'::regclass AND EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid = fp.objid AND p.pronamespace = v_schema AND p.proname IN ('list_developers', 'developer_activity', 'list_sessions', 'session_details', 'search_prompt_metadata', 'prompt_metadata_batch')))
+      OR (fp.classid = 'pg_catalog.pg_proc'::regclass AND EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid = fp.objid AND p.pronamespace = v_schema AND p.proname IN ('list_developers', 'developer_activity', 'list_sessions', 'session_details', 'search_prompt_metadata', 'prompt_metadata_batch', 'list_teams')))
       OR (fp.classid = 'pg_catalog.pg_database'::regclass AND fp.objid = v_db), false) AS ok FROM fp)   -- an explicit CONNECT on this database is harmless and allowed
   SELECT count(*) FILTER (WHERE NOT ok), count(*) FILTER (WHERE classid <> 'pg_catalog.pg_database'::regclass) INTO n_bad, n_total FROM judged;
   IF n_bad > 0 THEN RAISE EXCEPTION 'mcp_reader appears in ACL entries outside the expected set (a pre-existing grant); refusing, nothing was changed'; END IF;
-  IF n_total <> 7 THEN RAISE EXCEPTION 'mcp_reader ACL footprint is not exactly the expected set'; END IF;
+  IF n_total <> 8 THEN RAISE EXCEPTION 'mcp_reader ACL footprint is not exactly the expected set'; END IF;
   -- (b) ROLE SETTINGS of the reader: none at all (or exactly ours), and never per-database; the owner has none (checked in section 1).
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_db_role_setting s WHERE s.setrole IN (o, rd) AND s.setdatabase <> 0) THEN RAISE EXCEPTION 'a role has per-database settings; refusing'; END IF;
   SELECT COALESCE((SELECT pg_catalog.array_agg(u.c ORDER BY u.c) FROM pg_catalog.pg_db_role_setting s, pg_catalog.unnest(s.setconfig) AS u(c) WHERE s.setrole = rd), ARRAY[]::text[]) INTO v_cfg;
@@ -552,6 +560,8 @@ BEGIN
       ('users','role'),
       ('users','active'),
       ('teams','id'),
+      ('teams','name'),
+      ('mcp_all_teams_admins','user_id'),
       ('members','id'),
       ('members','display_name'),
       ('team_members','team_id'),
@@ -662,13 +672,13 @@ BEGIN
     RAISE EXCEPTION 'mcp_reader can CREATE in a schema or the database; see mcp-data.audit.sql';
   END IF;
   IF NOT pg_catalog.has_schema_privilege('mcp_reader', v_schema, 'USAGE') THEN RAISE EXCEPTION 'mcp_reader lacks USAGE on mcp_data'; END IF;
-  IF (SELECT count(*) FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND pg_catalog.has_function_privilege('mcp_reader', p.oid, 'EXECUTE')) <> 6 THEN RAISE EXCEPTION 'mcp_reader must be able to execute exactly the six reader functions'; END IF;
+  IF (SELECT count(*) FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND pg_catalog.has_function_privilege('mcp_reader', p.oid, 'EXECUTE')) <> 7 THEN RAISE EXCEPTION 'mcp_reader must be able to execute exactly the seven reader functions'; END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace ns ON ns.oid = p.pronamespace
               WHERE ns.nspname NOT IN ('pg_catalog','information_schema') AND ns.nspname NOT LIKE 'pg\_%'
                 AND pg_catalog.has_function_privilege('mcp_reader', p.oid, 'EXECUTE')
                 AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
-                AND ((ns.nspname = 'mcp_data' AND p.proname NOT IN ('list_developers', 'developer_activity', 'list_sessions', 'session_details', 'search_prompt_metadata', 'prompt_metadata_batch')) OR (ns.nspname <> 'mcp_data' AND p.prosecdef))) THEN
-    RAISE EXCEPTION 'mcp_reader can execute a function beyond the six approved ones, or a SECURITY DEFINER function elsewhere (possibly through PUBLIC); see mcp-data.audit.sql';
+                AND ((ns.nspname = 'mcp_data' AND p.proname NOT IN ('list_developers', 'developer_activity', 'list_sessions', 'session_details', 'search_prompt_metadata', 'prompt_metadata_batch', 'list_teams')) OR (ns.nspname <> 'mcp_data' AND p.prosecdef))) THEN
+    RAISE EXCEPTION 'mcp_reader can execute a function beyond the seven approved ones, or a SECURITY DEFINER function elsewhere (possibly through PUBLIC); see mcp-data.audit.sql';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace = 'pg_catalog'::regnamespace AND pg_catalog.has_function_privilege('mcp_reader', p.oid, 'EXECUTE')
               AND p.proname IN ('pg_read_file','pg_read_binary_file','pg_ls_dir','pg_stat_file','lo_import','lo_export','pg_reload_conf','pg_rotate_logfile','pg_switch_wal','pg_create_restore_point')) THEN

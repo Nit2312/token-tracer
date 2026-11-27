@@ -208,6 +208,7 @@ Requests refused before the bearer step never reach the database.
 | `oauth_tokens` | access and refresh tokens | `token_hash` bytea(32) unique, `kind ∈ {access, refresh}`, FKs `ON DELETE CASCADE`, `absolute_expires_at`, rotation/revocation columns |
 | `mcp_rate_limits` | fixed-window counters | primary key `(key, window_start)`; keys contain hashed IPs, never raw |
 | `mcp_access_log` | tool-access trail (Phase 4/5) | append-only; no prompt text or token material; deliberately no foreign keys |
+| `mcp_all_teams_admins` | explicit grant: admins who may use MCP across all teams | `user_id` is the primary key, foreign key to `users` (`ON DELETE CASCADE`); written only by the application owner role (admin screen), read by `mcp_auth` and `mcp_data_owner` |
 
 ### Integrity triggers (`BEFORE UPDATE`, bind the table owner too)
 - `oauth_tokens`: identity columns immutable; `revoked_at`/`revoked_reason` set once, never cleared or rewritten; `rotated_at`/`replaced_by_id` set once.
@@ -231,6 +232,7 @@ Attributes: `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
 | `oauth_tokens` | all | `token_hash, kind, family_id, client_id, user_id, resource, scope, expires_at, absolute_expires_at` | `last_used_at, rotated_at, replaced_by_id, revoked_at, revoked_reason` |
 | `mcp_rate_limits` | all | `key, window_start, count` | `count` |
 | `mcp_access_log` | — | `user_id, team_id, client_id, token_id, event, tool, target_member_ids, outcome, status, row_count, duration_ms, ip_hash` | — |
+| `mcp_all_teams_admins` | `user_id` | — | — |
 
 Plus `USAGE` on sequence `mcp_access_log_id_seq` and `EXECUTE` on `mcp_audit_event(text, uuid, text, text, jsonb)`. **No** `DELETE`, `TRUNCATE`, `REFERENCES` or `TRIGGER` anywhere.
 
@@ -263,6 +265,15 @@ It is deliberately **not** `analyst_login`: the analyst role's grants exclude pr
 `lib/mcp/db.ts`: only `MCP_AUTH_DATABASE_URL`, which must connect as `mcp_auth` (any other user is refused); verified TLS; pool `max: 3`; every unit of work is one transaction with local limits; missing/invalid configuration throws (fail closed — there is no fallback to the owner or analyst credentials).
 
 ---
+
+### "All teams" admins
+
+An admin saved as **All teams** (no team) can use MCP across teams, but only if the database also lists them in `mcp_all_teams_admins`. A NULL team alone is **not** enough: deleting a team sets its admins' team to NULL, and that must never widen MCP access. The admin screen writes the row when an admin is saved as All teams and removes it for any other save or role change; the foreign key removes it when the user is deleted.
+
+- **Sign-in:** consent accepts a team admin, or an All-teams admin (the page says "all teams").
+- **Token check:** the same predicate in `tokens.ts` (`ELIGIBLE_USER_SQL`) and in `mcp_data._resolve_scope` (a team that exists, or no team plus a row in the table).
+- **Choosing a team:** `list_teams` returns every team for an All-teams admin and only their own for a team admin. Every other tool takes an optional `teamId`. An All-teams admin must pass it (`team_required` otherwise); a team admin may only name their own team (anything else is `invalid_argument`). The chosen team is validated in the database and becomes part of every cursor and reference, so none can be replayed against another team.
+- **Upgrade path for an existing database:** apply `mcp-oauth.sql` again (idempotent, adds the table), roll back the data plane (`mcp-data.rollback.sql`), then apply `mcp-data.sql` and `mcp-data.grants.sql`, and re-run `setup-mcp-roles.mjs --role=mcp_auth --apply` for the new `SELECT` on the table.
 
 ## 6. Account lifecycle: revocation, audit, retention
 

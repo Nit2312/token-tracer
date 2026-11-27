@@ -12,6 +12,7 @@ export type DataErrorCode =
   | 'window_out_of_range' // the window starts before the lookback limit (14 days, or the shorter retention of the source)
   | 'limit_exceeded'     // a requested page or batch size is above the maximum
   | 'cursor_invalid'     // tampered, expired, wrong principal, wrong query
+  | 'team_required'      // an All-teams admin did not say which team to act on
   | 'not_found'          // missing, other team's, or an undecodable reference — indistinguishable by design
   | 'text_not_available' // prompt text was requested while it is not enabled and approved
   | 'unavailable'        // the data service cannot be reached; callers may retry
@@ -23,6 +24,7 @@ export const DATA_ERROR_MESSAGES: Readonly<Record<DataErrorCode, string>> = Obje
   window_out_of_range: 'The time window starts earlier than the data that is available.',
   limit_exceeded: 'A requested size is above the allowed maximum.',
   cursor_invalid: 'The page cursor is invalid or has expired.',
+  team_required: 'Pass teamId to choose a team (use list_teams to see them).',
   not_found: 'Not found.',
   text_not_available: 'Prompt text is not available.',
   unavailable: 'The data service is temporarily unavailable.',

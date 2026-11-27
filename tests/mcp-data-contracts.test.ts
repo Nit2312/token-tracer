@@ -398,7 +398,7 @@ describe('scope: the identity a data call runs under', () => {
     assert.deepEqual(Object.keys(scope).sort(), ['teamId', 'userId']); assert.ok(Object.isFrozen(scope));
     const shown = JSON.stringify(scope) + String(Object.values(scope)) + inspect(scope);
     assert.ok(!shown.includes(keep.toString('hex')) && !shown.includes(keep.toString('base64')) && !shown.includes(keep.toString('base64url')));
-    assert.deepEqual(Object.keys(scopeDbArgs(scope)), ['tokenHash']); // no team id is ever an argument: the database derives the team
+    assert.deepEqual(Object.keys(scopeDbArgs(scope)).sort(), ['teamId', 'tokenHash']); // the already-resolved team is passed so the database can re-check it (own team for team admins; the chosen, validated team for All-teams admins)
   });
 });
 
@@ -471,7 +471,7 @@ describe('opaque references and cursors', () => {
 
 describe('error taxonomy', () => {
   it('every code has one fixed message; there is no way to attach detail', () => {
-    assert.deepEqual(Object.keys(DATA_ERROR_MESSAGES).sort(), ['cursor_invalid', 'internal', 'invalid_argument', 'limit_exceeded', 'not_found', 'text_not_available', 'unavailable', 'window_out_of_range', 'window_too_large']);
+    assert.deepEqual(Object.keys(DATA_ERROR_MESSAGES).sort(), ['cursor_invalid', 'internal', 'invalid_argument', 'limit_exceeded', 'not_found', 'team_required', 'text_not_available', 'unavailable', 'window_out_of_range', 'window_too_large']);
     for (const [c, m] of Object.entries(DATA_ERROR_MESSAGES)) { assert.equal(new DataError(c as DataErrorCode).message, m); assert.ok(m.length > 3 && !/[\n\r]/.test(m)); }
     assert.equal(DataError.length, 1, 'the constructor takes the code only');
     assert.ok(Object.isFrozen(DATA_ERROR_MESSAGES));

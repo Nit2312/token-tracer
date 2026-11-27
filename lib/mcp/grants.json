@@ -61,6 +61,9 @@
         "key",
         "window_start",
         "count"
+      ],
+      "mcp_all_teams_admins": [
+        "user_id"
       ]
     },
     "insert": {
@@ -168,7 +171,8 @@
         "active"
       ],
       "teams": [
-        "id"
+        "id",
+        "name"
       ],
       "members": [
         "id",
@@ -251,21 +255,25 @@
         "corrections",
         "abandoned_count",
         "session_count"
+      ],
+      "mcp_all_teams_admins": [
+        "user_id"
       ]
     },
     "ownsSchema": "mcp_data",
     "ownsFunctions": [
-      "mcp_data.list_developers(bytea, integer, uuid)",
-      "mcp_data.developer_activity(bytea, uuid, timestamptz, timestamptz)",
-      "mcp_data.list_sessions(bytea, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid)",
-      "mcp_data.session_details(bytea, uuid)",
-      "mcp_data.search_prompt_metadata(bytea, uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint)",
-      "mcp_data.prompt_metadata_batch(bytea, bigint[])",
+      "mcp_data.list_developers(bytea, integer, uuid, uuid)",
+      "mcp_data.developer_activity(bytea, uuid, timestamptz, timestamptz, uuid)",
+      "mcp_data.list_sessions(bytea, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid, uuid)",
+      "mcp_data.session_details(bytea, uuid, uuid)",
+      "mcp_data.search_prompt_metadata(bytea, uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint, uuid)",
+      "mcp_data.prompt_metadata_batch(bytea, bigint[], uuid)",
+      "mcp_data.list_teams(bytea)",
       "mcp_data._safe_ident(text)",
       "mcp_data._norm_intent(text)",
       "mcp_data._iso_utc(timestamptz)",
       "mcp_data._check_window(timestamptz, timestamptz, interval)",
-      "mcp_data._resolve_scope(bytea)",
+      "mcp_data._resolve_scope(bytea, uuid, boolean)",
       "mcp_data._session_rows(uuid, uuid, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid)",
       "mcp_data._prompt_rows(uuid, bigint[], uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint)"
     ],
@@ -281,12 +289,13 @@
     "update": {},
     "sequences": [],
     "functions": [
-      "mcp_data.list_developers(bytea, integer, uuid)",
-      "mcp_data.developer_activity(bytea, uuid, timestamptz, timestamptz)",
-      "mcp_data.list_sessions(bytea, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid)",
-      "mcp_data.session_details(bytea, uuid)",
-      "mcp_data.search_prompt_metadata(bytea, uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint)",
-      "mcp_data.prompt_metadata_batch(bytea, bigint[])"
+      "mcp_data.list_developers(bytea, integer, uuid, uuid)",
+      "mcp_data.developer_activity(bytea, uuid, timestamptz, timestamptz, uuid)",
+      "mcp_data.list_sessions(bytea, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid, uuid)",
+      "mcp_data.session_details(bytea, uuid, uuid)",
+      "mcp_data.search_prompt_metadata(bytea, uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint, uuid)",
+      "mcp_data.prompt_metadata_batch(bytea, bigint[], uuid)",
+      "mcp_data.list_teams(bytea)"
     ],
     "login": true,
     "connectionLimit": 5,

@@ -59,6 +59,9 @@ export function formatToolError(error: unknown): McpToolCallResult {
       case 'invalid_argument':
         message = 'Invalid arguments supplied.';
         break;
+      case 'team_required':
+        message = 'Pass teamId to choose a team (use list_teams to see them).';
+        break;
       case 'limit_exceeded':
         message = 'The request exceeded allowed limits or size budget.';
         break;

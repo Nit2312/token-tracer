@@ -2,14 +2,14 @@
 
 import { useState } from 'react';
 
-interface Props { consentToken: string; clientName: string; destination: string; loopback: boolean; userName: string; teamName: string }
+interface Props { consentToken: string; clientName: string; destination: string; loopback: boolean; userName: string; teamName: string; allTeams?: boolean }
 
 /**
  * Posts the decision with fetch (the site CSP has form-action 'self', which would block a form post that redirects to the client) and then
  * navigates to the URL the SERVER built from the client's registered redirect URI. All values are rendered as text by React (escaped);
  * clientName is attacker-controlled (dynamic client registration) and must never be injected as HTML.
  */
-export default function ConsentForm({ consentToken, clientName, destination, loopback, userName, teamName }: Props) {
+export default function ConsentForm({ consentToken, clientName, destination, loopback, userName, teamName, allTeams }: Props) {
   const [busy, setBusy] = useState<'approve' | 'deny' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -35,11 +35,11 @@ export default function ConsentForm({ consentToken, clientName, destination, loo
       <div className="login-card" style={{ maxWidth: 520 }}>
         <h1 style={{ fontSize: 22, marginBottom: 8 }}>Authorize access</h1>
         <p style={{ marginBottom: 12 }}>
-          <strong>{clientName}</strong> is asking to connect to Token Tracer as <strong>{userName}</strong> for the team <strong>{teamName}</strong>.
+          <strong>{clientName}</strong> is asking to connect to Token Tracer as <strong>{userName}</strong> for {allTeams ? <strong>all teams</strong> : <>the team <strong>{teamName}</strong></>}.
         </p>
         <p style={{ marginBottom: 6 }}>If you approve, it will be able to <strong>read</strong>:</p>
         <ul style={{ margin: '0 0 12px 20px' }}>
-          <li>your team&apos;s developers and their activity (tokens, cost, sessions)</li>
+          <li>{allTeams ? 'the developers and their activity (tokens, cost, sessions) of every team, one team at a time' : 'your team\'s developers and their activity (tokens, cost, sessions)'}</li>
           <li>session details (which tools were used and how often, edits, errors)</li>
           <li>prompt metadata only: when it was sent, its length, its category (for example bug fix or refactor), and whether it contains code, a file path or an error trace</li>
         </ul>
