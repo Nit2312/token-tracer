@@ -49,14 +49,14 @@ async function result(res: Response): Promise<{ status: number; body: any }> {
 
 describe('initialization', () => {
   for (const version of ['2025-11-25', '2025-06-18', '2025-03-26']) {
-    it(`initialize negotiates protocol ${version} and returns server info, instructions and EMPTY capabilities`, async () => {
+    it(`initialize negotiates protocol ${version} and returns server info, instructions and tools capabilities`, async () => {
       const { status, body } = await result(await init(version));
       assert.equal(status, 200);
       assert.equal(body.jsonrpc, '2.0'); assert.equal(body.id, 1);
       assert.equal(body.result.protocolVersion, version);
       assert.deepEqual(body.result.serverInfo, { ...MCP_SERVER_INFO });
       assert.equal(body.result.instructions, MCP_SERVER_INSTRUCTIONS);
-      assert.deepEqual(body.result.capabilities, {}); // nothing advertised: no tools, resources, prompts or logging
+      assert.deepEqual(body.result.capabilities, { tools: { listChanged: true } });
     });
   }
   it('an unknown future protocol version negotiates down to a supported one instead of failing', async () => {
@@ -78,17 +78,17 @@ describe('initialization', () => {
   });
 });
 
-describe('capability discovery exposes nothing', () => {
-  for (const method of ['tools/list', 'resources/list', 'resources/templates/list', 'prompts/list', 'completion/complete', 'logging/setLevel']) {
+describe('capability discovery exposes only registered tools; no resources, templates, or prompts', () => {
+  for (const method of ['resources/list', 'resources/templates/list', 'prompts/list', 'completion/complete', 'logging/setLevel']) {
     it(`${method} → Method not found (-32601)`, async () => {
       const { status, body } = await result(await rpc(method, {}, 2, { 'mcp-protocol-version': '2025-06-18' }));
       assert.equal(status, 200); assert.equal(body.error.code, -32601); assert.equal(body.result, undefined);
     });
   }
-  it('tools/call for any tool name → Method not found; no tool exists to call', async () => {
-    for (const name of ['query', 'run_sql', 'list_team_developers', 'x']) {
+  it('tools/call for an unregistered tool name → -32602 or tool error; no arbitrary tool exists', async () => {
+    for (const name of ['query', 'run_sql', 'list_team_developers', 'does_not_exist']) {
       const { body } = await result(await rpc('tools/call', { name, arguments: {} }, 3));
-      assert.equal(body.error.code, -32601);
+      assert.ok(body.error || body.result?.isError, `expected error for tool ${name}`);
     }
   });
   it('an unknown method → Method not found', async () => {
@@ -325,7 +325,7 @@ describe('database access from the MCP code is confined to the approved authenti
     for (const f of all.filter((x) => rel(x) !== 'lib/mcp/oauth/authorize.ts')) assert.doesNotMatch(code(f), /lib\/team|team\/(db|env|audit)|lib\/auth\b|lib\/security\/(auth|mfa)/, rel(f));
   });
   it('request-serving modules import only the SDK, each other, ./bearer and pure OAuth helpers; never pg, ./db or a repository', () => {
-    const ok = (i: string) => i === '@modelcontextprotocol/server' || ['./config', './context', './server', './bearer', './oauth/config', './oauth/metadata', './oauth/principal', './oauth/scopes', './oauth/tokens', './db', '@/lib/mcp/handler', 'node:async_hooks'].includes(i);
+    const ok = (i: string) => i === '@modelcontextprotocol/server' || ['./config', './context', './server', './bearer', './oauth/config', './oauth/metadata', './oauth/principal', './oauth/scopes', './oauth/tokens', './db', '@/lib/mcp/handler', './tools', 'node:async_hooks'].includes(i);
     for (const f of SERVING.map((x) => path.join(process.cwd(), x))) for (const i of importsOf(f)) assert.ok(ok(i), `${rel(f)} imports ${i}`);
     for (const f of SERVING.filter((x) => x !== 'lib/mcp/bearer.ts').map((x) => path.join(process.cwd(), x))) assert.doesNotMatch(importsOf(f).join(' '), /\.\/db|oauth\/tokens/, rel(f));
   });
@@ -354,8 +354,12 @@ describe('database access from the MCP code is confined to the approved authenti
     assert.deepEqual([...new Set([...src.matchAll(/process\.env\.(\w+)/g)].map((m) => m[1]))], ['MCP_AUTH_DATABASE_URL']);
     assert.doesNotMatch(src.replace(/MCP_AUTH_DATABASE_URL/g, ''), /DATABASE_URL|NEON_CONNECTION|ANALYST_|SESSION_SECRET|CRON_SECRET|GROQ|neondb_owner|lib\/team|lib\/security/);
   });
-  it('registers no tools, resources or prompts', () => {
-    for (const f of all) assert.doesNotMatch(code(f), /registerTool|registerResource|registerPrompt|\.tool\(|\.resource\(|\.prompt\(/, rel(f));
+  it('registers only tools in server.ts; never resources or prompts', () => {
+    for (const f of all.filter((x) => rel(x) !== 'lib/mcp/server.ts')) {
+      assert.doesNotMatch(code(f), /registerTool|registerResource|registerPrompt|\.tool\(|\.resource\(|\.prompt\(/, rel(f));
+    }
+    const serverCode = code(path.join(root, 'server.ts'));
+    assert.doesNotMatch(serverCode, /registerResource|registerPrompt|\.resource\(|\.prompt\(/);
   });
   it('no logging statement can contain request data, tokens or error objects', () => {
     for (const f of all) for (const m of code(f).matchAll(/console\.(log|warn|error|info|debug)\(([^)]*)\)/g)) {

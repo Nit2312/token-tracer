@@ -20,8 +20,9 @@ export interface McpTextContent {
 }
 
 export interface McpToolCallResult {
-  readonly content: readonly McpTextContent[];
+  readonly content: McpTextContent[];
   readonly isError?: boolean;
+  [key: string]: unknown;
 }
 
 /**

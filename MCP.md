@@ -23,11 +23,12 @@ Last updated: 2026-11-26. This is the single reference for the whole program (Ph
 | 1 | Stateless MCP endpoint `/mcp`: handshake and capability discovery, empty capabilities, feature flag, Host/Origin guards | done |
 | 2 | OAuth 2.1 authorization server (discovery, dynamic client registration, authorize + consent, token, refresh rotation, revoke), bearer authentication on `/mcp`, least-privilege database role, revocation on every account change, nightly retention, end-to-end and negative test suites (steps 1–10) | done |
 | 3 | Tenant-isolated data-access layer: `mcp_reader` role, identity-bound SQL functions, dedicated reader pool, authenticated principal with unforgeable `tokenHash`, typed metadata-only services, AES-256-GCM sealed references & signed cursors, strict budget packing (24 KiB), adversarial fuzzing, concurrency and revocation hardening (P3-0 through P3-9) | done |
-| 4 (4.1–4.3) | Read-only tool implementation: strict JSON Schema definitions, tool execution handlers, and MCP content block formatting with 24 KiB budget enforcement for the six metadata-only services. Capabilities remain empty (deferred to 4.4) | done |
+| 4 (4.1–4.3) | Read-only tool implementation: strict JSON Schema definitions, tool execution handlers, and MCP content block formatting with 24 KiB budget enforcement for the six metadata-only services | done |
+| 4.4 | Controlled tool registration & protocol validation: registered all 6 tools in `createTokenTracerMcpServer`, validated JSON-RPC protocol requests (`initialize`, `tools/list`, `tools/call`), tenant isolation, and parameter injection guards | done |
 
 ### Not built yet (by design — see [Later phases](#15-later-phases))
-- **No tools, resources or prompts exist.** `/mcp` authenticates callers and then advertises empty capabilities. Tools are exposed in Phase 4.
-- Phase 4 read-only tools (built on the Phase 3 services), Phase 5 access logging and `/mcp` rate limiting, Phase 6 test with a real Claude client, Phase 7 production rollout.
+- **No resources or prompts exist.** `/mcp` exposes only the six approved metadata-only tools. No resources, templates, or prompts are registered.
+- Phase 5 access logging and `/mcp` rate limiting, Phase 6 test with a real Claude client, Phase 7 production rollout.
 
 ### Production-readiness blockers (NOT completed — all must be closed or explicitly accepted before `MCP_ENABLED=true` in production)
 1. **Legal/HR approval of the consent wording** (today's wording says a connected app can read the team's developers' activity, session metadata and prompt text with sensitive values masked). Technically approved for Phase 2; legal/HR unconfirmed. **It must be revised before raw prompt text can ever be enabled** (decision 4 of [section 16](#16-phase-3-plan-and-decisions): the initial release exposes prompt metadata only, and masking is best-effort).
@@ -1029,9 +1030,33 @@ Files: `scripts/migrations/mcp-data.sql` (roles, schema, functions), `scripts/mi
 - Deep metadata validation: runs `assertMetadataOnly` on outgoing payloads to guarantee zero prompt text, file paths, or internal fields escape.
 - Response budget enforcement: validates that serialized UTF-8 bytes remain within the 24 KiB response budget (`RESPONSE_BYTE_BUDGET`).
 
-**4. Capability Exposure Deferred (Phase 4.4)**
-- The `/mcp` endpoint continues to advertise empty capabilities `{}`.
-- Tool schemas and handlers are tested and verified independently via unit and integration tests (`tests/mcp-tools.test.ts`), without registering them in `createTokenTracerMcpServer` or exposing them to external clients yet.
+### 17.2 Phase 4.4 implementation (complete, 2026-11-27)
+
+**1. Controlled MCP Server Registration (`lib/mcp/server.ts`)**
+- Registered all six approved metadata-only tools in `createTokenTracerMcpServer` using the official MCP SDK `registerTool` method:
+  1. `list_developers`
+  2. `developer_activity`
+  3. `list_sessions`
+  4. `session_details`
+  5. `search_prompt_metadata`
+  6. `prompt_metadata_batch`
+- Schemas compiled directly via `fromJsonSchema(def.inputSchema)` maintaining Standard Schema compatibility.
+- Handlers delegate directly to `TOOL_EXECUTORS` passing the per-request `McpToolContext`.
+- Capabilities: Advertises `{ tools: { listChanged: true } }` on handshake; capabilities for resources and prompts remain completely disabled.
+
+**2. Protocol Validation Suite (`tests/mcp-protocol.test.ts`)**
+- Validated real JSON-RPC protocol requests over Streamable HTTP transport:
+  - `initialize`: Protocol version negotiation (`2025-11-25`, `2025-06-18`, `2025-03-26`), returns server info (`token-tracer 0.1.0`), instructions, and tool capabilities.
+  - `tools/list`: Returns exactly the 6 approved tools with full descriptions and `additionalProperties: false` schemas.
+  - `tools/call`: Successfully executes all 6 tools with structured arguments and formats response blocks.
+- Negative & Adversarial Validation:
+  - Unknown tools rejected with JSON-RPC error.
+  - Parameter injection (`additionalProperties: false`) rejected at protocol validation layer before reaching handlers.
+  - Invalid parameter types rejected.
+  - Unauthenticated requests blocked with `401 Unauthorized` before reaching tool execution.
+  - Cross-tenant sealed reference in `tools/call` for `session_details` returns unforgeable `not_found` error, preventing cross-tenant existence enumeration.
+  - Tampered sealed references fail authentication check cleanly with `not_found`.
+  - Zero raw prompt text, snippets, or file paths leaked in responses.
 
 
 
