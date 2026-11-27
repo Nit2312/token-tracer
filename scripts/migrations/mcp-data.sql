@@ -326,12 +326,20 @@ BEGIN
      ORDER BY m.id LIMIT p_limit;
 END $$;
 
--- 2. Daily activity of ONE developer from the daily rollups, UTC days overlapping [p_from, p_to) (a partial day is included whole: the rollup is daily).
---    Lookback 14 days. A developer who is not a current member of the caller's team is "not found", the same as one that does not exist.
+-- 2. Daily activity of ONE developer, UTC days overlapping [p_from, p_to) (a partial day is included whole). Lookback 14 days.
+--    FRESH: computed LIVE from sync_sessions with the SAME attribution as the nightly rollup and the dashboard (a session counts, in full, on the UTC day it
+--    ENDED, falling back to its start, then its sync time), so today and any not-yet-rolled-up day are included. A day that has no session rows any more
+--    (raw sessions are pruned after RETENTION_DAYS) falls back to the rollup row. A developer who is not a current member of the caller's team is
+--    "not found", the same as one that does not exist.
+--    HONEST ABOUT LONG SESSIONS: the stored totals are cumulative per session, so they cannot be split across the days a session spanned. Three extra columns
+--    say how far a day's total can be trusted as "that day's usage": sessions_started_earlier (sessions counted on this day that began on an earlier day),
+--    tokens_in_sessions_started_earlier (all tokens of those sessions), unpriced_sessions (sessions without a price, whose cost is counted as 0).
+--    They are NULL for a day served from the rollup, where that detail is no longer known.
 CREATE OR REPLACE FUNCTION mcp_data.developer_activity(p_token bytea, p_member uuid, p_from timestamptz, p_to timestamptz, p_team uuid DEFAULT NULL)
 RETURNS TABLE (day text, tokens_in bigint, tokens_out bigint, cache_read_tokens bigint, cache_write_tokens bigint, api_cost double precision, session_count bigint,
                tool_calls bigint, tool_errors bigint, edits bigint, additions bigint, deletions bigint, changed_lines bigint, files_touched bigint,
-               rework_loops bigint, corrections bigint, abandoned_count bigint)
+               rework_loops bigint, corrections bigint, abandoned_count bigint,
+               sessions_started_earlier bigint, tokens_in_sessions_started_earlier bigint, unpriced_sessions bigint)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 #variable_conflict use_column
 DECLARE v_team uuid; v_first date; v_end date;
@@ -343,17 +351,47 @@ BEGIN
   v_first := (p_from AT TIME ZONE 'UTC')::date;
   v_end := (p_to AT TIME ZONE 'UTC')::date + CASE WHEN (p_to AT TIME ZONE 'UTC')::time = time '00:00' THEN 0 ELSE 1 END;
   RETURN QUERY
-    SELECT pg_catalog.to_char(d.day, 'YYYY-MM-DD'),
-           COALESCE(pg_catalog.sum(d.tokens_in), 0)::bigint, COALESCE(pg_catalog.sum(d.tokens_out), 0)::bigint,
-           COALESCE(pg_catalog.sum(d.cache_read_tokens), 0)::bigint, COALESCE(pg_catalog.sum(d.cache_write_tokens), 0)::bigint,
-           COALESCE(pg_catalog.sum(d.api_cost), 0)::double precision, COALESCE(pg_catalog.sum(d.session_count), 0)::bigint,
-           COALESCE(pg_catalog.sum(d.tool_calls), 0)::bigint, COALESCE(pg_catalog.sum(d.tool_errors), 0)::bigint,
-           COALESCE(pg_catalog.sum(d.edits), 0)::bigint, COALESCE(pg_catalog.sum(d.additions), 0)::bigint, COALESCE(pg_catalog.sum(d.deletions), 0)::bigint,
-           COALESCE(pg_catalog.sum(d.changed_lines), 0)::bigint, COALESCE(pg_catalog.sum(d.files_touched), 0)::bigint,
-           COALESCE(pg_catalog.sum(d.rework_loops), 0)::bigint, COALESCE(pg_catalog.sum(d.corrections), 0)::bigint, COALESCE(pg_catalog.sum(d.abandoned_count), 0)::bigint
-      FROM public.daily_member_usage d
-     WHERE d.team_id = v_team AND d.member_id = p_member AND d.day >= v_first AND d.day < v_end
-     GROUP BY d.day ORDER BY d.day;
+    WITH live AS (
+      SELECT (COALESCE(s.ended_at, s.started_at, s.synced_at) AT TIME ZONE 'UTC')::date AS l_day,
+             COALESCE(pg_catalog.sum(s.tokens_in), 0)::bigint AS l_ti, COALESCE(pg_catalog.sum(s.tokens_out), 0)::bigint AS l_to,
+             COALESCE(pg_catalog.sum(s.tokens_cache_read), 0)::bigint AS l_cr, COALESCE(pg_catalog.sum(s.tokens_cache_write), 0)::bigint AS l_cw,
+             COALESCE(pg_catalog.sum(COALESCE(s.api_cost, 0)), 0)::double precision AS l_cost, pg_catalog.count(*)::bigint AS l_sc,
+             COALESCE(pg_catalog.sum(s.tool_calls), 0)::bigint AS l_tc, COALESCE(pg_catalog.sum(s.tool_errors), 0)::bigint AS l_te,
+             COALESCE(pg_catalog.sum(s.edits), 0)::bigint AS l_ed, COALESCE(pg_catalog.sum(s.additions), 0)::bigint AS l_ad, COALESCE(pg_catalog.sum(s.deletions), 0)::bigint AS l_de,
+             COALESCE(pg_catalog.sum(s.changed_lines), 0)::bigint AS l_cl, COALESCE(pg_catalog.sum(s.files_touched), 0)::bigint AS l_ft,
+             COALESCE(pg_catalog.sum(s.rework_loops), 0)::bigint AS l_rl, COALESCE(pg_catalog.sum(s.corrections), 0)::bigint AS l_co,
+             pg_catalog.count(*) FILTER (WHERE s.abandoned)::bigint AS l_ab,
+             pg_catalog.count(*) FILTER (WHERE s.started_at IS NOT NULL AND (s.started_at AT TIME ZONE 'UTC')::date < (COALESCE(s.ended_at, s.started_at, s.synced_at) AT TIME ZONE 'UTC')::date)::bigint AS l_se,
+             COALESCE(pg_catalog.sum(COALESCE(s.tokens_in, 0) + COALESCE(s.tokens_out, 0) + COALESCE(s.tokens_cache_read, 0) + COALESCE(s.tokens_cache_write, 0))
+                      FILTER (WHERE s.started_at IS NOT NULL AND (s.started_at AT TIME ZONE 'UTC')::date < (COALESCE(s.ended_at, s.started_at, s.synced_at) AT TIME ZONE 'UTC')::date), 0)::bigint AS l_tse,
+             pg_catalog.count(*) FILTER (WHERE NOT s.priced)::bigint AS l_up
+        FROM public.sync_sessions s
+       WHERE s.team_id = v_team AND s.member_id = p_member
+         AND COALESCE(s.ended_at, s.started_at, s.synced_at) IS NOT NULL
+         AND (COALESCE(s.ended_at, s.started_at, s.synced_at) AT TIME ZONE 'UTC')::date >= v_first
+         AND (COALESCE(s.ended_at, s.started_at, s.synced_at) AT TIME ZONE 'UTC')::date < v_end
+       GROUP BY 1),
+    roll AS (
+      SELECT d.day AS r_day,
+             COALESCE(pg_catalog.sum(d.tokens_in), 0)::bigint AS r_ti, COALESCE(pg_catalog.sum(d.tokens_out), 0)::bigint AS r_to,
+             COALESCE(pg_catalog.sum(d.cache_read_tokens), 0)::bigint AS r_cr, COALESCE(pg_catalog.sum(d.cache_write_tokens), 0)::bigint AS r_cw,
+             COALESCE(pg_catalog.sum(d.api_cost), 0)::double precision AS r_cost, COALESCE(pg_catalog.sum(d.session_count), 0)::bigint AS r_sc,
+             COALESCE(pg_catalog.sum(d.tool_calls), 0)::bigint AS r_tc, COALESCE(pg_catalog.sum(d.tool_errors), 0)::bigint AS r_te,
+             COALESCE(pg_catalog.sum(d.edits), 0)::bigint AS r_ed, COALESCE(pg_catalog.sum(d.additions), 0)::bigint AS r_ad, COALESCE(pg_catalog.sum(d.deletions), 0)::bigint AS r_de,
+             COALESCE(pg_catalog.sum(d.changed_lines), 0)::bigint AS r_cl, COALESCE(pg_catalog.sum(d.files_touched), 0)::bigint AS r_ft,
+             COALESCE(pg_catalog.sum(d.rework_loops), 0)::bigint AS r_rl, COALESCE(pg_catalog.sum(d.corrections), 0)::bigint AS r_co,
+             COALESCE(pg_catalog.sum(d.abandoned_count), 0)::bigint AS r_ab
+        FROM public.daily_member_usage d
+       WHERE d.team_id = v_team AND d.member_id = p_member AND d.day >= v_first AND d.day < v_end
+       GROUP BY d.day)
+    SELECT pg_catalog.to_char(COALESCE(l.l_day, r.r_day), 'YYYY-MM-DD'),
+           COALESCE(l.l_ti, r.r_ti), COALESCE(l.l_to, r.r_to), COALESCE(l.l_cr, r.r_cr), COALESCE(l.l_cw, r.r_cw),
+           COALESCE(l.l_cost, r.r_cost), COALESCE(l.l_sc, r.r_sc), COALESCE(l.l_tc, r.r_tc), COALESCE(l.l_te, r.r_te),
+           COALESCE(l.l_ed, r.r_ed), COALESCE(l.l_ad, r.r_ad), COALESCE(l.l_de, r.r_de), COALESCE(l.l_cl, r.r_cl), COALESCE(l.l_ft, r.r_ft),
+           COALESCE(l.l_rl, r.r_rl), COALESCE(l.l_co, r.r_co), COALESCE(l.l_ab, r.r_ab),
+           l.l_se, l.l_tse, l.l_up
+      FROM live l FULL JOIN roll r ON r.r_day = l.l_day
+     ORDER BY COALESCE(l.l_day, r.r_day);
 END $$;
 
 -- 3. Session summaries (aggregates only). Newest first, keyset (p_after_ts, p_after_id). Lookback 14 days. Page size at most 25 (+1 probe).

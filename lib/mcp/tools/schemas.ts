@@ -69,7 +69,10 @@ export const LIST_DEVELOPERS_TOOL: ToolDefinition = {
 export const DEVELOPER_ACTIVITY_TOOL: ToolDefinition = {
   name: 'developer_activity',
   description:
-    'Retrieve daily aggregated activity metrics for a specific team developer over a UTC date window (up to 7 days).',
+    'Daily aggregated activity metrics for one team developer over a UTC date window (up to 7 days). Days are UTC. Today is included and is live (partial until the day ends). ' +
+    'A session is counted IN FULL on the UTC day it ended, so a session that ran for several days adds its whole total to its last day. ' +
+    'sessionsStartedEarlier and tokensInSessionsStartedEarlier show how much of a day\'s total comes from sessions that began on an earlier day: when they are large, the day\'s totals overstate what happened on that day, and you must say so. ' +
+    'unpricedSessions counts sessions without a price (their cost is counted as 0, so cost can be understated). These three are null for older days served from the nightly rollup.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -97,7 +100,9 @@ export const DEVELOPER_ACTIVITY_TOOL: ToolDefinition = {
 export const LIST_SESSIONS_TOOL: ToolDefinition = {
   name: 'list_sessions',
   description:
-    'List sync sessions for the team with optional filtering by developer, tool, model, and date window. Results are ordered newest first.',
+    'List sync sessions for the team with optional filtering by developer, tool, model, and date window (UTC). Results are ordered newest first. ' +
+    'Token, cost and edit figures are the session\'s totals for its WHOLE life, not just the window: a session can have started days before startedAt/endedAt suggests a recent window. ' +
+    'Compare startedAt with endedAt before presenting a session\'s totals as usage in a period, and say so when a session spans several days. Sessions with priced=false have no cost yet (cost shown as 0).',
   inputSchema: {
     type: 'object',
     properties: {
@@ -148,7 +153,7 @@ export const LIST_SESSIONS_TOOL: ToolDefinition = {
 export const SESSION_DETAILS_TOOL: ToolDefinition = {
   name: 'session_details',
   description:
-    'Retrieve detailed metrics and tool call breakdown for a specific session using an opaque, sealed session reference.',
+    'Retrieve detailed metrics and tool call breakdown for a specific session using an opaque, sealed session reference. Figures are totals for the session\'s whole life (see startedAt and endedAt), not for any single day.',
   inputSchema: {
     type: 'object',
     properties: {
