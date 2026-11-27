@@ -40,9 +40,10 @@ export default function ConsentForm({ consentToken, clientName, destination, loo
         <p style={{ marginBottom: 6 }}>If you approve, it will be able to <strong>read</strong>:</p>
         <ul style={{ margin: '0 0 12px 20px' }}>
           <li>your team&apos;s developers and their activity (tokens, cost, sessions)</li>
-          <li>session details, and prompt text with sensitive values masked</li>
+          <li>session details (which tools were used and how often, edits, errors)</li>
+          <li>prompt metadata only: when it was sent, its length, its category (for example bug fix or refactor), and whether it contains code, a file path or an error trace</li>
         </ul>
-        <p style={{ marginBottom: 12 }}>It cannot change or delete anything. You can revoke access at any time.</p>
+        <p style={{ marginBottom: 12 }}>It cannot read the text of any prompt, or any file contents or file names. It cannot change or delete anything. Granting and revoking access is recorded in the audit log. You can revoke access at any time.</p>
         <p style={{ marginBottom: 12 }}>The result will be sent to: <strong>{destination}</strong></p>
         {loopback && (
           <p role="alert" style={{ marginBottom: 12, padding: 10, border: '1px solid currentColor', borderRadius: 8 }}>
@@ -52,7 +53,7 @@ export default function ConsentForm({ consentToken, clientName, destination, loo
         <p style={{ marginBottom: 16, opacity: 0.8 }}>The application name was chosen by whoever registered it and is not verified. Approve only if you started this connection.</p>
         {error && <p role="alert" style={{ marginBottom: 12 }}>{error}</p>}
         <div style={{ display: 'flex', gap: 12 }}>
-          <button type="button" className="login-btn" disabled={busy !== null} onClick={() => decide('approve')}>{busy === 'approve' ? 'Approving…' : 'Approve'}</button>
+          <button type="button" disabled={busy !== null} onClick={() => decide('approve')} style={{ padding: '10px 20px', borderRadius: 8, border: 0, fontWeight: 650, color: 'var(--brand-ink)', background: 'linear-gradient(160deg, var(--brand-hi), var(--brand))', cursor: busy !== null ? 'not-allowed' : 'pointer', opacity: busy !== null ? 0.85 : 1 }}>{busy === 'approve' ? 'Approving…' : 'Approve'}</button>
           <button type="button" disabled={busy !== null} onClick={() => decide('deny')} style={{ padding: '10px 16px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'inherit', cursor: 'pointer' }}>{busy === 'deny' ? 'Denying…' : 'Deny'}</button>
         </div>
       </div>
