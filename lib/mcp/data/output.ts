@@ -52,6 +52,7 @@ export interface PromptMetadata {
 export const OUTPUT_KEYS: ReadonlySet<string> = new Set([
   'items', 'nextCursor', 'truncated',
   'developerId', 'displayName', 'role',
+  'teamId', 'name', 'memberCount', // list_teams
   'day', 'tokensIn', 'tokensOut', 'cacheReadTokens', 'cacheWriteTokens', 'apiCost', 'sessionCount', 'toolCalls', 'toolErrors', 'edits', 'additions',
   'deletions', 'changedLines', 'filesTouched', 'reworkLoops', 'corrections', 'abandonedCount',
   'sessionRef', 'tool', 'model', 'startedAt', 'endedAt', 'priced', 'abandoned', 'toolUsage', 'toolName', 'callCount',

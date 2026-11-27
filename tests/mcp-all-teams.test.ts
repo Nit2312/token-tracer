@@ -121,6 +121,18 @@ describe('tool arguments', () => {
       assert.equal(calls.some((c) => c.sql.includes('mcp_data.')), false);
     }
   });
+  it('list_teams returns real rows through the output guard (bigint counts arrive as strings; only teamId, name and memberCount leave)', async () => {
+    const rows = [{ team_id: TEAM_A, name: 'Paymore', member_count: '16' }, { team_id: TEAM_B, name: 'bje', member_count: 3 }];
+    const rowPool = { connect: async () => ({ query: async () => ({ rows }), release() {} }) } as never;
+    const r = await executeListTeams(makeToolContext(principal(null) as never), {}, { ...deps, pool: () => rowPool });
+    assert.equal(r.isError, undefined, r.content[0].text);
+    assert.deepEqual(JSON.parse(r.content[0].text), { items: [{ teamId: TEAM_A, name: 'Paymore', memberCount: 16 }, { teamId: TEAM_B, name: 'bje', memberCount: 3 }] });
+  });
+  it('list_teams refuses a malformed row instead of passing it on', async () => {
+    const badPool = { connect: async () => ({ query: async () => ({ rows: [{ team_id: 'nope', name: 'x', member_count: 1 }] }), release() {} }) } as never;
+    const r = await executeListTeams(makeToolContext(principal(null) as never), {}, { ...deps, pool: () => badPool });
+    assert.equal(out(r).code, 'internal');
+  });
   it('list_teams takes no arguments and asks the database with the token only', async () => {
     calls.length = 0;
     const ok = await executeListTeams(makeToolContext(principal(null) as never), {}, deps);
