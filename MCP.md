@@ -26,6 +26,7 @@ Last updated: 2026-11-26. This is the single reference for the whole program (Ph
 | 4 (4.1–4.3) | Read-only tool implementation: strict JSON Schema definitions, tool execution handlers, and MCP content block formatting with 24 KiB budget enforcement for the six metadata-only services | done |
 | 4.4 | Controlled tool registration & protocol validation: registered all 6 tools in `createTokenTracerMcpServer`, validated JSON-RPC protocol requests (`initialize`, `tools/list`, `tools/call`), tenant isolation, and parameter injection guards | done |
 | 4.5 | Real MCP client integration & end-to-end validation: validated complete workflow with real MCP SDK client over Streamable HTTP, OAuth 2.1 (discovery, DCR RFC 7591, PKCE S256, consent, code exchange, refresh rotation, revocation RFC 7009), all six tools, tenant isolation, and lifecycle | done |
+| 4.6 | External MCP client compatibility & interoperability validation: verified out-of-process client communication over real TCP loopback sockets (RFC 7591, RFC 7636 PKCE S256, Streamable HTTP SSE/JSON, RFC 7009 revocation), all 6 metadata tools, zero parameter smuggling, cross-tenant isolation, and assessed Claude Desktop/Code local availability | done |
 
 ### Not built yet (by design — see [Later phases](#15-later-phases))
 - **No resources or prompts exist.** `/mcp` exposes only the six approved metadata-only tools. No resources, templates, or prompts are registered.
@@ -1084,6 +1085,39 @@ Files: `scripts/migrations/mcp-data.sql` (roles, schema, functions), `scripts/mi
 - Multi-tenant database isolation: verified that queries only return data belonging to the authenticated principal's team (`team-alpha-uuid`). Cross-tenant reference access attempts (`team-beta-uuid`) fail-closed with unforgeable `not_found`.
 - Response size budget: all tool outputs strictly adhere to the 24 KiB payload limit.
 - Privacy boundary: verified that zero raw prompt text, snippets, or file paths are ever exposed on the wire.
+
+### 17.4 Phase 4.6 implementation (complete, 2026-11-27)
+
+**1. External Client Interoperability Architecture (`tests/mcp-external-compat.test.ts`)**
+- Validated Token Tracer MCP using an independent out-of-process client running over standard loopback TCP sockets (`node:http` on `127.0.0.1:<port>`) with zero shared memory, SDK client instances, or coupled test helpers.
+- Target external client compatibility assessment:
+  - Claude Desktop (`/Applications/Claude.app` v1.15962.1): Local configuration (`claude_desktop_config.json`) only supports standard I/O (`stdio`) subprocess execution (`command` + `args`); remote Streamable HTTP MCP connections are exclusively configured interactively via GUI browser redirects ("Customize -> Connectors"), which cannot be executed headlessly in an automated test environment.
+  - Claude Code (`@anthropic-ai/claude-code` CLI): The `claude` executable was not installed in PATH or global npm on the machine, and sandbox restrictions prohibit unapproved package installations.
+  - In accordance with non-negotiable boundaries, external client interoperability was rigorously verified via an independent TCP socket client adhering strictly to the official Model Context Protocol Streamable HTTP wire specifications (RFC 7591, RFC 7636, RFC 7009, JSON-RPC 2.0, SSE).
+
+**2. Full Wire Protocol & OAuth 2.1 Compatibility**
+- **Discovery**: Successfully retrieved RFC 8414 and RFC 9207 metadata from `/.well-known/oauth-protected-resource/mcp` and `/.well-known/oauth-authorization-server`.
+- **Dynamic Client Registration (RFC 7591)**: External client registered dynamically via `POST /oauth/register` with loopback redirect URI (`http://127.0.0.1:4567/callback`), receiving assigned client ID (`tt_...`).
+- **PKCE S256 & Consent (RFC 7636)**: Generated 43-character code verifier and S256 challenge. Verified consent screen handling and authorization decision, issuing single-use authorization code (`tt_ac_...`).
+- **Token Exchange**: Exchanged authorization code via `POST /oauth/token` (`grant_type: authorization_code`) for Bearer access token (`tt_at_...`) and refresh token (`tt_rt_...`).
+- **Streamable HTTP Transport**: Connected to `/mcp` using standard HTTP POST with `Accept: application/json, text/event-stream`. Successfully negotiated protocol initialization and handled Server-Sent Events (SSE) data stream framing.
+- **Refresh Token Rotation & Revocation (RFC 7009)**: Rotated refresh token via `POST /oauth/token` (`grant_type: refresh_token`), receiving new token pair with immediate family invalidation. Revoked access token via `POST /oauth/revoke`. Confirmed that subsequent calls with revoked token fail immediately with `401 Unauthorized`.
+
+**3. All Six Tools Wire Execution**
+- Discovered exactly the six approved metadata-only tools via `tools/list`:
+  1. `list_developers`: Keysets and summaries successfully parsed.
+  2. `developer_activity`: Time-window validation and daily metrics returned.
+  3. `list_sessions`: Session summaries returned without sensitive leaks.
+  4. `session_details`: Sealed session reference decoded and metrics returned.
+  5. `search_prompt_metadata`: Metadata filters executed without text query fields.
+  6. `prompt_metadata_batch`: Batch references processed within budget.
+
+**4. Security and Privacy Invariants**
+- **Zero Client Identity Overrides**: Authenticated principal is strictly derived server-side from token hash; teamId, userId, and scope cannot be overridden by tool parameters.
+- **Multi-Tenant Boundary**: Cross-tenant sealed reference attempts return unforgeable `not_found` error.
+- **Parameter Smuggling**: Additional undeclared arguments rejected by JSON Schema validator (`additionalProperties: false`).
+- **Response Size & Privacy**: All responses strictly under 24 KiB budget. Zero raw prompt text, snippets, or file paths exposed.
+
 
 
 

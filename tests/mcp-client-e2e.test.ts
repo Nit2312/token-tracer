@@ -514,7 +514,8 @@ describe('Phase 4.5: Real MCP Client & OAuth 2.1 E2E Integration', () => {
       },
       connect: async () => {
         const client = {
-          query: async (sql: string) => {
+          query: async (sql: string, ...args: unknown[]) => {
+            const params = args[0] as unknown[] | undefined;
             if (sql.includes('mcp_rate_limits')) {
               return { rows: [{ count: 1, retry: 60 }], rowCount: 1, command: 'INSERT', oid: 0, fields: [] };
             }
@@ -787,7 +788,8 @@ describe('Phase 4.5: Real MCP Client & OAuth 2.1 E2E Integration', () => {
       },
       connect: async () => {
         const client = {
-          query: async (sql: string) => {
+          query: async (sql: string, ...args: unknown[]) => {
+            const params = args[0] as unknown[] | undefined;
             if (sql.includes('mcp_rate_limits')) {
               return { rows: [{ count: 1, retry: 60 }], rowCount: 1, command: 'INSERT', oid: 0, fields: [] };
             }
