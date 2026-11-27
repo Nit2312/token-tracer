@@ -22,7 +22,8 @@ Last updated: 2026-11-26. This is the single reference for the whole program (Ph
 | 0 | Read-only audit of the app, database and auth model (no code) | done |
 | 1 | Stateless MCP endpoint `/mcp`: handshake and capability discovery, empty capabilities, feature flag, Host/Origin guards | done |
 | 2 | OAuth 2.1 authorization server (discovery, dynamic client registration, authorize + consent, token, refresh rotation, revoke), bearer authentication on `/mcp`, least-privilege database role, revocation on every account change, nightly retention, end-to-end and negative test suites (steps 1–10) | done |
-| 3 | Tenant-isolated data-access layer: `mcp_reader` role, identity-bound SQL functions, dedicated reader pool, authenticated principal with unforgeable `tokenHash`, typed metadata-only services, AES-256-GCM sealed references & signed cursors, strict budget packing (24 KiB), adversarial fuzzing, concurrency and revocation hardening (P3-0 through P3-7) | done |
+| 3 | Tenant-isolated data-access layer: `mcp_reader` role, identity-bound SQL functions, dedicated reader pool, authenticated principal with unforgeable `tokenHash`, typed metadata-only services, AES-256-GCM sealed references & signed cursors, strict budget packing (24 KiB), adversarial fuzzing, concurrency and revocation hardening (P3-0 through P3-9) | done |
+| 4 (4.1–4.3) | Read-only tool implementation: strict JSON Schema definitions, tool execution handlers, and MCP content block formatting with 24 KiB budget enforcement for the six metadata-only services. Capabilities remain empty (deferred to 4.4) | done |
 
 ### Not built yet (by design — see [Later phases](#15-later-phases))
 - **No tools, resources or prompts exist.** `/mcp` authenticates callers and then advertises empty capabilities. Tools are exposed in Phase 4.
@@ -996,6 +997,42 @@ Files: `scripts/migrations/mcp-data.sql` (roles, schema, functions), `scripts/mi
 | Legal / Privacy Review | Consent wording technically approved; masking engine excluded from release | PASS (for metadata-only) | Legal/HR formal sign-off on consent wording before prod enable (LH) |
 
 **Pre-Integration Readiness Decision**: **READY WITH CONDITIONS** (Ready for Phase 4 tool implementation on metadata-only services; production rollout blocked by documented pre-conditions: Legal/HR consent sign-off, edge rate limiting, and Neon pooled endpoint validation).
+
+---
+
+## 17. Phase 4: Read-Only Tools
+
+**Policy**: Tools operate strictly over the Phase 3 data access layer and service contracts. They expose only metadata, enforce the 24 KiB response budget, and derive tenant identity exclusively from the authenticated `McpToolContext` principal.
+
+### 17.1 Phase 4.1 to 4.3 implementation (complete, 2026-11-27)
+
+**1. Tool Definitions & JSON Schemas (`lib/mcp/tools/schemas.ts`)**
+- Defined strict JSON Schema specifications for all 6 metadata-only tools:
+  - `list_developers`: Team members keyset pagination (`limit`, `cursor`).
+  - `developer_activity`: Daily token, session, and tool metrics within 7-day window.
+  - `list_sessions`: Session summaries within 7-day window.
+  - `session_details`: Aggregated metrics and tool call breakdown for a sealed `sessionRef`.
+  - `search_prompt_metadata`: Structured prompt metadata filtering (closed intent enum, code block, traceback, char length). Strictly rejects free-text queries (`query`, `search`, etc.).
+  - `prompt_metadata_batch`: Batch resolution for up to 20 sealed `promptRef` handles.
+- Security properties:
+  - `additionalProperties: false` on every schema prevents parameter smuggling.
+  - No client-provided identity parameters (`teamId`, `userId`, `orgId`).
+  - Limits and date windows bounded by literals.
+
+**2. Tool Handlers & Execution (`lib/mcp/tools/handlers.ts`)**
+- Implemented `TOOL_EXECUTORS` connecting each tool directly to its underlying P3-5 data service.
+- Identity binding: extracts `McpPrincipal` from `McpToolContext` (AsyncLocalStorage scope), constructs unforgeable `DataScope`, and executes query via reader pool.
+- Error handling: catches internal errors and translates them via `formatToolError` into clean MCP JSON-RPC format with safe error codes (`not_found`, `invalid_argument`, `limit_exceeded`, `cursor_invalid`, `unavailable`, `internal`).
+
+**3. Output Formatting & Response Budgeting (`lib/mcp/tools/format.ts`)**
+- Formats tool results into standard MCP content blocks: `{ content: [{ type: 'text', text: JSON.stringify(data) }] }`.
+- Deep metadata validation: runs `assertMetadataOnly` on outgoing payloads to guarantee zero prompt text, file paths, or internal fields escape.
+- Response budget enforcement: validates that serialized UTF-8 bytes remain within the 24 KiB response budget (`RESPONSE_BYTE_BUDGET`).
+
+**4. Capability Exposure Deferred (Phase 4.4)**
+- The `/mcp` endpoint continues to advertise empty capabilities `{}`.
+- Tool schemas and handlers are tested and verified independently via unit and integration tests (`tests/mcp-tools.test.ts`), without registering them in `createTokenTracerMcpServer` or exposing them to external clients yet.
+
 
 
 

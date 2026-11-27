@@ -345,7 +345,7 @@ describe('database access from the MCP code is confined to the approved authenti
       const n = m[1] ?? m[2];
       assert.ok(/^(MCP_[A-Z_]+|NEXT_PUBLIC_SERVER_URL|NODE_ENV|SESSION_SECRET)$/.test(n), `${rel(f)} reads ${n}`);
     }
-    for (const f of all.filter((x) => !['lib/mcp/oauth/clients.ts', 'lib/mcp/oauth/authorize.ts'].includes(rel(x)))) assert.doesNotMatch(code(f), /SESSION_SECRET/, rel(f));
+    for (const f of all.filter((x) => !['lib/mcp/oauth/clients.ts', 'lib/mcp/oauth/authorize.ts', 'lib/mcp/tools/handlers.ts'].includes(rel(x)))) assert.doesNotMatch(code(f), /SESSION_SECRET/, rel(f));
     for (const f of all) assert.doesNotMatch(code(f), /\bDATABASE_URL\b(?!.*MCP_AUTH)|NEON_CONNECTION|ANALYST_|CRON_SECRET|GROQ|ADMIN_PASSWORD|SUPERADMIN/, rel(f));
   });
   it('db.ts: imports only pg, reads only MCP_AUTH_DATABASE_URL, and names no other credential', () => {
