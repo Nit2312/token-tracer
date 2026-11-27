@@ -210,7 +210,8 @@ export async function POST(req: NextRequest) {
         [user.member_id]
       );
       if (tmRows[0]?.team_id) userTeamId = tmRows[0].team_id;
-    } else if (!userTeamId && user.member_id) {
+    } else if (!userTeamId && user.member_id && user.role !== 'admin') {
+      // An admin's team is exactly users.team_id; no team means "All teams" (platform-wide). Never infer one from a linked telemetry member.
       const { rows: tmRows } = await query(
         'SELECT team_id FROM team_members WHERE member_id = $1 LIMIT 1',
         [user.member_id]
