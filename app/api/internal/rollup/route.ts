@@ -396,12 +396,29 @@ async function runRollup(): Promise<NextResponse> {
     errors.push(`data_pruning: ${(err as Error).message}`);
   }
 
+  // E. MCP OAuth retention: expired codes, dead tokens, stale rate-limit windows, old access-log rows, unused DCR clients.
+  //    Runs as the table owner (mcp_auth has no DELETE). Isolated on purpose: a purge problem never fails the rollup, and a database
+  //    where the MCP migration has not been applied (function/table missing) is skipped silently. Counts only; nothing else is reported.
+  let mcpPurge: Record<string, number> | { error: true } | { skipped: true } = { skipped: true };
+  try {
+    // Existence check first: calling a missing function would raise (and be logged by the shared query layer) every night until the migration exists.
+    const present = await query<{ ok: boolean }>(`SELECT to_regprocedure('public.mcp_oauth_purge()') IS NOT NULL AS ok`);
+    if (present.rows[0]?.ok) {
+      const purged = await query<{ r: Record<string, number> }>('SELECT mcp_oauth_purge() AS r');
+      mcpPurge = purged.rows[0]?.r ?? { skipped: true };
+    }
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    if (code !== '42883' && code !== '42P01') { mcpPurge = { error: true }; console.warn('[mcp] purge failed'); }
+  }
+
   const elapsed = Date.now() - startedAt;
 
   if (errors.length > 0) {
     return NextResponse.json({
       ok: false,
       elapsed_ms: elapsed,
+      mcpPurge,
       errors,
     }, { status: 500 });
   }
@@ -409,6 +426,7 @@ async function runRollup(): Promise<NextResponse> {
   return NextResponse.json({
     ok: true,
     elapsed_ms: elapsed,
+    mcpPurge,
     pruning: {
       nullifiedEventsOlderThan2d: nullifiedEvents,
       deletedToolErrorsOlderThan7d: deletedErrors,

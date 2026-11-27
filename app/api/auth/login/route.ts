@@ -7,6 +7,7 @@
  * any other username                 → DB lookup, bcrypt verify → redirect /
  */
 import { NextRequest, NextResponse } from 'next/server';
+import QRCode from 'qrcode';
 import crypto from 'node:crypto';
 import { adminPassword, superadminPassword } from '@/lib/team/env';
 import { verifyAdminPassword } from '@/lib/team/auth';
@@ -21,6 +22,7 @@ import { beginEnrollment, getMfaState, lockedForSeconds, loginRules, recordFailu
 import { buildPendingCookie } from '@/lib/security/mfa-flow';
 import { otpauthUri } from '@/lib/security/totp';
 import { clientIp } from '@/lib/security/request';
+import { safeReturnTo } from '@/lib/security/return-url';
 import { recordAuditEvent } from '@/lib/team/audit';
 
 export const dynamic = 'force-dynamic';
@@ -102,11 +104,14 @@ async function completePasswordStage(
     return res;
   }
 
-  let enroll: { secret: string; otpauthUri: string } | undefined;
+  let enroll: { secret: string; otpauthUri: string; qrSvg: string } | undefined;
   if (!state.enrolled) {
     // Only reachable for database admin accounts: show a fresh secret to enroll an authenticator app.
     const secret = await beginEnrollment(subject);
-    enroll = { secret, otpauthUri: otpauthUri(secret, identity.username) };
+    const uri = otpauthUri(secret, identity.username);
+    // Rendered server-side so the browser needs no QR library and the secret never goes to a third party.
+    const qrSvg = await QRCode.toString(uri, { type: 'svg', margin: 1, width: 192, errorCorrectionLevel: 'M' });
+    enroll = { secret, otpauthUri: uri, qrSvg };
   }
 
   const res = NextResponse.json({ ok: true, mfaRequired: true, ...(enroll ? { enroll } : {}) });
@@ -213,7 +218,8 @@ export async function POST(req: NextRequest) {
       if (tmRows[0]?.team_id) userTeamId = tmRows[0].team_id;
     }
 
-    const redirectUrl = user.role === 'admin' ? '/team' : user.role === 'superadmin' ? '/admin' : '/';
+    // returnTo is honoured ONLY for database users and ONLY if it is exactly /oauth/authorize?... (lib/security/return-url.ts); anything else is ignored.
+    const redirectUrl = safeReturnTo(body.returnTo) ?? (user.role === 'admin' ? '/team' : user.role === 'superadmin' ? '/admin' : '/');
     return completePasswordStage(
       {
         userId: user.id,

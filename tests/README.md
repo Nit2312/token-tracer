@@ -15,6 +15,7 @@ goes through `tests/helpers/test-db.ts`, which requires:
 |---|---|
 | `TEST_DATABASE_URL` | Owner-level **direct** (non-pooled) connection string of a **dedicated test branch**. Used by the isolation, rollup, migration and `analyst_ro` permission suites. |
 | `TEST_ANALYST_DATABASE_URL` | `analyst_login` connection string of the **same** test branch (pooled is fine). Used by `analyst-login-db.test.ts`. |
+| `TEST_MCP_AUTH_DATABASE_URL` | `mcp_auth` login of the **same** test branch (direct host, same endpoint id; the migration `scripts/migrations/mcp-oauth.sql` and `scripts/setup-mcp-roles.mjs --apply` must have been run on it). Used by `mcp-oauth-db.test.ts`. |
 | `TEST_DATABASE_EXPECTED_ENDPOINT` | The test branch's endpoint id (`ep-…`). Must equal the endpoint in both URLs, or the tests refuse to connect. |
 | `SKIP_DB_TESTS=1` | Deliberately skip every database suite (the only way to skip). |
 
@@ -33,3 +34,10 @@ Safety properties (enforced by `tests/test-db-safety.test.ts`):
   application code that loads `.env.local` (`lib/team/env.ts`) cannot reach production or reuse its secrets.
 - Most suites run inside a transaction on TEMP tables that is rolled back. `rollup-concurrency.test.ts` needs committed tables, so it
   creates and drops a uniquely named scratch schema on the test branch (never `public`).
+
+## MCP end-to-end harness (real server, test branch)
+
+`npm run test:e2e:mcp` (`scripts/e2e-mcp.mjs`) builds and starts the real app and drives the MCP OAuth + `/mcp` stack over HTTP. It reads only
+`TEST_DATABASE_URL`, `TEST_DATABASE_EXPECTED_ENDPOINT`, `TEST_MCP_AUTH_DATABASE_URL` (and optionally `TEST_ANALYST_DATABASE_URL`), refuses a
+production endpoint, never reads an env file, and removes everything it creates. Add `-- --skip-build` to reuse an existing build, `--port N` to change the port.
+Database suites are run sequentially (`--test-concurrency=1`): the `mcp_auth` role has a connection limit of 5.

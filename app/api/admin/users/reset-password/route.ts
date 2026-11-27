@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie, hashPassword } from '@/lib/auth';
 import { query } from '@/lib/team/db';
+import { withMcpRevocation } from '@/lib/team/mcp-revoke';
 import { recordAuditEvent } from '@/lib/team/audit';
 import crypto from 'node:crypto';
 import { publicError } from '@/lib/security/errors';
@@ -32,10 +33,11 @@ export async function POST(req: NextRequest) {
     const newPassword = String(body.newPassword || randomPassword());
     const passwordHash = await hashPassword(newPassword);
 
-    const { rowCount } = await query(
+    // A password reset ends every MCP grant of that account (revoked before and after the change).
+    const { rowCount } = await withMcpRevocation({ userId: id }, 'password_reset', () => query(
       'UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2',
       [passwordHash, id],
-    );
+    ));
 
     if (!rowCount) return NextResponse.json({ error: 'user not found' }, { status: 404 });
 

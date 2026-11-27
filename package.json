@@ -2,6 +2,9 @@
   "name": "agentvis-next",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -13,10 +16,12 @@
     "db:analyst-role": "node scripts/setup-analyst-role.mjs",
     "test": "NODE_OPTIONS=--conditions=react-server tsx --test tests/*.test.ts",
     "test:unit": "SKIP_DB_TESTS=1 NODE_OPTIONS=--conditions=react-server tsx --test tests/*.test.ts",
-    "test:db": "NODE_OPTIONS=--conditions=react-server tsx --test tests/analyst-db.test.ts tests/analyst-login-db.test.ts tests/session-turns-isolation.test.ts tests/tenant-isolation-phase2.test.ts tests/rollup-concurrency.test.ts",
+    "test:e2e:mcp": "node scripts/e2e-mcp.mjs",
+    "test:db": "NODE_OPTIONS=--conditions=react-server tsx --test --test-concurrency=1 --test-timeout=180000 tests/analyst-db.test.ts tests/analyst-login-db.test.ts tests/session-turns-isolation.test.ts tests/tenant-isolation-phase2.test.ts tests/rollup-concurrency.test.ts tests/mcp-oauth-db.test.ts tests/mcp-oauth-data.test.ts tests/mcp-oauth-endpoints.test.ts tests/mcp-oauth-authorize.test.ts tests/mcp-bearer-db.test.ts tests/mcp-revocation-db.test.ts tests/mcp-negative-db.test.ts tests/audit-actor-db.test.ts",
     "db:analyst-login": "node scripts/setup-analyst-login.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
     "@radix-ui/react-context-menu": "^2.3.7",
     "@radix-ui/react-dialog": "^1.1.23",
     "@radix-ui/react-dropdown-menu": "^2.1.24",
@@ -38,6 +43,7 @@
     "next": "16.4.2",
     "pg": "^8.22.0",
     "playwright": "^1.62.1",
+    "qrcode": "^1.5.4",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "recharts": "^3.10.1",
@@ -47,8 +53,9 @@
     "tailwindcss": "^4.3.3"
   },
   "devDependencies": {
-    "@types/node": "^20",
+    "@types/node": "^24.19.4",
     "@types/pg": "^8.20.0",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",

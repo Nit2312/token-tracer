@@ -10,6 +10,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie, hashPassword } from '@/lib/auth';
 import { generateApiKey, hashApiKey } from '@/lib/team/auth';
 import { query } from '@/lib/team/db';
+import { revokeMcpAccess, securityStateChanged } from '@/lib/team/mcp-revoke';
 import { recordAuditEvent } from '@/lib/team/audit';
 import { publicError } from '@/lib/security/errors';
 import { statsCache } from '@/lib/team/cache';
@@ -377,6 +378,12 @@ export async function PUT(req: NextRequest) {
       }
     }
 
+    // MCP access follows the account's security state: if role, active or team changes, every MCP grant of that user is revoked
+    // (before and after the write) so a later re-promotion or team assignment cannot revive an old token.
+    const { rows: mcpCur } = await query('SELECT role, active, team_id FROM users WHERE id = $1', [id]);
+    const mcpReason = mcpCur[0] ? securityStateChanged(mcpCur[0], { role: role ?? null, active: active ?? null, teamId: finalTeamId ?? null }) : null;
+    if (mcpReason) await revokeMcpAccess({ userId: String(id) }, mcpReason);
+
     const { rows } = await query(`
       UPDATE users SET
         username     = COALESCE($2, username),
@@ -392,6 +399,7 @@ export async function PUT(req: NextRequest) {
     `, [id, username ?? null, displayName ?? null, role ?? null, active ?? null, finalMemberId ?? null, finalTeamId ?? null, rawApiKey]);
 
     if (!rows[0]) return NextResponse.json({ error: 'user not found' }, { status: 404 });
+    if (mcpReason) await revokeMcpAccess({ userId: String(id) }, mcpReason);
 
     // Keep the member's display name in step with the user's — team dashboards, prompts,
     // pipeline health etc. all read members.display_name.
