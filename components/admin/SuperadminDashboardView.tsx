@@ -117,6 +117,8 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
   const [newMemberOption, setNewMemberOption] = React.useState<string>('new');
   const [newTeamIds, setNewTeamIds] = React.useState<string[]>([]);
   const [newCustomTeam, setNewCustomTeam] = React.useState('');
+  // Team Admin scope: '' = not chosen yet, '__all__' = all teams (platform-wide), '__new__' = create a team, otherwise a team id
+  const [newAdminScope, setNewAdminScope] = React.useState('');
   const [createdApiKey, setCreatedApiKey] = React.useState<string | null>(null);
   const [createdInstallMac, setCreatedInstallMac] = React.useState<string | null>(null);
   const [createdInstallWin, setCreatedInstallWin] = React.useState<string | null>(null);
@@ -130,6 +132,7 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
   const [editMemberId, setEditMemberId] = React.useState<string | null>(null);
   const [editTeamIds, setEditTeamIds] = React.useState<string[]>([]);
   const [editCustomTeam, setEditCustomTeam] = React.useState('');
+  const [editAdminScope, setEditAdminScope] = React.useState('');
 
   // Reset Password Modal State
   const [resetPasswordModal, setResetPasswordModal] = React.useState<any | null>(null);
@@ -331,13 +334,30 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
     setNewMemberOption('new');
     setNewTeamIds([]);
     setNewCustomTeam('');
+    setNewAdminScope('');
     setCreatedApiKey(null);
     setCreatedInstallMac(null);
     setCreatedInstallWin(null);
   };
 
+  /** Team fields for the API: an admin must choose one team, a new team, or all teams; other roles keep the checkbox list. */
+  const teamPayload = (role: string, scope: string, customTeam: string, teamIds: string[]) => {
+    if (role !== 'admin') return { teamIds, newTeamName: customTeam || undefined };
+    if (scope === '__all__') return { allTeams: true, teamIds: [] as string[] };
+    if (scope === '__new__') return { newTeamName: customTeam.trim(), teamIds: [] as string[] };
+    return { teamId: scope, teamIds: [scope] };
+  };
+  const adminScopeProblem = (role: string, scope: string, customTeam: string): string | null => {
+    if (role !== 'admin') return null;
+    if (!scope) return 'Choose which team this admin manages, or All teams.';
+    if (scope === '__new__' && !customTeam.trim()) return 'Enter a name for the new team.';
+    return null;
+  };
+
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
+    const scopeProblem = adminScopeProblem(newRole, newAdminScope, newCustomTeam);
+    if (scopeProblem) { toast.error(scopeProblem); return; }
     try {
       toast.loading('Creating user account…');
       const res = await fetch('/api/admin/users', {
@@ -349,8 +369,7 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
           password: newPassword,
           role: newRole,
           memberId: newMemberOption === 'new' ? 'new' : (newMemberOption !== 'none' ? newMemberOption : null),
-          teamIds: newTeamIds,
-          newTeamName: newCustomTeam || undefined,
+          ...teamPayload(newRole, newAdminScope, newCustomTeam, newTeamIds),
         }),
       });
       const data = await res.json();
@@ -380,11 +399,15 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
     const existingTeamIds = Array.isArray(u.teams) ? u.teams.map((t: any) => t.id) : (u.team_id ? [u.team_id] : []);
     setEditTeamIds(existingTeamIds);
     setEditCustomTeam('');
+    // An existing admin with no team is platform-wide ("All teams")
+    setEditAdminScope(u.role === 'admin' ? (u.team_id || '__all__') : '');
   };
 
   const handleUpdateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editUserModal) return;
+    const scopeProblem = adminScopeProblem(editRole, editAdminScope, editCustomTeam);
+    if (scopeProblem) { toast.error(scopeProblem); return; }
     try {
       toast.loading(`Updating ${editDisplayName}…`);
       const res = await fetch('/api/admin/users', {
@@ -397,8 +420,7 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
           role: editRole,
           active: editActive,
           memberId: editMemberId,
-          teamIds: editTeamIds,
-          newTeamName: editCustomTeam || undefined,
+          ...teamPayload(editRole, editAdminScope, editCustomTeam, editTeamIds),
         }),
       });
       const data = await res.json();
@@ -2427,8 +2449,42 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
                   </select>
                 </div>
 
+                {/* Team Admin scope: required choice */}
+                {newRole === 'admin' && (
+                  <div>
+                    <label className="block text-[11px] font-medium text-[#8e8473] uppercase mb-1">Team this admin manages *</label>
+                    <select
+                      required
+                      value={newAdminScope}
+                      onChange={(e) => setNewAdminScope(e.target.value)}
+                      className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-[#e2a355] cursor-pointer"
+                    >
+                      <option value="">Select a team…</option>
+                      {teamsList.map((t: any) => (
+                        <option key={t.id} value={t.id}>{t.name}</option>
+                      ))}
+                      <option value="__new__">+ Create a new team…</option>
+                      <option value="__all__">All teams (platform-wide view)</option>
+                    </select>
+                    {newAdminScope === '__new__' && (
+                      <input
+                        type="text"
+                        placeholder="New team name"
+                        value={newCustomTeam}
+                        onChange={(e) => setNewCustomTeam(e.target.value)}
+                        className="mt-2 w-full bg-[#1c1712] border border-[rgba(242,236,223,0.08)] rounded-xl px-3 py-1.5 text-xs text-white placeholder-[#8e8473] focus:outline-none focus:border-[#e2a355]"
+                      />
+                    )}
+                    <p className="mt-1 text-[11px] text-[#8e8473]">
+                      {newAdminScope === '__all__'
+                        ? 'This admin sees every team, like the built-in team login.'
+                        : 'This admin sees only the selected team after logging in.'}
+                    </p>
+                  </div>
+                )}
+
                 {/* Team Assignment */}
-                <div>
+                <div hidden={newRole === 'admin'}>
                   <label className="block text-[11px] font-medium text-[#8e8473] uppercase mb-1">Assign Teams</label>
                   <div className="space-y-2 bg-[#1c1712] p-3 rounded-xl border border-[rgba(242,236,223,0.08)] max-h-36 overflow-y-auto">
                     {teamsList.map((t: any) => (
@@ -2577,8 +2633,42 @@ export function SuperadminDashboardView({ session }: SuperadminProps) {
                 </button>
               </div>
 
+              {/* Team Admin scope: required choice */}
+              {editRole === 'admin' && (
+                <div>
+                  <label className="block text-[11px] font-medium text-[#8e8473] uppercase mb-1">Team this admin manages *</label>
+                  <select
+                    required
+                    value={editAdminScope}
+                    onChange={(e) => setEditAdminScope(e.target.value)}
+                    className="w-full bg-[#1c1712] border border-[rgba(242,236,223,0.1)] rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-[#e2a355] cursor-pointer"
+                  >
+                    <option value="">Select a team…</option>
+                    {teamsList.map((t: any) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                    <option value="__new__">+ Create a new team…</option>
+                    <option value="__all__">All teams (platform-wide view)</option>
+                  </select>
+                  {editAdminScope === '__new__' && (
+                    <input
+                      type="text"
+                      placeholder="New team name"
+                      value={editCustomTeam}
+                      onChange={(e) => setEditCustomTeam(e.target.value)}
+                      className="mt-2 w-full bg-[#1c1712] border border-[rgba(242,236,223,0.08)] rounded-xl px-3 py-1.5 text-xs text-white placeholder-[#8e8473] focus:outline-none focus:border-[#e2a355]"
+                    />
+                  )}
+                  <p className="mt-1 text-[11px] text-[#8e8473]">
+                    {editAdminScope === '__all__'
+                      ? 'This admin sees every team, like the built-in team login.'
+                      : 'This admin sees only the selected team after logging in.'}
+                  </p>
+                </div>
+              )}
+
               {/* Teams selection */}
-              <div>
+              <div hidden={editRole === 'admin'}>
                 <label className="block text-[11px] font-medium text-[#8e8473] uppercase mb-1">Assigned Teams</label>
                 <div className="space-y-2 bg-[#1c1712] p-3 rounded-xl border border-[rgba(242,236,223,0.08)] max-h-36 overflow-y-auto">
                   {teamsList.map((t: any) => (

@@ -22,6 +22,23 @@ function requireSuperadmin(req: NextRequest): boolean {
   return session?.role === 'superadmin';
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * An admin must say which team they manage: exactly one of an existing team (`teamId`), a new team (`newTeamName`) or all teams
+ * (`allTeams: true`, stored as no team = platform-wide, the same scope as the built-in `team` login). Returns an error message, or null when valid.
+ */
+async function adminScopeError(c: { teamId: unknown; newTeamName: string; allTeams: boolean }): Promise<string | null> {
+  const chosen = [Boolean(c.teamId), Boolean(c.newTeamName), c.allTeams].filter(Boolean).length;
+  if (chosen !== 1) return 'Choose which team this admin manages: one team, a new team, or All teams.';
+  if (c.teamId) {
+    if (typeof c.teamId !== 'string' || !UUID_RE.test(c.teamId)) return 'Invalid team.';
+    const { rows } = await query('SELECT 1 FROM teams WHERE id = $1', [c.teamId]);
+    if (rows.length === 0) return 'That team does not exist.';
+  }
+  return null;
+}
+
 export async function GET(req: NextRequest) {
   if (!requireSuperadmin(req)) return NextResponse.json({ error: 'superadmin access required' }, { status: 403 });
 
@@ -111,6 +128,12 @@ export async function POST(req: NextRequest) {
     const teamIds: string[] = Array.isArray(body.teamIds) ? body.teamIds : (teamId ? [teamId] : []);
     const role = String(body.role || 'user');
     const newTeamName = String(body.newTeamName || '').trim();
+    const allTeams = body.allTeams === true;
+
+    if (role === 'admin') {
+      const bad = await adminScopeError({ teamId, newTeamName, allTeams });
+      if (bad) return NextResponse.json({ error: bad }, { status: 400 });
+    }
 
     if (!username || !password || !displayName) {
       return NextResponse.json({ error: 'username, password, and displayName are required' }, { status: 400 });
@@ -266,8 +289,14 @@ export async function PUT(req: NextRequest) {
     const { id, displayName, role, active, memberId, teamId } = body;
     const teamIds: string[] | undefined = Array.isArray(body.teamIds) ? body.teamIds : undefined;
     const newTeamName = String(body.newTeamName || '').trim();
+    const allTeams = body.allTeams === true;
     const username = body.username ? String(body.username).trim().toLowerCase() : undefined;
     if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
+
+    if (role === 'admin') {
+      const bad = await adminScopeError({ teamId, newTeamName, allTeams });
+      if (bad) return NextResponse.json({ error: bad }, { status: 400 });
+    }
 
     if (username) {
       if (username.length < 2) {
@@ -286,15 +315,23 @@ export async function PUT(req: NextRequest) {
       }
     }
 
+    // An admin's team is set explicitly: one team, a new team, or "All teams" (stored as no team = platform-wide, like the built-in `team` login).
+    // Changing the role away from admin also clears the team. A request that does not touch the role leaves the team alone.
     let finalTeamId = teamId;
-    if (role === 'admin' && newTeamName) {
-      const { rows: teamRows } = await query(
-        'INSERT INTO teams (name) VALUES ($1) RETURNING id',
-        [newTeamName]
-      );
-      finalTeamId = teamRows[0].id;
-    } else if (role !== 'admin' && role !== undefined) {
-      // If changing role away from admin, remove team association
+    let setTeam = false;
+    if (role === 'admin') {
+      setTeam = true;
+      if (newTeamName) {
+        const { rows: teamRows } = await query(
+          'INSERT INTO teams (name) VALUES ($1) RETURNING id',
+          [newTeamName]
+        );
+        finalTeamId = teamRows[0].id;
+      } else {
+        finalTeamId = allTeams ? null : teamId;
+      }
+    } else if (role !== undefined) {
+      setTeam = true;
       finalTeamId = null;
     }
 
@@ -381,7 +418,9 @@ export async function PUT(req: NextRequest) {
     // MCP access follows the account's security state: if role, active or team changes, every MCP grant of that user is revoked
     // (before and after the write) so a later re-promotion or team assignment cannot revive an old token.
     const { rows: mcpCur } = await query('SELECT role, active, team_id FROM users WHERE id = $1', [id]);
-    const mcpReason = mcpCur[0] ? securityStateChanged(mcpCur[0], { role: role ?? null, active: active ?? null, teamId: finalTeamId ?? null }) : null;
+    let mcpReason = mcpCur[0] ? securityStateChanged(mcpCur[0], { role: role ?? null, active: active ?? null, teamId: finalTeamId ?? null }) : null;
+    // securityStateChanged treats a null team as "unchanged"; moving an admin to "All teams" or off a team is a real change.
+    if (!mcpReason && setTeam && finalTeamId == null && mcpCur[0]?.team_id) mcpReason = 'team_changed';
     if (mcpReason) await revokeMcpAccess({ userId: String(id) }, mcpReason);
 
     const { rows } = await query(`
@@ -391,12 +430,12 @@ export async function PUT(req: NextRequest) {
         role         = COALESCE($4, role),
         active       = COALESCE($5, active),
         member_id    = COALESCE($6, member_id),
-        team_id      = COALESCE($7, team_id),
+        team_id      = CASE WHEN $9::boolean THEN $7::uuid ELSE team_id END,
         api_key      = COALESCE($8, api_key),
         updated_at   = now()
       WHERE id = $1
       RETURNING id, username, display_name, role, active, member_id, team_id, updated_at
-    `, [id, username ?? null, displayName ?? null, role ?? null, active ?? null, finalMemberId ?? null, finalTeamId ?? null, rawApiKey]);
+    `, [id, username ?? null, displayName ?? null, role ?? null, active ?? null, finalMemberId ?? null, finalTeamId ?? null, rawApiKey, setTeam]);
 
     if (!rows[0]) return NextResponse.json({ error: 'user not found' }, { status: 404 });
     if (mcpReason) await revokeMcpAccess({ userId: String(id) }, mcpReason);
