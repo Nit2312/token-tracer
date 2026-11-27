@@ -37,7 +37,11 @@ export function classifyRedirectUri(uri: unknown, policy: RedirectPolicy = DEFAU
   if (u.pathname !== '/callback') return null;
   // Round-trip check: the URI must already be in canonical form (rejects `http://localhost:080/callback`, `HTTP://…`, trailing junk).
   if (u.href !== uri) return null;
-  if (u.port !== '' && !/^[1-9][0-9]{0,4}$/.test(u.port)) return null;
+  if (u.port !== '') {
+    if (!/^[1-9][0-9]{0,4}$/.test(u.port)) return null;
+    const portNum = Number(u.port);
+    if (portNum < 1 || portNum > 65535) return null;
+  }
   return 'loopback';
 }
 

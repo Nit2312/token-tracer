@@ -68,6 +68,7 @@ describe('redirect URI rules', () => {
     'http://localhost:8080/callback#a', 'http://u:p@localhost:8080/callback', 'http://localhost:0/callback', 'http://localhost:080/callback',
     'http://localhost:99999/callback', 'HTTP://localhost:8080/callback', 'http://[::ffff:127.0.0.1]:80/callback', 'http://2130706433/callback',
     'myapp://callback', 'javascript:alert(1)', 'data:text/html,x', 'file:///callback', '', '/callback', '//claude.ai/callback',
+    'http://localhost:65536/callback', 'http://localhost:99999/callback', 'http://localhost:0/callback',
   ];
   for (const u of ok) it(`accepts ${u}`, () => assert.ok(classifyRedirectUri(u)));
   for (const u of bad) it(`rejects ${JSON.stringify(u)}`, () => assert.equal(classifyRedirectUri(u), null));

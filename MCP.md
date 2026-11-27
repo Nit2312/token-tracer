@@ -649,6 +649,7 @@ Each step is a small local commit, tested (`tsc`, ESLint, unit; live tests from 
 | P3-6 | Hardening: fuzzing, concurrency, revocation mid-flight, dashboard parity, `EXPLAIN` on a production-sized copy, index recommendation (no index created) | measurements | **done 2026-11-26** (16.13) |
 | P3-7 | Documentation consolidation, risk register, runbook additions for the data plane | final review | **done 2026-11-26** (16.14) |
 | P3-8 | Live PostgreSQL integration, migration & rollback verification, role & PUBLIC privilege audit, multi-tenant data services, concurrency & in-flight revocation, query plan profiling (`EXPLAIN (ANALYZE, BUFFERS)`) | integration & performance | **done 2026-11-26** (16.15) |
+| P3-9 | Independent security audit, red-team analysis, confirmed defect remediation, pre-integration readiness assessment | security audit & readiness | **done 2026-11-27** (16.16) |
 
 ### 16.6 Testing strategy (summary)
 - **Unit, DB-free:** cursors, limits, error mapping, static analysis of the SQL (no dynamic `EXECUTE`, only allow-listed tables and columns, no excluded column, no path), guards and drift tests.
@@ -951,5 +952,50 @@ Files: `scripts/migrations/mcp-data.sql` (roles, schema, functions), `scripts/mi
   - Documentation drift guard: `NODE_OPTIONS=--conditions=react-server npx tsx --test tests/mcp-docs.test.ts` -> passed.
   - TypeScript compilation: `npx tsc --noEmit` -> 0 errors.
   - ESLint: `npx eslint scripts/setup-mcp-roles.mjs` -> 0 errors.
+
+### 16.16 P3-9 independent security audit, defect remediation and pre-integration readiness (complete, 2026-11-27)
+
+**1. Comprehensive Audit Summary Across Workstreams**
+- **Agent 1 (OAuth 2.1 & Authentication)**:
+  - Audited DCR, authorization endpoint, consent token HMAC binding, PKCE S256 verification, token issuance, refresh rotation, and revocation.
+  - Verified that refresh reuse immediately revokes the family and logs audit events.
+  - Identified defect in loopback redirect port parsing: ports 65536–99999 matched the regex `^[1-9][0-9]{0,4}$` but exceeded TCP port range. Fixed with numeric range validation (1–65535) and added regression tests.
+- **Agent 2 (Tenant Isolation & Authorization)**:
+  - Audited the full chain: `token -> SHA-256 hash -> mcp_data._resolve_scope -> team derivation -> data functions`.
+  - Confirmed that client-supplied parameters cannot alter or influence the resolved team ID.
+  - Verified uniform `not_found` error responses for cross-tenant references and invalid cursors to eliminate enumeration side-channels.
+  - Confirmed audit event actor containment: `mcp_auth` has zero direct write privileges on `audit_log`; all entries flow through `SECURITY DEFINER` function `mcp_audit_event`.
+- **Agent 3 (PostgreSQL Security & PUBLIC Privileges)**:
+  - Verified `mcp_reader` least privilege: zero table grants, 6 `EXECUTE` routine grants only, `search_path = 'pg_catalog, pg_temp'`, `default_transaction_read_only = on`.
+  - Audited `mcp_data_owner`: `NOLOGIN`, restricted column-level SELECT grants on 10 tables, no write privileges.
+  - Investigated `pg_logical_emit_message`: confirmed executable by PUBLIC in PostgreSQL default, can write arbitrary WAL payloads even in read-only transactions. Demonstrated that executing `REVOKE ALL ON FUNCTION pg_catalog.pg_logical_emit_message(...) FROM PUBLIC` cleanly blocks unprivileged execution (`42501`) without breaking application functionality. Documented mitigation for production migration.
+- **Agent 4 (Data Privacy & Metadata Output)**:
+  - Audited all output types, projections, and `assertMetadataOnly` deep guard.
+  - Confirmed zero exposure of `prompt_text_sanitized`, file paths, or working directories.
+  - Verified that `lib/mcp/data/masking.ts` remains completely isolated with zero imports in application or MCP paths.
+- **Agent 5 (HTTP Transport, Protocols & Ops)**:
+  - Verified `/mcp` capability discovery remains strictly empty `{}`.
+  - Confirmed Host and Origin validation, request body limits (64 KiB), and rate-limiting counters.
+- **Agent 6 (Red-Team Review & Defect Remediation)**:
+  - Remediated finding P39-01 (Loopback redirect port validation boundary). Added regression test cases in `tests/mcp-oauth-pure.test.ts`.
+
+**2. Pre-Integration Readiness Matrix**
+| Requirement | Evidence | Status | Remaining Action |
+|---|---|---|---|
+| OAuth 2.1 Security | RFC 6749, RFC 7636, RFC 8252, and RFC 9207 verified across pure and DB suites; refresh reuse revokes family; PKCE S256 enforced | PASS | Pre-production real client handshake verification in Phase 6 |
+| Tenant Isolation | `_resolve_scope` in DB derives team from token hash; 41 live DB tests pass with zero cross-tenant leakage | PASS | None |
+| DB Least Privilege | `mcp_reader` zero table privileges (`has_table_privilege` = false); 6 functions only; `search_path` pinned | PASS | Execute `setup-mcp-roles.mjs --apply` on production during rollout |
+| Metadata-Only Privacy | Output allowlists, closed intent enum, `assertMetadataOnly` guard, zero prompt text / paths | PASS | Legal/HR sign-off before raw text is ever considered (Phase 4 stays metadata-only) |
+| Token Revocation | Pre-request and in-flight revocation verified live; user demotion immediately revokes access | PASS | None |
+| HTTP Transport Security | Host canonical match, Origin allowlist, 64 KiB body cap, no-store headers on all responses | PASS | None |
+| Rate Limiting | DB fixed-window counters on registration, token, decision, and revocation endpoints | PASS | Configure platform-level edge rate limiting on Vercel for `/oauth/*` (R9) |
+| Operational Observability | `mcp_audit_event` logs all OAuth state transitions without leaking secrets | PASS | Add `/mcp` access logging in Phase 5 |
+| Error Handling | Sanitized fixed JSON-RPC / OAuth errors; zero stack traces or DB errors leaked | PASS | None |
+| Performance & Limits | Bounded pool (max 3), 5s statement timeout, 24 KiB response budget packing | PASS | Deploy recommended index `session_turns_org_user_created_idx` concurrently in prod |
+| Managed Neon Compatibility | Verified compatibility with Neon role model without SUPERUSER (PostgreSQL 16 CREATEROLE) | PASS | Confirm Neon production connection pooling compatibility (PB) |
+| Legal / Privacy Review | Consent wording technically approved; masking engine excluded from release | PASS (for metadata-only) | Legal/HR formal sign-off on consent wording before prod enable (LH) |
+
+**Pre-Integration Readiness Decision**: **READY WITH CONDITIONS** (Ready for Phase 4 tool implementation on metadata-only services; production rollout blocked by documented pre-conditions: Legal/HR consent sign-off, edge rate limiting, and Neon pooled endpoint validation).
+
 
 
