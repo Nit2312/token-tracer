@@ -81,7 +81,8 @@ export async function GET(req: NextRequest) {
       if (userTeams.length > 0 && !userTeams.some(t => t.id === teamId)) {
         teamId = userTeams[0].id;
       }
-    } else {
+    } else if (session.role !== 'admin') {
+      // An admin's team is exactly users.team_id; no team means "All teams". Never guess one from a linked telemetry member.
       if (!teamId && userTeams.length > 0) {
         teamId = userTeams[0].id;
       }

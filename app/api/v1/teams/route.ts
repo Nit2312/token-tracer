@@ -17,7 +17,8 @@ export async function GET(req: NextRequest) {
     const isUuid = (val: string | null | undefined): boolean =>
       Boolean(val && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val));
 
-    if (session && (session.role === 'admin' || session.role === 'user')) {
+    // Members and team admins see their own team(s). An admin with no team ("All teams", like the built-in `team` login) falls through to every team.
+    if (session && (session.role === 'user' || (session.role === 'admin' && isUuid(session.teamId)))) {
       const hasTeam = isUuid(session.teamId);
       const hasUser = isUuid(session.userId);
       if (hasTeam || hasUser) {
