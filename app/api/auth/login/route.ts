@@ -7,6 +7,7 @@
  * any other username                 → DB lookup, bcrypt verify → redirect /
  */
 import { NextRequest, NextResponse } from 'next/server';
+import QRCode from 'qrcode';
 import crypto from 'node:crypto';
 import { adminPassword, superadminPassword } from '@/lib/team/env';
 import { verifyAdminPassword } from '@/lib/team/auth';
@@ -103,11 +104,14 @@ async function completePasswordStage(
     return res;
   }
 
-  let enroll: { secret: string; otpauthUri: string } | undefined;
+  let enroll: { secret: string; otpauthUri: string; qrSvg: string } | undefined;
   if (!state.enrolled) {
     // Only reachable for database admin accounts: show a fresh secret to enroll an authenticator app.
     const secret = await beginEnrollment(subject);
-    enroll = { secret, otpauthUri: otpauthUri(secret, identity.username) };
+    const uri = otpauthUri(secret, identity.username);
+    // Rendered server-side so the browser needs no QR library and the secret never goes to a third party.
+    const qrSvg = await QRCode.toString(uri, { type: 'svg', margin: 1, width: 192, errorCorrectionLevel: 'M' });
+    enroll = { secret, otpauthUri: uri, qrSvg };
   }
 
   const res = NextResponse.json({ ok: true, mfaRequired: true, ...(enroll ? { enroll } : {}) });

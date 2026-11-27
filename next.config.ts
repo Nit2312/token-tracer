@@ -37,6 +37,9 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   reactStrictMode: true,
 
+  // Dev only: the MCP sign-in flow must use the canonical host 127.0.0.1, which Next's dev server otherwise blocks (no hydration, dead buttons).
+  allowedDevOrigins: ['127.0.0.1'],
+
   // Security headers on all routes
   async headers() {
     return [
