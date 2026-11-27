@@ -81,7 +81,7 @@ describe('the exact WWW-Authenticate challenge', () => {
   it('a token that does not authenticate, for ANY reason, gets the identical 401 invalid_token (no oracle)', async () => {
     const reasons: Array<[string, McpDeps['authenticate']]> = [
       ['unknown/expired/revoked (null)', async () => null],
-      ['not an admin', async () => P({ role: 'user' })], ['superadmin', async () => P({ role: 'superadmin' })], ['no team', async () => P({ teamId: null })],
+      ['not an admin', async () => P({ role: 'user' })], ['superadmin', async () => P({ role: 'superadmin' })],
     ];
     const seen = new Set<string>();
     for (const [name, authenticate] of reasons) {
@@ -181,10 +181,11 @@ describe('the principal reaches the server layer, only from the validated token,
     const users = (c.seen as Array<{ principal: McpPrincipal }>).map((x) => x.principal.userId).sort();
     assert.deepEqual(users, [...Array(12).fill('ua'), ...Array(12).fill('ub')].sort());
   });
-  it('authenticateRequest re-asserts admin + team on whatever the backend returned', async () => {
+  it('authenticateRequest re-asserts the admin role on whatever the backend returned; an All-teams admin (teamId null, vetted by the token query against mcp_all_teams_admins) passes', async () => {
     const run = (p: McpPrincipal | null) => authenticateRequest(new Request('https://x/', { headers: bearer(tok('a')) }), OAUTH, { authenticate: async () => p });
     assert.equal((await run(P())).ok, true);
-    for (const p of [null, P({ role: 'user' }), P({ role: 'superadmin' }), P({ teamId: null })]) assert.equal((await run(p)).ok, false);
+    for (const p of [null, P({ role: 'user' }), P({ role: 'superadmin' })]) assert.equal((await run(p)).ok, false);
+    assert.equal((await run(P({ teamId: null }))).ok, true);
   });
   it('after authentication the SDK still answers methods and protocol errors as before (GET → 405, bad JSON → -32700)', async () => {
     const deps: McpDeps = { oauth: OAUTH, authenticate: async () => P() };

@@ -11,6 +11,7 @@ import { getSessionFromCookie, hashPassword } from '@/lib/auth';
 import { generateApiKey, hashApiKey } from '@/lib/team/auth';
 import { query } from '@/lib/team/db';
 import { revokeMcpAccess, securityStateChanged } from '@/lib/team/mcp-revoke';
+import { setMcpAllTeamsAdmin } from '@/lib/team/mcp-all-teams';
 import { recordAuditEvent } from '@/lib/team/audit';
 import { publicError } from '@/lib/security/errors';
 import { statsCache } from '@/lib/team/cache';
@@ -248,6 +249,8 @@ export async function POST(req: NextRequest) {
       VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING id, username, display_name, role, member_id, team_id, active, created_at
     `, [username, passwordHash, displayName, finalMemberId, finalTeamId, role, rawApiKey]);
+    // An admin saved as "All teams" is also listed for MCP (the explicit cross-team grant); any other admin is not.
+    await setMcpAllTeamsAdmin(rows[0].id, role === 'admin' && allTeams);
 
     const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || 'https://token-tracer-three.vercel.app';
     let installCommandMac = null;
@@ -438,6 +441,7 @@ export async function PUT(req: NextRequest) {
     `, [id, username ?? null, displayName ?? null, role ?? null, active ?? null, finalMemberId ?? null, finalTeamId ?? null, rawApiKey, setTeam]);
 
     if (!rows[0]) return NextResponse.json({ error: 'user not found' }, { status: 404 });
+    if (setTeam) await setMcpAllTeamsAdmin(String(id), role === 'admin' && allTeams);
     if (mcpReason) await revokeMcpAccess({ userId: String(id) }, mcpReason);
 
     // Keep the member's display name in step with the user's — team dashboards, prompts,

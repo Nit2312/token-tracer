@@ -10,16 +10,18 @@ export interface McpPrincipal {
  * never hold a token), and only role 'admin' with a team qualifies. superadmin is deliberately excluded from team data access.
  */
 export const isTeamAdmin = (p: McpPrincipal): boolean => p.role === 'admin' && p.teamId !== null;
+/** An "All teams" admin: role admin and no team. Only ever reaches this point if the database also lists them in mcp_all_teams_admins (see ELIGIBLE_USER_SQL). */
+export const isAllTeamsAdmin = (p: McpPrincipal): boolean => p.role === 'admin' && p.teamId === null;
 
-/** What every tool call receives: an admin with a team, both facts re-read from the database for THIS request. */
-export type TeamAdminPrincipal = McpPrincipal & { role: 'admin'; teamId: string; tokenHash: Uint8Array };
+/** What every tool call receives: an admin with a team, or an All-teams admin (teamId null). Both facts re-read from the database for THIS request. */
+export type TeamAdminPrincipal = McpPrincipal & { role: 'admin'; teamId: string | null; tokenHash: Uint8Array };
 export const asTeamAdmin = (p: McpPrincipal): TeamAdminPrincipal | null => {
-  if (!isTeamAdmin(p)) return null;
+  if (!isTeamAdmin(p) && !isAllTeamsAdmin(p)) return null;
   const hash = p.tokenHash instanceof Uint8Array && p.tokenHash.byteLength === 32 ? p.tokenHash : new Uint8Array(32);
   return {
     ...p,
     role: 'admin',
-    teamId: p.teamId!,
+    teamId: p.teamId,
     tokenHash: hash,
   };
 };

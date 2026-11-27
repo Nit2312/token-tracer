@@ -97,12 +97,22 @@ CREATE TABLE IF NOT EXISTS mcp_access_log (
 CREATE INDEX IF NOT EXISTS idx_mcp_access_log_at   ON mcp_access_log (at DESC);
 CREATE INDEX IF NOT EXISTS idx_mcp_access_log_user ON mcp_access_log (user_id, at DESC);
 
+-- Admins who may use MCP across ALL teams ("All teams" admins). An explicit grant, written by the admin screen when an admin is saved with
+-- "All teams": a NULL users.team_id alone is NOT enough (deleting a team also sets its admins' team_id to NULL, and that must never widen MCP access).
+-- Read by mcp_auth (token checks) and mcp_data_owner (the data functions); written only by the application owner role.
+CREATE TABLE IF NOT EXISTS mcp_all_teams_admins (
+  user_id    UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  granted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ── Shape check: CREATE TABLE IF NOT EXISTS never reconciles a pre-existing table, so fail loudly if one has the wrong columns ──
 DO $$
 DECLARE missing text;
 BEGIN
   SELECT string_agg(e.t || '.' || e.c, ', ') INTO missing
   FROM (VALUES
+    ('mcp_all_teams_admins','user_id'),
+    ('mcp_all_teams_admins','granted_at'),
     ('oauth_clients','client_id'),
     ('oauth_clients','client_name'),
     ('oauth_clients','redirect_uris'),

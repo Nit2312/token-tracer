@@ -18,6 +18,8 @@ export type IntentCategory = (typeof INTENT_CATEGORIES)[number];
 
 export interface Page<T> { readonly items: readonly T[]; readonly nextCursor: string | null; readonly truncated: boolean }
 
+export interface TeamSummary { readonly teamId: string; readonly name: string; readonly memberCount: number }
+
 export interface DeveloperSummary { readonly developerId: string; readonly displayName: string; readonly role: 'admin' | 'member' }
 
 export interface DailyActivity {
@@ -93,6 +95,11 @@ export function cleanDisplayName(v: unknown): string {
 }
 
 // ── projections (allowlists) ──
+export function toTeamSummary(row: unknown): TeamSummary {
+  const r = asRaw(row);
+  return { teamId: uuid(r.team_id), name: cleanDisplayName(r.name), memberCount: count(r.member_count) };
+}
+
 export function toDeveloperSummary(row: unknown): DeveloperSummary {
   const r = asRaw(row);
   if (r.role !== 'admin' && r.role !== 'member') throw bad();

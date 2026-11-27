@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * MCP OAuth migration runner (scripts/migrations/mcp-oauth.sql). Additive: five NEW tables and five NEW functions only.
+ * MCP OAuth migration runner (scripts/migrations/mcp-oauth.sql). Additive: six NEW tables and five NEW functions only.
  *
  *   EXPECTED_ENDPOINT=<ep-id> node --env-file=<file> scripts/migrate-mcp-oauth.mjs              DRY RUN (default): applies inside a transaction, reports, ROLLS BACK.
  *   CONFIRM_MCP_MIGRATION=yes EXPECTED_ENDPOINT=<ep-id> node --env-file=<file> scripts/migrate-mcp-oauth.mjs --apply
@@ -29,7 +29,7 @@ if ((apply || rollback) && process.env.CONFIRM_MCP_MIGRATION !== 'yes') { consol
 
 const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'migrations');
 const sql = fs.readFileSync(path.join(dir, rollback ? 'mcp-oauth.rollback.sql' : 'mcp-oauth.sql'), 'utf8');
-const TABLES = ['oauth_clients', 'oauth_authorization_codes', 'oauth_tokens', 'mcp_rate_limits', 'mcp_access_log'];
+const TABLES = ['oauth_clients', 'oauth_authorization_codes', 'oauth_tokens', 'mcp_rate_limits', 'mcp_access_log', 'mcp_all_teams_admins'];
 const FUNCTIONS = ['mcp_guard_oauth_tokens()', 'mcp_guard_oauth_codes()', 'mcp_guard_oauth_clients()', 'mcp_audit_event(text, uuid, text, text, jsonb)', 'mcp_oauth_purge()'];
 
 const u = new URL(raw); u.searchParams.delete('sslmode');

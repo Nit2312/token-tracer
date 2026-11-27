@@ -37,12 +37,12 @@ export async function listDevelopers(
 
   // Request limit + 1 to probe for next page
   const probeLimit = req.limit + 1;
-  const { tokenHash } = scopeDbArgs(config.scope);
+  const { tokenHash, teamId } = scopeDbArgs(config.scope);
 
   const rows = await withReaderTx(config.pool, async (client) => {
     const res = await client.query(
-      `SELECT member_id, display_name, role FROM mcp_data.list_developers($1, $2, $3)`,
-      [tokenHash, probeLimit, afterId]
+      `SELECT member_id, display_name, role FROM mcp_data.list_developers($1, $2, $3, $4)`,
+      [tokenHash, probeLimit, afterId, teamId]
     );
     return res.rows;
   });

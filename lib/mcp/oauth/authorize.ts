@@ -29,6 +29,8 @@ export interface ConsentView {
   loopback: boolean;
   userName: string;
   teamName: string;
+  /** True for an All-teams admin: the consent page says "all teams" instead of naming one. */
+  allTeams: boolean;
 }
 
 export type AuthorizeView =
@@ -84,7 +86,8 @@ export async function prepareAuthorize(i: PrepareInput, deps: EndpointDeps = {},
       destination: kind === 'loopback' ? 'an application running on your own computer' : new URL(p.redirectUri).origin,
       loopback: kind === 'loopback',
       userName: elig.user.displayName,
-      teamName: elig.user.teamName ?? 'your team',
+      teamName: elig.user.teamId ? (elig.user.teamName ?? 'your team') : 'All teams',
+      allTeams: !elig.user.teamId,
     },
   };
 }

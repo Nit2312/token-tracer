@@ -17,10 +17,11 @@ export const AUTH_CODE_TTL_SECONDS = 60;
 
 /**
  * The ONE definition of "this user may hold MCP access", used by code exchange, refresh and bearer authentication alike: an active DATABASE
- * user whose role is 'admin' and who belongs to a team that still exists. Evaluated against the database on every use, never cached.
+ * user whose role is 'admin' and who either belongs to a team that still exists or is an explicitly listed "All teams" admin (no team AND a row in
+ * mcp_all_teams_admins; a NULL team alone is not enough, because deleting a team also nulls its admins' team). Evaluated against the database on every use, never cached.
  * (SQL fragment over alias `u`; constant text, no interpolated values.)
  */
-const ELIGIBLE_USER_SQL = `(u.active AND u.role = 'admin' AND EXISTS (SELECT 1 FROM teams tm WHERE tm.id = u.team_id))`;
+const ELIGIBLE_USER_SQL = `(u.active AND u.role = 'admin' AND (EXISTS (SELECT 1 FROM teams tm WHERE tm.id = u.team_id) OR (u.team_id IS NULL AND EXISTS (SELECT 1 FROM mcp_all_teams_admins a WHERE a.user_id = u.id))))`;
 
 const INVALID_GRANT = () => new OAuthError('invalid_grant', 'The grant is invalid, expired or already used.');
 

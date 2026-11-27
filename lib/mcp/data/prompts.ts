@@ -61,7 +61,7 @@ export async function searchPromptMetadata(
   }
 
   const probeLimit = req.limit + 1;
-  const { tokenHash } = scopeDbArgs(config.scope);
+  const { tokenHash, teamId } = scopeDbArgs(config.scope);
 
   const rows = await withReaderTx(config.pool, async (client) => {
     const res = await client.query(
@@ -69,7 +69,7 @@ export async function searchPromptMetadata(
               prompt_char_len, has_code_block, has_file_path, has_traceback, intent_category,
               answer_input_tokens, answer_output_tokens, answer_cache_read_tokens, answer_cache_write_tokens
          FROM mcp_data.search_prompt_metadata(
-           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
          )`,
       [
         tokenHash,
@@ -87,6 +87,7 @@ export async function searchPromptMetadata(
         probeLimit,
         afterTs,
         afterId,
+        teamId,
       ]
     );
     return res.rows;
@@ -141,15 +142,15 @@ export async function getPromptMetadataBatch(
     decodeRef('prompt', ref, { scope: config.scope, secret: config.secret })
   );
 
-  const { tokenHash } = scopeDbArgs(config.scope);
+  const { tokenHash, teamId } = scopeDbArgs(config.scope);
 
   const rows = await withReaderTx(config.pool, async (client) => {
     const res = await client.query(
       `SELECT prompt_id, session_uuid, member_id, turn_index, created_at, tool, model,
               prompt_char_len, has_code_block, has_file_path, has_traceback, intent_category,
               answer_input_tokens, answer_output_tokens, answer_cache_read_tokens, answer_cache_write_tokens
-         FROM mcp_data.prompt_metadata_batch($1, $2)`,
-      [tokenHash, promptIds]
+         FROM mcp_data.prompt_metadata_batch($1, $2, $3)`,
+      [tokenHash, promptIds, teamId]
     );
     return res.rows;
   });

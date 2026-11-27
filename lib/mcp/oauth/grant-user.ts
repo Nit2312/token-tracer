@@ -1,15 +1,17 @@
-/** Who may authorize MCP access: a DATABASE-backed team admin with a team, in a non-impersonated, MFA-complete session. Pure rule + one read. */
+/** Who may authorize MCP access: a DATABASE-backed admin with a team (or an explicitly listed All-teams admin), in a non-impersonated, MFA-complete session. Pure rule + one read. */
 import { withMcpTx, type McpPool } from '../db';
 import type { SessionPayload } from '../../session-token';
 
-export interface GrantUser { id: string; displayName: string; role: string; teamId: string | null; teamName: string | null; active: boolean }
+export interface GrantUser { id: string; displayName: string; role: string; teamId: string | null; teamName: string | null; active: boolean; allTeams: boolean }
 
 export async function loadGrantUser(pool: McpPool, userId: string): Promise<GrantUser | null> {
   return withMcpTx(pool, async (tx) => {
     const r = await tx.query(
-      `SELECT u.id, u.display_name, u.role, u.team_id, u.active, t.name AS team_name FROM users u LEFT JOIN teams t ON t.id = u.team_id WHERE u.id = $1`, [userId]);
+      `SELECT u.id, u.display_name, u.role, u.team_id, u.active, t.name AS team_name,
+              EXISTS (SELECT 1 FROM mcp_all_teams_admins a WHERE a.user_id = u.id) AS all_teams
+         FROM users u LEFT JOIN teams t ON t.id = u.team_id WHERE u.id = $1`, [userId]);
     const x = r.rows[0];
-    return x ? { id: x.id, displayName: x.display_name, role: x.role, teamId: x.team_id, teamName: x.team_name, active: x.active } : null;
+    return x ? { id: x.id, displayName: x.display_name, role: x.role, teamId: x.team_id, teamName: x.team_name, active: x.active, allTeams: x.all_teams === true } : null;
   });
 }
 
@@ -30,17 +32,18 @@ export const INELIGIBLE_MESSAGE: Record<Ineligible, string> = {
 };
 
 /** The session says who is asking; the DATABASE decides whether they still qualify (role, team and active are re-read, never trusted from the cookie). */
-export function evaluateGrantEligibility(session: SessionPayload, user: GrantUser | null, now = Date.now()): { ok: true; user: GrantUser & { teamId: string } } | { ok: false; reason: Ineligible } {
+export function evaluateGrantEligibility(session: SessionPayload, user: GrantUser | null, now = Date.now()): { ok: true; user: GrantUser } | { ok: false; reason: Ineligible } {
   if (session.impersonatedBy) return { ok: false, reason: 'impersonation' };
   if (!UUID_RE.test(session.userId)) return { ok: false, reason: 'builtin_account' };
   if (session.role !== 'admin') return { ok: false, reason: 'not_admin' };
   if (session.mfa !== true) return { ok: false, reason: 'no_mfa' };
   if (!user || !user.active) return { ok: false, reason: 'inactive' };
   if (user.role !== 'admin') return { ok: false, reason: 'not_admin' };
-  if (!user.teamId) return { ok: false, reason: 'no_team' };
-  if (session.teamId !== user.teamId) return { ok: false, reason: 'stale_session' };
+  // A team admin needs a team. With no team, only an explicitly listed "All teams" admin qualifies (a NULL team alone, e.g. after a team was deleted, does not).
+  if (!user.teamId && !user.allTeams) return { ok: false, reason: 'no_team' };
+  if ((session.teamId ?? null) !== (user.teamId ?? null)) return { ok: false, reason: 'stale_session' };
   // Checked LAST so that accounts that can never qualify are told so instead of being asked to sign in again. An issuedAt in the future (clock tampering) also fails.
   const age = now - session.issuedAt;
   if (!Number.isFinite(age) || age < -60_000 || age > GRANT_MAX_LOGIN_AGE_MS) return { ok: false, reason: 'login_not_recent' };
-  return { ok: true, user: { ...user, teamId: user.teamId } };
+  return { ok: true, user };
 }

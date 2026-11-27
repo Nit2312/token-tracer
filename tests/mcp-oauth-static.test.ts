@@ -17,7 +17,7 @@ const GRANTS = JSON.parse(read('lib/mcp/grants.json')).mcp_auth as Record<string
 const ROLES = read('scripts/setup-mcp-roles.mjs');
 const MIGRATE = read('scripts/migrate-mcp-oauth.mjs');
 
-const NEW_TABLES = ['oauth_clients', 'oauth_authorization_codes', 'oauth_tokens', 'mcp_rate_limits', 'mcp_access_log'];
+const NEW_TABLES = ['oauth_clients', 'oauth_authorization_codes', 'oauth_tokens', 'mcp_rate_limits', 'mcp_access_log', 'mcp_all_teams_admins'];
 const NEW_FUNCTIONS = ['mcp_guard_oauth_tokens', 'mcp_guard_oauth_codes', 'mcp_guard_oauth_clients', 'mcp_audit_event', 'mcp_oauth_purge'];
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- parser AST nodes are inspected structurally
 type Node = any;
@@ -28,9 +28,9 @@ describe('migration SQL', () => {
   it('parses, and parses its plpgsql bodies', () => {
     assert.ok(stmts.length > 20);
     for (const f of stmts.filter((s) => s.CreateFunctionStmt)) assert.ok((parsePlPgSQLSync(reconstruct(f)) as Node).plpgsql_funcs.length === 1);
-    assert.ok((parseSync(ROLLBACK).stmts ?? []).length === 10);
+    assert.ok((parseSync(ROLLBACK).stmts ?? []).length === 11);
   });
-  it('creates exactly the five new tables, all IF NOT EXISTS, and only creates/alters nothing existing', () => {
+  it('creates exactly the six new tables, all IF NOT EXISTS, and only creates/alters nothing existing', () => {
     const created = stmts.filter((s) => s.CreateStmt);
     assert.deepEqual(created.map((s) => s.CreateStmt.relation.relname).sort(), [...NEW_TABLES].sort());
     assert.ok(created.every((s) => s.CreateStmt.if_not_exists === true));
@@ -42,7 +42,7 @@ describe('migration SQL', () => {
   });
   it('foreign keys point only at users/oauth_clients with ON DELETE CASCADE', () => {
     const fks = [...SQL.matchAll(/REFERENCES (\w+)\(\w+\) ON DELETE (\w+(?: \w+)?)/g)].map((m) => `${m[1]}:${m[2]}`);
-    assert.ok(fks.length === 4 && fks.every((f) => ['users:CASCADE', 'oauth_clients:CASCADE'].includes(f)), fks.join());
+    assert.ok(fks.length === 5 && fks.every((f) => ['users:CASCADE', 'oauth_clients:CASCADE'].includes(f)), fks.join());
   });
   it('stores only digests and constrains scope, grants, auth method and S256 challenge length in the database', () => {
     assert.match(SQL, /code_hash\s+BYTEA PRIMARY KEY CHECK \(octet_length\(code_hash\) = 32\)/);
@@ -104,7 +104,7 @@ describe('rollback SQL', () => {
     assert.deepEqual(tables.sort(), [...NEW_TABLES].sort());
     assert.deepEqual(fns.sort(), [...NEW_FUNCTIONS].sort());
     assert.ok(!/CASCADE/i.test(code));
-    assert.equal(code.split(';').filter((s) => s.trim()).length, 10, 'nothing but the ten drops');
+    assert.equal(code.split(';').filter((s) => s.trim()).length, 11, 'nothing but the eleven drops');
     assert.ok(code.indexOf('DROP TABLE IF EXISTS oauth_clients') < code.indexOf('DROP FUNCTION'), 'tables (and their triggers) go before the functions');
   });
 });

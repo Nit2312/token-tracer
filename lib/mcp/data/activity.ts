@@ -20,15 +20,15 @@ export async function getDeveloperActivity(
 ): Promise<readonly DailyActivity[]> {
   assertScope(config.scope);
   const req: DeveloperActivityRequest = parseDeveloperActivityRequest(input, now);
-  const { tokenHash } = scopeDbArgs(config.scope);
+  const { tokenHash, teamId } = scopeDbArgs(config.scope);
 
   const rows = await withReaderTx(config.pool, async (client) => {
     const res = await client.query(
       `SELECT day, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, api_cost, session_count,
               tool_calls, tool_errors, edits, additions, deletions, changed_lines, files_touched,
               rework_loops, corrections, abandoned_count
-         FROM mcp_data.developer_activity($1, $2, $3, $4)`,
-      [tokenHash, req.developerId, req.window.from.toISOString(), req.window.to.toISOString()]
+         FROM mcp_data.developer_activity($1, $2, $3, $4, $5)`,
+      [tokenHash, req.developerId, req.window.from.toISOString(), req.window.to.toISOString(), teamId]
     );
     return res.rows;
   });

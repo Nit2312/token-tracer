@@ -8,7 +8,7 @@
 --   2  database                 : CONNECT = true (required to log in), CREATE = false, TEMPORARY = true or false (residual; see MCP.md 16.10)
 --   3  schemas                  : USAGE on mcp_data; USAGE on public (via PUBLIC, residual); CREATE nowhere
 --   4  relations                : ZERO rows (no table, view, matview, foreign table or sequence privilege of any kind)
---   5  functions                : exactly the six reader functions in mcp_data; any other row is listed with its owner, SECURITY DEFINER flag and
+--   5  functions                : exactly the seven reader functions in mcp_data; any other row is listed with its owner, SECURITY DEFINER flag and
 --                                 whether PUBLIC grants it; a SECURITY DEFINER row outside mcp_data is a FINDING
 --   6  dangerous built-ins      : ZERO rows
 --   7  default privileges       : rows that would hand FUTURE objects to PUBLIC or to the reader (review each)
@@ -64,7 +64,7 @@ SELECT '4 sequence', ns.nspname || '.' || c.relname, c.relkind, NULL, NULL, NULL
 SELECT '5 function' AS section, ns.nspname || '.' || p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')' AS fn,
        pg_catalog.pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS security_definer,
        EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) a WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE') AS via_public,
-       (ns.nspname = 'mcp_data' AND p.proname IN ('list_developers', 'developer_activity', 'list_sessions', 'session_details', 'search_prompt_metadata', 'prompt_metadata_batch')) AS approved
+       (ns.nspname = 'mcp_data' AND p.proname IN ('list_developers', 'developer_activity', 'list_sessions', 'session_details', 'search_prompt_metadata', 'prompt_metadata_batch', 'list_teams')) AS approved
   FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace ns ON ns.oid = p.pronamespace
  WHERE ns.nspname NOT IN ('pg_catalog', 'information_schema') AND ns.nspname NOT LIKE 'pg\_%'
    AND pg_catalog.has_function_privilege('mcp_reader', p.oid, 'EXECUTE')

@@ -1,7 +1,7 @@
 /**
  * Tool schemas and metadata definitions (Phase 4.1).
  *
- * Defines the strict JSON Schema specifications for the six approved metadata-only MCP tools:
+ * Defines the strict JSON Schema specifications for the six approved metadata-only MCP tools (plus list_teams):
  * 1. list_developers
  * 2. developer_activity
  * 3. list_sessions
@@ -12,7 +12,7 @@
  * Rules:
  *  - Matches P3-1 request contracts and limits exactly.
  *  - additionalProperties: false on every object to prevent parameter smuggling.
- *  - Never accepts client-provided teamId, orgId, or userId (identity is derived server-side).
+ *  - Identity is derived server-side. The only client-chosen scope is the optional `teamId`, honoured solely for an All-teams admin and re-validated by the database.
  *  - Never accepts text/query/search parameters for prompts.
  *  - Limits and date windows bounded by literals.
  */
@@ -25,6 +25,22 @@ export interface ToolDefinition {
   readonly inputSchema: Record<string, unknown>;
 }
 
+/**
+ * Optional on every team-scoped tool. A team admin never needs it (their own team is used; naming a different one is refused).
+ * An "All teams" admin must pass it: choose from list_teams. The database re-checks both rules.
+ */
+const TEAM_ID_PROPERTY = {
+  type: 'string',
+  pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+  description: 'Team to query. Only needed by an All-teams admin (see list_teams); team admins always get their own team.',
+} as const;
+
+export const LIST_TEAMS_TOOL: ToolDefinition = {
+  name: 'list_teams',
+  description: 'List the teams you can query (name, id and number of developers). An All-teams admin sees every team; a team admin sees their own.',
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+};
+
 export const LIST_DEVELOPERS_TOOL: ToolDefinition = {
   name: 'list_developers',
   description:
@@ -32,6 +48,7 @@ export const LIST_DEVELOPERS_TOOL: ToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
+      teamId: TEAM_ID_PROPERTY,
       limit: {
         type: 'integer',
         minimum: 1,
@@ -56,6 +73,7 @@ export const DEVELOPER_ACTIVITY_TOOL: ToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
+      teamId: TEAM_ID_PROPERTY,
       developerId: {
         type: 'string',
         format: 'uuid',
@@ -83,6 +101,7 @@ export const LIST_SESSIONS_TOOL: ToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
+      teamId: TEAM_ID_PROPERTY,
       developerId: {
         type: 'string',
         format: 'uuid',
@@ -133,6 +152,7 @@ export const SESSION_DETAILS_TOOL: ToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
+      teamId: TEAM_ID_PROPERTY,
       sessionRef: {
         type: 'string',
         maxLength: 256,
@@ -151,6 +171,7 @@ export const SEARCH_PROMPT_METADATA_TOOL: ToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
+      teamId: TEAM_ID_PROPERTY,
       developerId: {
         type: 'string',
         format: 'uuid',
@@ -234,6 +255,7 @@ export const PROMPT_METADATA_BATCH_TOOL: ToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
+      teamId: TEAM_ID_PROPERTY,
       promptRefs: {
         type: 'array',
         items: {
@@ -251,6 +273,7 @@ export const PROMPT_METADATA_BATCH_TOOL: ToolDefinition = {
 };
 
 export const TOOL_DEFINITIONS: readonly ToolDefinition[] = Object.freeze([
+  LIST_TEAMS_TOOL,
   LIST_DEVELOPERS_TOOL,
   DEVELOPER_ACTIVITY_TOOL,
   LIST_SESSIONS_TOOL,

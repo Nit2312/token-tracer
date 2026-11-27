@@ -58,7 +58,7 @@ export async function listSessions(
   }
 
   const probeLimit = req.limit + 1;
-  const { tokenHash } = scopeDbArgs(config.scope);
+  const { tokenHash, teamId } = scopeDbArgs(config.scope);
 
   const rows = await withReaderTx(config.pool, async (client) => {
     const res = await client.query(
@@ -66,7 +66,7 @@ export async function listSessions(
               tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, api_cost, priced,
               edits, additions, deletions, changed_lines, files_touched, tool_calls, tool_errors,
               rework_loops, corrections, abandoned
-         FROM mcp_data.list_sessions($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+         FROM mcp_data.list_sessions($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         tokenHash,
         req.developerId,
@@ -77,6 +77,7 @@ export async function listSessions(
         probeLimit,
         afterTs,
         afterId,
+        teamId,
       ]
     );
     return res.rows;
@@ -129,7 +130,7 @@ export async function getSessionDetails(
     secret: config.secret,
   });
 
-  const { tokenHash } = scopeDbArgs(config.scope);
+  const { tokenHash, teamId } = scopeDbArgs(config.scope);
 
   const rows = await withReaderTx(config.pool, async (client) => {
     const res = await client.query(
@@ -137,8 +138,8 @@ export async function getSessionDetails(
               tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, api_cost, priced,
               edits, additions, deletions, changed_lines, files_touched, tool_calls, tool_errors,
               rework_loops, corrections, abandoned, tools
-         FROM mcp_data.session_details($1, $2)`,
-      [tokenHash, sessionId]
+         FROM mcp_data.session_details($1, $2, $3)`,
+      [tokenHash, sessionId, teamId]
     );
     return res.rows;
   });

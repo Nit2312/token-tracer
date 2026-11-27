@@ -28,7 +28,7 @@ const READER = ALL_GRANTS.mcp_reader as { functions: string[]; select: object; i
 type Node = any;
 
 interface Fn { name: string; args: string; sig: string; body: string; full: string; callable: boolean; definer: boolean; returns: string[] }
-const normArgs = (a: string) => a.split(',').map((x) => x.trim().replace(/^p(?:_\w+)?\s+/, '').replace(/\s+/g, ' ')).filter(Boolean).join(', ');
+const normArgs = (a: string) => a.split(',').map((x) => x.trim().replace(/^p(?:_\w+)?\s+/, '').replace(/\s+DEFAULT\s+\S+$/i, '').replace(/\s+/g, ' ')).filter(Boolean).join(', ');
 function functions(): Fn[] {
   const out: Fn[] = [];
   const parts = MIG.split(/CREATE OR REPLACE FUNCTION /).slice(1);
@@ -53,12 +53,12 @@ describe('the SQL parses with the real PostgreSQL parser (nothing is executed)',
     for (const [n, s] of [['migration', MIG_RAW], ['grants', GRANT_RAW], ['rollback', ROLL_RAW], ['audit', AUDIT_RAW]]) assert.ok((parseSync(s).stmts ?? []).length >= 7, n);
     for (const [n, s] of [['migration', MIG_RAW], ['grants', GRANT_RAW], ['rollback', ROLL_RAW]]) for (const st of ((parseSync(s).stmts ?? []) as Node[]).filter((x: Node) => x.stmt.DoStmt)) assert.ok((parsePlPgSQLSync(`CREATE FUNCTION x() RETURNS void LANGUAGE plpgsql AS $b$${st.stmt.DoStmt.args[0].DefElem.arg.String.sval}$b$;`) as Node).plpgsql_funcs.length === 1, `${n}: DO block`);
     const stmts = (parseSync(MIG_RAW).stmts ?? []).map((s: Node) => s.stmt).filter((s: Node) => s.CreateFunctionStmt);
-    assert.equal(stmts.length, 13);
+    assert.equal(stmts.length, 14);
     for (const f of FNS.filter((x) => /LANGUAGE plpgsql/.test(x.full))) assert.ok((parsePlPgSQLSync(`CREATE FUNCTION ${f.full.replace(/\$\$[\s\S]*$/, '')}$$${f.body}$$;`) as Node).plpgsql_funcs.length === 1, f.name);
   });
-  it('the migration defines exactly 13 functions: 6 reader-callable (SECURITY DEFINER) and 7 internal helpers', () => {
-    assert.equal(FNS.length, 13);
-    assert.deepEqual(FNS.filter((f) => f.callable).map((f) => f.name).sort(), ['mcp_data.developer_activity', 'mcp_data.list_developers', 'mcp_data.list_sessions', 'mcp_data.prompt_metadata_batch', 'mcp_data.search_prompt_metadata', 'mcp_data.session_details']);
+  it('the migration defines exactly 14 functions: 7 reader-callable (SECURITY DEFINER) and 7 internal helpers', () => {
+    assert.equal(FNS.length, 14);
+    assert.deepEqual(FNS.filter((f) => f.callable).map((f) => f.name).sort(), ['mcp_data.developer_activity', 'mcp_data.list_developers', 'mcp_data.list_sessions', 'mcp_data.list_teams', 'mcp_data.prompt_metadata_batch', 'mcp_data.search_prompt_metadata', 'mcp_data.session_details']);
     assert.ok(FNS.filter((f) => f.callable).every((f) => f.definer), 'every reader function is SECURITY DEFINER');
     assert.ok(FNS.filter((f) => !f.callable).every((f) => !f.definer), 'helpers are not SECURITY DEFINER and are not callable by the reader');
   });
@@ -92,8 +92,8 @@ describe('the migration is additive and does nothing outside its own schema', ()
     assert.deepEqual(OWNER.ownsFunctions.map((s) => s.replace(/\s+/g, ' ')).sort(), FNS.map((f) => f.sig).sort());
     assert.equal(OWNER.ownsSchema, 'mcp_data');
   });
-  it('proves ownership and exposure inside the transaction: 13 functions, all owned by the owner, 6 definers, search_path pinned, none executable by PUBLIC', () => {
-    for (const frag of ["<> 13 THEN RAISE EXCEPTION 'mcp_data must hold exactly 13 functions'", 'p.proowner <> v_owner', 'p.prosecdef) <> 6', "c = 'search_path=pg_catalog, pg_temp'", 'a.grantee = 0', 'n.nspowner'] ) assert.ok(MIG.includes(frag), frag);
+  it('proves ownership and exposure inside the transaction: 14 functions, all owned by the owner, 7 definers, search_path pinned, none executable by PUBLIC', () => {
+    for (const frag of ["<> 14 THEN RAISE EXCEPTION 'mcp_data must hold exactly 14 functions'", 'p.proowner <> v_owner', 'p.prosecdef) <> 7', "c = 'search_path=pg_catalog, pg_temp'", 'a.grantee = 0', 'n.nspowner'] ) assert.ok(MIG.includes(frag), frag);
   });
 });
 
@@ -232,20 +232,28 @@ describe('function hygiene (SECURITY DEFINER safety)', () => {
 });
 
 describe('tenant isolation is derived in the database from the token hash', () => {
-  it('every reader function takes the token hash first and has NO team, org, tenant or user-identity parameter', () => {
+  it('every reader function takes the token hash first; the ONLY identity-like parameter is the optional trailing p_team (never org, tenant or user), which _resolve_scope re-validates', () => {
     for (const f of FNS.filter((x) => x.callable)) {
       assert.match(f.args.trim(), /^p_token bytea\b/, f.name);
-      assert.doesNotMatch(f.args, /\bp_(team|org|tenant|user|owner|admin|role|scope)\w*/i, `${f.name} must not accept an identity: ${f.args.slice(0, 80)}`);
-      assert.match(f.body, /FROM mcp_data\._resolve_scope\(p_token\)/, `${f.name} derives the scope`);
+      const args = f.args.replace(/\s+/g, ' ').trim();
+      const withoutTeam = args.replace(/, p_team uuid DEFAULT NULL$/, '');
+      assert.doesNotMatch(withoutTeam, /\bp_(team|org|tenant|user|owner|admin|role|scope)\w*/i, `${f.name} must not accept an identity: ${args.slice(0, 80)}`);
+      if (f.name === 'mcp_data.list_teams') {
+        assert.equal(args, 'p_token bytea', 'list_teams takes the token only');
+        assert.match(f.body, /FROM mcp_data\._resolve_scope\(p_token, NULL, true\)/, 'list_teams asks the resolver in listing mode');
+      } else {
+        assert.ok(args.endsWith(', p_team uuid DEFAULT NULL'), `${f.name} ends with the optional p_team`);
+        assert.match(f.body, /FROM mcp_data\._resolve_scope\(p_token, p_team\)/, `${f.name} derives the scope and passes p_team on`);
+      }
       assert.ok(f.body.indexOf('_resolve_scope') < f.body.search(/RETURN QUERY|PERFORM|IF /), `${f.name}: the scope is resolved before anything else`);
     }
   });
   it('only _resolve_scope touches the OAuth tables, and its predicate matches bearer authentication', () => {
-    for (const f of FNS) if (f.name !== 'mcp_data._resolve_scope') assert.doesNotMatch(f.body, /oauth_tokens|oauth_clients|public\.users/, f.name);
+    for (const f of FNS) if (f.name !== 'mcp_data._resolve_scope') assert.doesNotMatch(f.body, /oauth_tokens|oauth_clients|public\.users|mcp_all_teams_admins/, f.name);
     const scope = FNS.find((f) => f.name === 'mcp_data._resolve_scope')!.body.replace(/\s+/g, ' ');
     const ts = read('lib/mcp/oauth/tokens.ts');
-    assert.match(ts, /const ELIGIBLE_USER_SQL = `\(u\.active AND u\.role = 'admin' AND EXISTS \(SELECT 1 FROM teams tm WHERE tm\.id = u\.team_id\)\)`;/);
-    for (const clause of ["u.active AND u.role = 'admin' AND EXISTS (SELECT 1 FROM public.teams tm WHERE tm.id = u.team_id)", "t.kind = 'access'", 't.revoked_at IS NULL', 't.expires_at > pg_catalog.now()', 't.absolute_expires_at > pg_catalog.now()', 'c.disabled_at IS NULL', 't.token_hash = p_token'])
+    assert.match(ts, /const ELIGIBLE_USER_SQL = `\(u\.active AND u\.role = 'admin' AND \(EXISTS \(SELECT 1 FROM teams tm WHERE tm\.id = u\.team_id\) OR \(u\.team_id IS NULL AND EXISTS \(SELECT 1 FROM mcp_all_teams_admins a WHERE a\.user_id = u\.id\)\)\)\)`;/);
+    for (const clause of ["u.active AND u.role = 'admin' AND ((u.team_id IS NOT NULL AND EXISTS (SELECT 1 FROM public.teams tm WHERE tm.id = u.team_id)) OR (u.team_id IS NULL AND EXISTS (SELECT 1 FROM public.mcp_all_teams_admins a WHERE a.user_id = u.id)))", "t.kind = 'access'", 't.revoked_at IS NULL', 't.expires_at > pg_catalog.now()', 't.absolute_expires_at > pg_catalog.now()', 'c.disabled_at IS NULL', 't.token_hash = p_token'])
       assert.ok(scope.includes(clause), `the scope predicate must contain: ${clause}`);
     assert.match(ts, /t\.kind = 'access' AND t\.revoked_at IS NULL AND t\.expires_at > now\(\) AND t\.absolute_expires_at > now\(\)/); // the TypeScript side still says the same
     assert.ok(scope.includes("octet_length(p_token) <> 32") && /RAISE EXCEPTION 'mcp_data: unauthorized'/.test(scope));
@@ -256,25 +264,26 @@ describe('tenant isolation is derived in the database from the token hash', () =
       if (b.includes('public.sync_sessions')) assert.match(b, /s\.team_id = p_team/, f.name);
       if (b.includes('public.session_turns')) { assert.match(b, /st\.org_id = p_team::text/, f.name); assert.match(b, /ss\.team_id = p_team/, f.name); assert.match(b, /ss\.session_id = st\.session_id AND st\.org_id = ss\.team_id::text AND st\.user_id = ss\.member_id::text AND st\.tool = ss\.source/, `${f.name}: the full 4-key identity`); }
       if (b.includes('public.daily_member_usage')) assert.match(b, /d\.team_id = v_team AND d\.member_id = p_member/, f.name);
-      if (b.includes('public.team_members')) assert.match(b, /tm\.team_id = (v_team|p_team)/, f.name);
+      if (f.name === 'mcp_data.list_teams') assert.match(b, /WHERE v_team IS NULL OR t\.id = v_team/, 'list_teams: an All-teams admin sees every team, a team admin only theirs');
+      else if (b.includes('public.team_members')) assert.match(b, /tm\.team_id = (v_team|p_team)/, f.name);
       if (/public\.(sync_sessions|session_turns)/.test(b)) assert.match(b, /EXISTS \(SELECT 1 FROM public\.team_members tm WHERE tm\.team_id = p_team AND tm\.member_id = (s|ss)\.member_id\)/, `${f.name}: current membership`);
     }
   });
   it('the internal row functions take a team id, but they are not callable by the reader and are only called with the derived team', () => {
     const internal = FNS.filter((f) => !f.callable && /\bp_team\b/.test(f.args)).map((f) => f.name).sort();
-    assert.deepEqual(internal, ['mcp_data._prompt_rows', 'mcp_data._session_rows']);
+    assert.deepEqual(internal, ['mcp_data._prompt_rows', 'mcp_data._resolve_scope', 'mcp_data._session_rows']);
     for (const f of FNS.filter((x) => x.callable)) for (const m of f.body.matchAll(/mcp_data\._(session|prompt)_rows\(\s*(\w+)/g)) assert.equal(m[2], 'v_team', `${f.name} must pass only the derived team`);
     for (const g of READER.functions) assert.doesNotMatch(g, /_session_rows|_prompt_rows|_resolve_scope/);
   });
   it('another team, a non-member and a missing row are indistinguishable: fixed error messages, no value in any message', () => {
     const msgs = [...MIG.matchAll(/RAISE EXCEPTION '([^']*)'/g)].map((m) => m[1]);
     assert.ok(msgs.length >= 15);
-    const allowed = new Set(['mcp_data: unauthorized', 'mcp_data: not_found', 'mcp_data: invalid_argument', 'mcp_data: window_too_large', 'mcp_data: window_out_of_range', 'mcp_data: limit_exceeded']);
+    const allowed = new Set(['mcp_data: unauthorized', 'mcp_data: not_found', 'mcp_data: invalid_argument', 'mcp_data: window_too_large', 'mcp_data: window_out_of_range', 'mcp_data: limit_exceeded', 'mcp_data: team_required', 'mcp_data: team_mismatch']);
     const inBodies = FNS.flatMap((f) => [...f.body.matchAll(/RAISE EXCEPTION '([^']*)'/g)].map((m) => m[1]));
-    assert.ok(inBodies.length >= 20 && inBodies.every((m) => allowed.has(m)), 'function bodies raise only the six fixed messages');
+    assert.ok(inBodies.length >= 20 && inBodies.every((m) => allowed.has(m)), 'function bodies raise only the eight fixed messages');
     for (const f of FNS) assert.doesNotMatch(f.body, /RAISE EXCEPTION[^;]*%/, `${f.name}: no interpolated message`);
     const codes = Object.fromEntries(FNS.flatMap((f) => [...f.body.matchAll(/RAISE EXCEPTION '(mcp_data: \w+)' USING ERRCODE = '(\w+)'/g)].map((m) => [m[1], m[2]])));
-    assert.deepEqual(codes, { 'mcp_data: unauthorized': '28000', 'mcp_data: invalid_argument': '22023', 'mcp_data: window_too_large': '22023', 'mcp_data: window_out_of_range': '22023', 'mcp_data: limit_exceeded': '54000', 'mcp_data: not_found': 'P0002' });
+    assert.deepEqual(codes, { 'mcp_data: unauthorized': '28000', 'mcp_data: invalid_argument': '22023', 'mcp_data: window_too_large': '22023', 'mcp_data: window_out_of_range': '22023', 'mcp_data: limit_exceeded': '54000', 'mcp_data: not_found': 'P0002', 'mcp_data: team_required': '22023', 'mcp_data: team_mismatch': '22023' });
   });
   it('the details function treats a non-member or out-of-lookback session as not found, never as an empty success', () => {
     const d = FNS.find((f) => f.name === 'mcp_data.session_details')!.body.replace(/\s+/g, ' ');
@@ -314,7 +323,7 @@ describe('metadata only: no prompt text, no label, no events, no path, no creden
     assert.match(MIG, /'YYYY-MM-DD"T"HH24:MI:SS\.MS"Z"'/);
   });
   it('the owner role is granted COLUMNS (never a whole table), and none of the forbidden ones', () => {
-    assert.ok(Object.keys(OWNER.select).length === 10);
+    assert.ok(Object.keys(OWNER.select).length === 11);
     for (const line of GRANT.match(/GRANT SELECT[^;]*;/g) ?? []) assert.match(line, /^GRANT SELECT \([a-z_, ]+\) ON public\.\w+ TO mcp_data_owner;$/, line);
     for (const [t, cols] of Object.entries(OWNER.select)) for (const c of cols) assert.ok(!FORBIDDEN.includes(c), `${t}.${c}`);
     assert.ok(!OWNER.select.session_turns.includes('prompt_text_sanitized') && !OWNER.select.sync_sessions.some((c) => ['label', 'events', 'agent', 'payload_hash'].includes(c)) && !OWNER.select.daily_member_usage.includes('project'));
@@ -422,7 +431,7 @@ describe('search_path: the effective parsed setting', () => {
     }
     assert.ok(MIG.includes(`c = 'search_path=${EXPECTED.join(', ')}'`));
     const created = (parseSync(MIG_RAW).stmts ?? []).map((x: Node) => x.stmt.CreateFunctionStmt).filter(Boolean);
-    assert.equal(created.length, 13);
+    assert.equal(created.length, 14);
     for (const c of created) { const opt = c.options.find((o: Node) => o.DefElem.defname === 'set').DefElem.arg.VariableSetStmt; assert.deepEqual(opt.args.map((a: Node) => a.A_Const.sval.sval), EXPECTED); }
   });
 });
@@ -441,9 +450,9 @@ describe('grants file', () => {
     assert.doesNotMatch(GRANT, /ALTER ROLE mcp_reader CONNECTION LIMIT|REVOKE\s+ALL|REVOKE\s+(SELECT|USAGE|EXECUTE)/i);
     assert.ok(GRANT.includes(`rd.rolconnlimit <> ${READER.connectionLimit}`), 'the limit is VALIDATED (provisioned by the role script), not changed');
   });
-  it('the reader holds NO table, column, sequence or other privilege: only schema USAGE and EXECUTE on exactly the six functions', () => {
+  it('the reader holds NO table, column, sequence or other privilege: only schema USAGE and EXECUTE on exactly the seven functions', () => {
     const forReader = (GRANT.match(/GRANT [^;]*TO mcp_reader;/g) ?? []);
-    assert.equal(forReader.length, 7);
+    assert.equal(forReader.length, 8); // schema USAGE plus the seven functions
     for (const g of forReader) assert.match(g, /^GRANT (USAGE ON SCHEMA mcp_data|EXECUTE ON FUNCTION mcp_data\.\w+\([^)]*\)) TO mcp_reader;$/);
     assert.deepEqual(READER.select, {}); assert.deepEqual(READER.insert, {}); assert.deepEqual(READER.update, {}); assert.deepEqual(READER.sequences, []);
     assert.deepEqual(READER.functions.map((s) => s.replace(/\s+/g, ' ')).sort(), FNS.filter((f) => f.callable).map((f) => f.sig).sort());
@@ -477,7 +486,7 @@ describe('effective PUBLIC privileges: nothing is revoked globally; the grants F
     for (const frag of ["has_table_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')", "has_any_column_privilege('mcp_reader', c.oid, 'SELECT,INSERT,UPDATE,REFERENCES')", "has_sequence_privilege('mcp_reader', c.oid, 'USAGE,SELECT,UPDATE')",
       "has_schema_privilege('mcp_reader', ns.oid, 'CREATE')", "has_database_privilege('mcp_reader', pg_catalog.current_database(), 'CREATE')", "has_schema_privilege('mcp_reader', v_schema, 'USAGE')", 'p.prosecdef', "has_function_privilege('mcp_reader', p.oid, 'EXECUTE')", 'pg_read_file', 'lo_import']) assert.ok(end.includes(frag), frag);
     assert.ok(GRANT.lastIndexOf("has_table_privilege('mcp_reader'") > GRANT.indexOf('GRANT EXECUTE ON FUNCTION') && GRANT.lastIndexOf("has_table_privilege('mcp_reader'") > GRANT.indexOf('REVOKE SET OPTION FOR'), 'the post-condition is checked last, after the temporary membership is gone');
-    assert.match(GRANT, /<> 6 THEN RAISE EXCEPTION 'mcp_reader must be able to execute exactly the six reader functions'/);
+    assert.match(GRANT, /<> 7 THEN RAISE EXCEPTION 'mcp_reader must be able to execute exactly the seven reader functions'/);
   });
   it('CONNECT, TEMPORARY and USAGE on schema public are deliberately NOT removed (CONNECT is required to log in); they are documented as residual and reported by the audit', () => {
     assert.match(GRANT_RAW, /CONNECT, TEMPORARY, USAGE on public/); assert.match(AUDIT_RAW, /TEMPORARY = true or false \(residual/);
@@ -525,8 +534,8 @@ describe('privilege baseline: nothing is revoked; unexpected pre-existing grants
     }
     assert.match(BEFORE(), /IF n_bad > 0 THEN RAISE EXCEPTION 'mcp_data_owner appears in ACL entries outside the expected set \(a pre-existing grant\); refusing, nothing was changed'/);
     assert.match(BEFORE(), /RAISE EXCEPTION 'mcp_data_owner already holds PART of the expected grants \(partial baseline\)/);
-    assert.match(BEFORE(), /IF n_total NOT IN \(0, 7\) THEN RAISE EXCEPTION 'mcp_reader already holds PART/);
-    assert.match(AFTER(), /IF n_total <> 7 THEN RAISE EXCEPTION 'mcp_reader ACL footprint is not exactly the expected set'/);
+    assert.match(BEFORE(), /IF n_total NOT IN \(0, 8\) THEN RAISE EXCEPTION 'mcp_reader already holds PART/);
+    assert.match(AFTER(), /IF n_total <> 8 THEN RAISE EXCEPTION 'mcp_reader ACL footprint is not exactly the expected set'/);
     assert.match(AFTER(), /IF n_total <> n_expected THEN RAISE EXCEPTION 'mcp_data_owner ACL footprint is not exactly the expected set'/);
   });
   it('the SQL column allowlist is exactly grants.json, in every block that uses it (baseline footprint, baseline effective, post footprint, post effective)', () => {
@@ -582,9 +591,9 @@ describe('changes made while applying to PostgreSQL (P3-4): guards for the paths
     for (const f of ['pg_cancel_backend', 'pg_terminate_backend', 'pg_logical_emit_message']) { assert.ok(!fatal.includes(f), `${f} is not fatal`); assert.ok(AUDIT.includes(`'${f}'`) && /6b residual builtin/.test(AUDIT), `${f} is reported by the audit`); }
     assert.match(read('MCP.md'), /pg_logical_emit_message/);
   });
-  it('the baseline accepts the reader executing none or exactly six mcp_data functions (a re-run), and the post-condition requires exactly six', () => {
-    assert.ok(GRANT.includes("has_function_privilege('mcp_reader', p.oid, 'EXECUTE')) NOT IN (0, 6) THEN RAISE EXCEPTION"));
-    assert.ok(GRANT.includes("has_function_privilege('mcp_reader', p.oid, 'EXECUTE')) <> 6 THEN RAISE EXCEPTION 'mcp_reader must be able to execute exactly the six reader functions'"));
+  it('the baseline accepts the reader executing none or exactly seven mcp_data functions (a re-run), and the post-condition requires exactly seven', () => {
+    assert.ok(GRANT.includes("has_function_privilege('mcp_reader', p.oid, 'EXECUTE')) NOT IN (0, 7) THEN RAISE EXCEPTION"));
+    assert.ok(GRANT.includes("has_function_privilege('mcp_reader', p.oid, 'EXECUTE')) <> 7 THEN RAISE EXCEPTION 'mcp_reader must be able to execute exactly the seven reader functions'"));
   });
   it('the reader may have only the migration role\'s ADMIN-only link as a member (the implicit CREATE ROLE link), and is never a member of anything', () => {
     assert.ok(GRANT.includes("m.member = rd.oid) THEN RAISE EXCEPTION 'mcp_reader is a member of another role'"));
@@ -615,9 +624,20 @@ describe('rollback: explicit, narrow, idempotent', () => {
     assert.ok(!resets.includes('connection_limit'));
     assert.deepEqual([...ROLL.matchAll(/REVOKE [^;]*FROM mcp_reader;/g)].map((m) => m[0]), ['REVOKE ALL ON ALL FUNCTIONS IN SCHEMA mcp_data FROM mcp_reader;', 'REVOKE ALL ON SCHEMA mcp_data FROM mcp_reader;']);
   });
-  it('drops exactly the thirteen functions and the schema, each explicit and IF EXISTS; reader functions before the helpers they call; then the marked role', () => {
-    const dropped = [...ROLL.matchAll(/DROP FUNCTION IF EXISTS (mcp_data\.\w+)\(([^)]*)\);/g)].map((m) => `${m[1]}(${normArgs(m[2])})`).sort();
-    assert.deepEqual(dropped, FNS.map((f) => f.sig).sort());
+  it('drops exactly the fourteen functions (and the earlier signatures of the six data functions and _resolve_scope, so a database still on the first version rolls back too) and the schema, each explicit and IF EXISTS; reader functions before the helpers they call; then the marked role', () => {
+    const dropped = [...ROLL.matchAll(/DROP FUNCTION IF EXISTS (mcp_data\.\w+)\(([^)]*)\);/g)].map((m) => `${m[1]}(${normArgs(m[2])})`);
+    const current = FNS.map((f) => f.sig);
+    for (const sig of current) assert.ok(dropped.includes(sig), `current signature dropped: ${sig}`);
+    const earlier = dropped.filter((d) => !current.includes(d)).sort();
+    assert.deepEqual(earlier, [
+      'mcp_data._resolve_scope(bytea)',
+      'mcp_data.developer_activity(bytea, uuid, timestamptz, timestamptz)',
+      'mcp_data.list_developers(bytea, integer, uuid)',
+      'mcp_data.list_sessions(bytea, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid)',
+      'mcp_data.prompt_metadata_batch(bytea, bigint[])',
+      'mcp_data.search_prompt_metadata(bytea, uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint)',
+      'mcp_data.session_details(bytea, uuid)',
+    ].sort());
     assert.equal([...ROLL.matchAll(/\bDROP FUNCTION\b(?! IF EXISTS)/g)].length, 0);
     assert.match(ROLL, /DROP SCHEMA mcp_data;/);
     const at = (x: string) => ROLL.indexOf(x);

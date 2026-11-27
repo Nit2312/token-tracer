@@ -753,7 +753,7 @@ describe('Phase 4.6: External MCP Client Compatibility', () => {
     currentRefreshToken = tokenData.refresh_token;
   });
 
-  it('Step 4: External client connects over Streamable HTTP and discovers exactly 6 tools', async () => {
+  it('Step 4: External client connects over Streamable HTTP and discovers exactly 7 tools', async () => {
     // 1. Initialize
     const initRes = await fetch(`${serverBaseUrl}/mcp`, {
       method: 'POST',
@@ -798,11 +798,12 @@ describe('Phase 4.6: External MCP Client Compatibility', () => {
     assert.equal(listRes.status, 200);
     const listData = await parseMcpResponse(listRes);
     const toolNames = listData.result.tools.map((t: { name: string }) => t.name);
-    assert.equal(toolNames.length, 6);
+    assert.equal(toolNames.length, 7);
     assert.deepEqual(toolNames.sort(), [
       'developer_activity',
       'list_developers',
       'list_sessions',
+      'list_teams',
       'prompt_metadata_batch',
       'search_prompt_metadata',
       'session_details',

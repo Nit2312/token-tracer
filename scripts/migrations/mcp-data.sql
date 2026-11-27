@@ -1,5 +1,5 @@
 -- MCP data plane (Phase 3, P3-3, revision 2). WRITTEN FOR REVIEW — NOT APPLIED ANYWHERE. Touches no existing table, row, column or privilege.
--- Creates: the NOLOGIN role mcp_data_owner (or validates an exactly-matching pre-existing one), the schema mcp_data, and 13 functions
+-- Creates: the NOLOGIN role mcp_data_owner (or validates an exactly-matching pre-existing one), the schema mcp_data, and 14 functions
 -- (6 callable by mcp_reader, 7 internal helpers). Privileges are NOT here: scripts/migrations/mcp-data.grants.sql owns them (lib/mcp/grants.json is
 -- the source of truth). Rollback: scripts/migrations/mcp-data.rollback.sql. Read-only effective-privilege report: scripts/migrations/mcp-data.audit.sql.
 --
@@ -135,7 +135,7 @@ BEGIN
     END IF;
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND p.proname NOT IN (
          '_safe_ident','_norm_intent','_iso_utc','_check_window','_resolve_scope','_session_rows','_prompt_rows',
-         'list_developers','developer_activity','list_sessions','session_details','search_prompt_metadata','prompt_metadata_batch')) THEN
+         'list_developers','developer_activity','list_sessions','session_details','search_prompt_metadata','prompt_metadata_batch','list_teams')) THEN
       RAISE EXCEPTION 'schema mcp_data holds unexpected functions; refusing';
     END IF;
   END IF;
@@ -200,21 +200,37 @@ END $$;
 
 -- The principal. Mirrors authenticateAccessToken in lib/mcp/oauth/tokens.ts (the resource/audience check is the application's: the database does
 -- not know the public base URL). Returns exactly one row or raises; the caller's identity is NEVER an argument other than the token hash.
-CREATE OR REPLACE FUNCTION mcp_data._resolve_scope(p_token bytea) RETURNS TABLE (user_id uuid, team_id uuid)
+-- Who is calling, and which team do they act on? A team admin acts on their own team (a different p_team is refused). An "All teams" admin (no team AND
+-- listed in public.mcp_all_teams_admins, an explicit grant; a NULL team alone, for instance after a team was deleted, is NOT enough) must name the team
+-- in p_team, which must exist. p_listing = true lets such an admin ask without a team (only mcp_data.list_teams does); the team returned is then NULL.
+CREATE OR REPLACE FUNCTION mcp_data._resolve_scope(p_token bytea, p_team uuid DEFAULT NULL, p_listing boolean DEFAULT false) RETURNS TABLE (user_id uuid, team_id uuid)
 LANGUAGE plpgsql STABLE SET search_path = pg_catalog, pg_temp AS $$
 #variable_conflict use_column
+DECLARE v_user uuid; v_own uuid;
 BEGIN
   IF p_token IS NULL OR pg_catalog.octet_length(p_token) <> 32 THEN RAISE EXCEPTION 'mcp_data: unauthorized' USING ERRCODE = '28000'; END IF;
-  RETURN QUERY
-    SELECT u.id, u.team_id
-      FROM public.oauth_tokens t
-      JOIN public.users u ON u.id = t.user_id
-      JOIN public.oauth_clients c ON c.client_id = t.client_id
-     WHERE t.token_hash = p_token AND t.kind = 'access' AND t.scope = 'mcp:read' AND t.revoked_at IS NULL
-       AND t.expires_at > pg_catalog.now() AND t.absolute_expires_at > pg_catalog.now()
-       AND u.active AND u.role = 'admin' AND EXISTS (SELECT 1 FROM public.teams tm WHERE tm.id = u.team_id)
-       AND c.disabled_at IS NULL;
-  IF NOT FOUND THEN RAISE EXCEPTION 'mcp_data: unauthorized' USING ERRCODE = '28000'; END IF;
+  SELECT u.id, u.team_id INTO v_user, v_own
+    FROM public.oauth_tokens t
+    JOIN public.users u ON u.id = t.user_id
+    JOIN public.oauth_clients c ON c.client_id = t.client_id
+   WHERE t.token_hash = p_token AND t.kind = 'access' AND t.scope = 'mcp:read' AND t.revoked_at IS NULL
+     AND t.expires_at > pg_catalog.now() AND t.absolute_expires_at > pg_catalog.now()
+     AND u.active AND u.role = 'admin'
+     AND ((u.team_id IS NOT NULL AND EXISTS (SELECT 1 FROM public.teams tm WHERE tm.id = u.team_id))
+          OR (u.team_id IS NULL AND EXISTS (SELECT 1 FROM public.mcp_all_teams_admins a WHERE a.user_id = u.id)))
+     AND c.disabled_at IS NULL;
+  IF v_user IS NULL THEN RAISE EXCEPTION 'mcp_data: unauthorized' USING ERRCODE = '28000'; END IF;
+  IF v_own IS NOT NULL THEN
+    IF p_team IS NOT NULL AND p_team <> v_own THEN RAISE EXCEPTION 'mcp_data: team_mismatch' USING ERRCODE = '22023'; END IF;
+    RETURN QUERY SELECT v_user, v_own;
+    RETURN;
+  END IF;
+  IF p_team IS NULL THEN
+    IF p_listing THEN RETURN QUERY SELECT v_user, NULL::uuid; RETURN; END IF;
+    RAISE EXCEPTION 'mcp_data: team_required' USING ERRCODE = '22023';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.teams tm WHERE tm.id = p_team) THEN RAISE EXCEPTION 'mcp_data: not_found' USING ERRCODE = 'P0002'; END IF;
+  RETURN QUERY SELECT v_user, p_team;
 END $$;
 
 -- Sessions of ONE team (internal; the team is already derived). p_session NULL = list mode. Strict team match + current membership.
@@ -295,13 +311,13 @@ END $$;
 -- ── Reader-callable functions (SECURITY DEFINER: they run with mcp_data_owner's column-level read rights) ─────────────────────────────
 
 -- 1. Developers (current members) of the caller's team, ordered by member id. p_after = keyset cursor. Page size at most 50 (+1 probe).
-CREATE OR REPLACE FUNCTION mcp_data.list_developers(p_token bytea, p_limit integer, p_after uuid)
+CREATE OR REPLACE FUNCTION mcp_data.list_developers(p_token bytea, p_limit integer, p_after uuid, p_team uuid DEFAULT NULL)
 RETURNS TABLE (member_id uuid, display_name text, role text)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 #variable_conflict use_column
 DECLARE v_team uuid;
 BEGIN
-  SELECT sc.team_id INTO v_team FROM mcp_data._resolve_scope(p_token) sc;
+  SELECT sc.team_id INTO v_team FROM mcp_data._resolve_scope(p_token, p_team) sc;
   IF p_limit IS NULL OR p_limit < 1 OR p_limit > 51 THEN RAISE EXCEPTION 'mcp_data: limit_exceeded' USING ERRCODE = '54000'; END IF;
   RETURN QUERY
     SELECT m.id, m.display_name, tm.role
@@ -312,7 +328,7 @@ END $$;
 
 -- 2. Daily activity of ONE developer from the daily rollups, UTC days overlapping [p_from, p_to) (a partial day is included whole: the rollup is daily).
 --    Lookback 14 days. A developer who is not a current member of the caller's team is "not found", the same as one that does not exist.
-CREATE OR REPLACE FUNCTION mcp_data.developer_activity(p_token bytea, p_member uuid, p_from timestamptz, p_to timestamptz)
+CREATE OR REPLACE FUNCTION mcp_data.developer_activity(p_token bytea, p_member uuid, p_from timestamptz, p_to timestamptz, p_team uuid DEFAULT NULL)
 RETURNS TABLE (day text, tokens_in bigint, tokens_out bigint, cache_read_tokens bigint, cache_write_tokens bigint, api_cost double precision, session_count bigint,
                tool_calls bigint, tool_errors bigint, edits bigint, additions bigint, deletions bigint, changed_lines bigint, files_touched bigint,
                rework_loops bigint, corrections bigint, abandoned_count bigint)
@@ -320,7 +336,7 @@ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp A
 #variable_conflict use_column
 DECLARE v_team uuid; v_first date; v_end date;
 BEGIN
-  SELECT sc.team_id INTO v_team FROM mcp_data._resolve_scope(p_token) sc;
+  SELECT sc.team_id INTO v_team FROM mcp_data._resolve_scope(p_token, p_team) sc;
   IF p_member IS NULL THEN RAISE EXCEPTION 'mcp_data: invalid_argument' USING ERRCODE = '22023'; END IF;
   PERFORM mcp_data._check_window(p_from, p_to, interval '14 days');
   IF NOT EXISTS (SELECT 1 FROM public.team_members tm WHERE tm.team_id = v_team AND tm.member_id = p_member) THEN RAISE EXCEPTION 'mcp_data: not_found' USING ERRCODE = 'P0002'; END IF;
@@ -341,7 +357,7 @@ BEGIN
 END $$;
 
 -- 3. Session summaries (aggregates only). Newest first, keyset (p_after_ts, p_after_id). Lookback 14 days. Page size at most 25 (+1 probe).
-CREATE OR REPLACE FUNCTION mcp_data.list_sessions(p_token bytea, p_member uuid, p_from timestamptz, p_to timestamptz, p_tool text, p_model text, p_limit integer, p_after_ts timestamptz, p_after_id uuid)
+CREATE OR REPLACE FUNCTION mcp_data.list_sessions(p_token bytea, p_member uuid, p_from timestamptz, p_to timestamptz, p_tool text, p_model text, p_limit integer, p_after_ts timestamptz, p_after_id uuid, p_team uuid DEFAULT NULL)
 RETURNS TABLE (id uuid, member_id uuid, source text, model text, started_at text, ended_at text, activity_at text,
                tokens_in bigint, tokens_out bigint, tokens_cache_read bigint, tokens_cache_write bigint, api_cost double precision, priced boolean,
                edits integer, additions integer, deletions integer, changed_lines integer, files_touched integer, tool_calls integer, tool_errors integer,
@@ -350,7 +366,7 @@ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp A
 #variable_conflict use_column
 DECLARE v_team uuid;
 BEGIN
-  SELECT sc.team_id INTO v_team FROM mcp_data._resolve_scope(p_token) sc;
+  SELECT sc.team_id INTO v_team FROM mcp_data._resolve_scope(p_token, p_team) sc;
   PERFORM mcp_data._check_window(p_from, p_to, interval '14 days');
   IF p_limit IS NULL OR p_limit < 1 OR p_limit > 26 THEN RAISE EXCEPTION 'mcp_data: limit_exceeded' USING ERRCODE = '54000'; END IF;
   IF (p_after_ts IS NULL) <> (p_after_id IS NULL) THEN RAISE EXCEPTION 'mcp_data: invalid_argument' USING ERRCODE = '22023'; END IF;
@@ -360,7 +376,7 @@ END $$;
 
 -- 4. One session: the summary plus per-tool call counts (at most 100, short identifier names only). Not found = absent, another team's, a non-member's,
 --    or older than the 14-day lookback; all identical. Never reads files, label, events, agent or payload hash.
-CREATE OR REPLACE FUNCTION mcp_data.session_details(p_token bytea, p_session uuid)
+CREATE OR REPLACE FUNCTION mcp_data.session_details(p_token bytea, p_session uuid, p_team uuid DEFAULT NULL)
 RETURNS TABLE (id uuid, member_id uuid, source text, model text, started_at text, ended_at text, activity_at text,
                tokens_in bigint, tokens_out bigint, tokens_cache_read bigint, tokens_cache_write bigint, api_cost double precision, priced boolean,
                edits integer, additions integer, deletions integer, changed_lines integer, files_touched integer, tool_calls integer, tool_errors integer,
@@ -369,7 +385,7 @@ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp A
 #variable_conflict use_column
 DECLARE v_team uuid;
 BEGIN
-  SELECT sc.team_id INTO v_team FROM mcp_data._resolve_scope(p_token) sc;
+  SELECT sc.team_id INTO v_team FROM mcp_data._resolve_scope(p_token, p_team) sc;
   IF p_session IS NULL THEN RAISE EXCEPTION 'mcp_data: invalid_argument' USING ERRCODE = '22023'; END IF;
   RETURN QUERY
     SELECT r.id, r.member_id, r.source, r.model, r.started_at, r.ended_at, r.activity_at, r.tokens_in, r.tokens_out, r.tokens_cache_read, r.tokens_cache_write, r.api_cost, r.priced,
@@ -386,7 +402,7 @@ END $$;
 --    Lookback 7 days (turn retention). Page size at most 25 (+1 probe).
 CREATE OR REPLACE FUNCTION mcp_data.search_prompt_metadata(
   p_token bytea, p_member uuid, p_from timestamptz, p_to timestamptz, p_intents text[], p_has_code boolean, p_has_path boolean, p_has_trace boolean,
-  p_min_chars integer, p_max_chars integer, p_tool text, p_model text, p_limit integer, p_after_ts timestamptz, p_after_id bigint)
+  p_min_chars integer, p_max_chars integer, p_tool text, p_model text, p_limit integer, p_after_ts timestamptz, p_after_id bigint, p_team uuid DEFAULT NULL)
 RETURNS TABLE (prompt_id bigint, session_uuid uuid, member_id uuid, turn_index integer, created_at text, tool text, model text, prompt_char_len integer,
                has_code_block boolean, has_file_path boolean, has_traceback boolean, intent_category text,
                answer_input_tokens bigint, answer_output_tokens bigint, answer_cache_read_tokens bigint, answer_cache_write_tokens bigint)
@@ -394,7 +410,7 @@ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp A
 #variable_conflict use_column
 DECLARE v_team uuid;
 BEGIN
-  SELECT sc.team_id INTO v_team FROM mcp_data._resolve_scope(p_token) sc;
+  SELECT sc.team_id INTO v_team FROM mcp_data._resolve_scope(p_token, p_team) sc;
   PERFORM mcp_data._check_window(p_from, p_to, interval '7 days');
   IF p_limit IS NULL OR p_limit < 1 OR p_limit > 26 THEN RAISE EXCEPTION 'mcp_data: limit_exceeded' USING ERRCODE = '54000'; END IF;
   IF (p_after_ts IS NULL) <> (p_after_id IS NULL) THEN RAISE EXCEPTION 'mcp_data: invalid_argument' USING ERRCODE = '22023'; END IF;
@@ -407,7 +423,7 @@ END $$;
 
 -- 6. Prompt metadata for up to 20 ids (decoded from references by the service). Same team/membership rules and 7-day retention; ids that do not
 --    qualify are simply absent, so "missing" and "another team's" cannot be told apart.
-CREATE OR REPLACE FUNCTION mcp_data.prompt_metadata_batch(p_token bytea, p_ids bigint[])
+CREATE OR REPLACE FUNCTION mcp_data.prompt_metadata_batch(p_token bytea, p_ids bigint[], p_team uuid DEFAULT NULL)
 RETURNS TABLE (prompt_id bigint, session_uuid uuid, member_id uuid, turn_index integer, created_at text, tool text, model text, prompt_char_len integer,
                has_code_block boolean, has_file_path boolean, has_traceback boolean, intent_category text,
                answer_input_tokens bigint, answer_output_tokens bigint, answer_cache_read_tokens bigint, answer_cache_write_tokens bigint)
@@ -415,37 +431,53 @@ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp A
 #variable_conflict use_column
 DECLARE v_team uuid;
 BEGIN
-  SELECT sc.team_id INTO v_team FROM mcp_data._resolve_scope(p_token) sc;
+  SELECT sc.team_id INTO v_team FROM mcp_data._resolve_scope(p_token, p_team) sc;
   IF p_ids IS NULL OR pg_catalog.cardinality(p_ids) NOT BETWEEN 1 AND 20 THEN RAISE EXCEPTION 'mcp_data: limit_exceeded' USING ERRCODE = '54000'; END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.unnest(p_ids) AS i(v) WHERE i.v IS NULL OR i.v < 1) THEN RAISE EXCEPTION 'mcp_data: invalid_argument' USING ERRCODE = '22023'; END IF;
   RETURN QUERY SELECT * FROM mcp_data._prompt_rows(v_team, p_ids, NULL::uuid, pg_catalog.now() - interval '7 days', pg_catalog.now() + interval '1 second', NULL::text[], NULL::boolean, NULL::boolean, NULL::boolean,
                                                    NULL::integer, NULL::integer, NULL::text, NULL::text, 20, NULL::timestamptz, NULL::bigint);
 END $$;
 
+-- 7. Teams the caller may act on: an "All teams" admin sees every team (name and current member count); a team admin sees only their own.
+CREATE OR REPLACE FUNCTION mcp_data.list_teams(p_token bytea)
+RETURNS TABLE (team_id uuid, name text, member_count bigint)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+#variable_conflict use_column
+DECLARE v_team uuid;
+BEGIN
+  SELECT sc.team_id INTO v_team FROM mcp_data._resolve_scope(p_token, NULL, true) sc;
+  RETURN QUERY
+    SELECT t.id, t.name, (SELECT pg_catalog.count(*) FROM public.team_members tm WHERE tm.team_id = t.id)
+      FROM public.teams t
+     WHERE v_team IS NULL OR t.id = v_team
+     ORDER BY t.name, t.id LIMIT 200;
+END $$;
+
 -- ── 5. Privileges on the functions: nobody by default (still AS mcp_data_owner) ────────────────────────────────────────────────────────
--- Functions default to EXECUTE for PUBLIC. Remove it from all thirteen; mcp-data.grants.sql re-grants EXECUTE on the six callable ones to mcp_reader only.
+-- Functions default to EXECUTE for PUBLIC. Remove it from all fourteen; mcp-data.grants.sql re-grants EXECUTE on the seven callable ones to mcp_reader only.
 REVOKE ALL ON FUNCTION mcp_data._safe_ident(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION mcp_data._norm_intent(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION mcp_data._iso_utc(timestamptz) FROM PUBLIC;
 REVOKE ALL ON FUNCTION mcp_data._check_window(timestamptz, timestamptz, interval) FROM PUBLIC;
-REVOKE ALL ON FUNCTION mcp_data._resolve_scope(bytea) FROM PUBLIC;
+REVOKE ALL ON FUNCTION mcp_data._resolve_scope(bytea, uuid, boolean) FROM PUBLIC;
 REVOKE ALL ON FUNCTION mcp_data._session_rows(uuid, uuid, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION mcp_data._prompt_rows(uuid, bigint[], uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint) FROM PUBLIC;
-REVOKE ALL ON FUNCTION mcp_data.list_developers(bytea, integer, uuid) FROM PUBLIC;
-REVOKE ALL ON FUNCTION mcp_data.developer_activity(bytea, uuid, timestamptz, timestamptz) FROM PUBLIC;
-REVOKE ALL ON FUNCTION mcp_data.list_sessions(bytea, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid) FROM PUBLIC;
-REVOKE ALL ON FUNCTION mcp_data.session_details(bytea, uuid) FROM PUBLIC;
-REVOKE ALL ON FUNCTION mcp_data.search_prompt_metadata(bytea, uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint) FROM PUBLIC;
-REVOKE ALL ON FUNCTION mcp_data.prompt_metadata_batch(bytea, bigint[]) FROM PUBLIC;
+REVOKE ALL ON FUNCTION mcp_data.list_developers(bytea, integer, uuid, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION mcp_data.developer_activity(bytea, uuid, timestamptz, timestamptz, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION mcp_data.list_sessions(bytea, uuid, timestamptz, timestamptz, text, text, integer, timestamptz, uuid, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION mcp_data.session_details(bytea, uuid, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION mcp_data.search_prompt_metadata(bytea, uuid, timestamptz, timestamptz, text[], boolean, boolean, boolean, integer, integer, text, text, integer, timestamptz, bigint, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION mcp_data.prompt_metadata_batch(bytea, bigint[], uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION mcp_data.list_teams(bytea) FROM PUBLIC;
 
--- Ownership and exposure assertions (as the owner): thirteen functions, all owned by mcp_data_owner, exactly six SECURITY DEFINER, none executable by PUBLIC.
+-- Ownership and exposure assertions (as the owner): fourteen functions, all owned by mcp_data_owner, exactly seven SECURITY DEFINER, none executable by PUBLIC.
 DO $$
 DECLARE v_schema oid := to_regnamespace('mcp_data')::oid; v_owner oid := 'mcp_data_owner'::regrole::oid;
 BEGIN
-  IF (SELECT count(*) FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema) <> 13 THEN RAISE EXCEPTION 'mcp_data must hold exactly 13 functions'; END IF;
+  IF (SELECT count(*) FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema) <> 14 THEN RAISE EXCEPTION 'mcp_data must hold exactly 14 functions'; END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND p.proowner <> v_owner) THEN RAISE EXCEPTION 'a function in mcp_data is not owned by mcp_data_owner'; END IF;
   IF (SELECT n.nspowner FROM pg_catalog.pg_namespace n WHERE n.oid = v_schema) <> v_owner THEN RAISE EXCEPTION 'schema mcp_data is not owned by mcp_data_owner'; END IF;
-  IF (SELECT count(*) FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND p.prosecdef) <> 6 THEN RAISE EXCEPTION 'exactly six functions must be SECURITY DEFINER'; END IF;
+  IF (SELECT count(*) FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND p.prosecdef) <> 7 THEN RAISE EXCEPTION 'exactly seven functions must be SECURITY DEFINER'; END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace = v_schema AND NOT EXISTS (SELECT 1 FROM pg_catalog.unnest(p.proconfig) c WHERE c = 'search_path=pg_catalog, pg_temp')) THEN
     RAISE EXCEPTION 'every function in mcp_data must pin search_path = pg_catalog, pg_temp';
   END IF;

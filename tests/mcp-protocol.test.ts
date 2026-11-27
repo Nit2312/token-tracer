@@ -140,7 +140,7 @@ describe('Phase 4.4: Protocol Handshake and Capabilities', () => {
 });
 
 describe('Phase 4.4: tools/list Discovery', () => {
-  it('tools/list returns exactly the six approved metadata-only tools', async () => {
+  it('tools/list returns exactly the seven approved metadata-only tools', async () => {
     const { status, body } = await result(await rpc('tools/list', {}, 2));
     assert.equal(status, 200);
     assert.equal(body.jsonrpc, '2.0');
@@ -148,13 +148,14 @@ describe('Phase 4.4: tools/list Discovery', () => {
 
     const tools = body.result.tools;
     assert.ok(Array.isArray(tools));
-    assert.equal(tools.length, 6);
+    assert.equal(tools.length, 7);
 
     const toolNames = tools.map((t: { name: string }) => t.name).sort();
     assert.deepEqual(toolNames, [
       'developer_activity',
       'list_developers',
       'list_sessions',
+      'list_teams',
       'prompt_metadata_batch',
       'search_prompt_metadata',
       'session_details',
